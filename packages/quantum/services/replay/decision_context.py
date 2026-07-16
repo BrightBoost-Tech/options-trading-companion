@@ -22,6 +22,7 @@ from packages.quantum.services.replay.canonical import (
     compute_aggregate_hash,
     compute_content_hash,
 )
+from packages.quantum.observability.lineage import resolve_git_sha
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,11 @@ class DecisionContext:
     _committed: bool = field(default=False, repr=False)
 
     def __post_init__(self):
+        # Resolve the full deployment SHA at the writer boundary.  This repairs
+        # handlers that pass the Docker placeholder "unknown" while preserving
+        # an explicit real SHA supplied by replay/tests.
+        self.git_sha = resolve_git_sha(self.git_sha)
+
         # Ensure as_of_ts is timezone-aware
         if self.as_of_ts.tzinfo is None:
             self.as_of_ts = self.as_of_ts.replace(tzinfo=timezone.utc)
@@ -366,7 +372,7 @@ class DecisionContext:
             ]
 
             # 4. Try atomic RPC commit
-            rpc_success = self._commit_via_rpc(
+            rpc_result = self._commit_via_rpc(
                 supabase,
                 input_hash=input_hash,
                 features_hash=features_hash,
@@ -377,19 +383,20 @@ class DecisionContext:
                 features_jsonb=features_jsonb,
             )
 
-            if rpc_success:
+            if rpc_result:
                 stats["inputs_count"] = len(inputs_jsonb)
                 stats["features_count"] = len(features_jsonb)
                 stats["commit_method"] = "rpc"
-                # The RPC's signature predates tape_integrity — stamp it with
-                # a follow-up update (best effort; the column is annotation).
-                try:
-                    supabase.table("decision_runs").update(
-                        {"tape_integrity": tape_integrity}
-                    ).eq("decision_id", str(self.decision_id)).execute()
-                except Exception as ti_err:
-                    logger.warning(
-                        f"tape_integrity stamp failed (non-fatal): {ti_err}")
+                was_update = (
+                    rpc_result.get("was_update") is True
+                    or rpc_result.get("commit_status") == "updated"
+                )
+                stats["rpc_was_update"] = was_update
+                self._stamp_rpc_header(
+                    supabase,
+                    tape_integrity=tape_integrity,
+                    require_affected=was_update,
+                )
             else:
                 # Fallback to sequential inserts if RPC fails. Pass the
                 # FILTERED inputs (gate guarantee) — rebuilding from
@@ -419,6 +426,13 @@ class DecisionContext:
         except Exception as e:
             logger.error(f"DecisionContext commit failed: {e}")
             stats["error"] = str(e)
+            stats["error_type"] = (
+                "decision_run_stamp_failed"
+                if str(e).startswith("decision_run_stamp_failed:")
+                else "decision_commit_failed"
+            )
+            stats["status"] = "failed"
+            stats["tape_integrity"] = "commit_failed"
 
             # Try to write failed decision_run for traceability (don't duplicate)
             self._try_mark_failed(supabase, str(e))
@@ -435,11 +449,14 @@ class DecisionContext:
         error_summary: Optional[str],
         inputs_jsonb: List[Dict],
         features_jsonb: List[Dict],
-    ) -> bool:
+    ) -> Optional[Dict[str, Any]]:
         """
         Commit decision atomically via RPC function.
 
-        Returns True if RPC succeeded, False if should fallback.
+        Returns the production RPC result row when successful, otherwise None
+        so the caller can use the sequential fallback. The row's was_update
+        field is load-bearing: an existing decision needs an authoritative
+        follow-up SHA/tape stamp rather than a best-effort annotation.
         """
         try:
             result = supabase.rpc("rpc_commit_decision_v4", {
@@ -459,14 +476,58 @@ class DecisionContext:
 
             if result.data:
                 logger.debug(f"RPC commit succeeded: {result.data}")
-                return True
+                row = (
+                    result.data[0]
+                    if isinstance(result.data, list)
+                    else result.data
+                )
+                if isinstance(row, dict):
+                    return row
+                return {"commit_status": "unknown", "was_update": False}
 
-            return False
+            return None
 
         except Exception as e:
             # RPC might not exist yet - fall back to sequential
             logger.debug(f"RPC commit failed, falling back: {e}")
-            return False
+            return None
+
+    def _stamp_rpc_header(
+        self,
+        supabase,
+        *,
+        tape_integrity: str,
+        require_affected: bool,
+    ) -> None:
+        """Stamp fields omitted by the RPC's existing-row update path.
+
+        A newly inserted RPC row already receives p_git_sha; its
+        tape-integrity annotation retains the pre-existing best-effort
+        behavior. For was_update=True, however, this is the only writer of
+        the current deployment SHA. An exception or zero-row result is
+        therefore a typed commit failure, never a green stale-provenance tape.
+        """
+        try:
+            result = supabase.table("decision_runs").update({
+                "tape_integrity": tape_integrity,
+                "git_sha": self.git_sha,
+            }).eq("decision_id", str(self.decision_id)).execute()
+        except Exception as exc:
+            if require_affected:
+                raise RuntimeError(
+                    f"decision_run_stamp_failed: update_error: {exc}"
+                ) from exc
+            logger.warning(f"tape_integrity stamp failed (non-fatal): {exc}")
+            return
+
+        if require_affected:
+            rows = getattr(result, "data", None)
+            if not isinstance(rows, list) or len(rows) != 1:
+                count = len(rows) if isinstance(rows, list) else 0
+                raise RuntimeError(
+                    "decision_run_stamp_failed: "
+                    f"expected_one_row_got_{count}"
+                )
 
     def _commit_sequential(
         self,
@@ -534,30 +595,36 @@ class DecisionContext:
             supabase.table("decision_features").insert(feature_rows).execute()
 
     def _try_mark_failed(self, supabase, error_msg: str) -> None:
-        """Try to mark decision as failed without duplicating."""
+        """Best-effort failed-row write without mistaking zero updates for one."""
         try:
-            # Try update first (in case it already exists)
-            supabase.table("decision_runs").update({
+            update_result = supabase.table("decision_runs").update({
                 "status": "failed",
                 "error_summary": f"Commit failed: {error_msg[:450]}",
                 "tape_integrity": "commit_failed",
+                "git_sha": self.git_sha,
             }).eq("decision_id", str(self.decision_id)).execute()
+            if getattr(update_result, "data", None):
+                return
         except Exception:
-            # If update fails, try insert
-            try:
-                supabase.table("decision_runs").insert({
-                    "decision_id": str(self.decision_id),
-                    "strategy_name": self.strategy_name,
-                    "as_of_ts": self.as_of_ts.isoformat(),
-                    "user_id": self.user_id,
-                    "status": "failed",
-                    "error_summary": f"Commit failed: {error_msg[:450]}",
-                    "inputs_count": 0,
-                    "features_count": 0,
-                    "tape_integrity": "commit_failed",
-                }).execute()
-            except Exception:
-                pass  # Best effort
+            pass
+
+        # An update that succeeds with zero affected rows means no header
+        # exists. Insert the trace row just as we do for an update exception.
+        try:
+            supabase.table("decision_runs").insert({
+                "decision_id": str(self.decision_id),
+                "strategy_name": self.strategy_name,
+                "as_of_ts": self.as_of_ts.isoformat(),
+                "user_id": self.user_id,
+                "git_sha": self.git_sha,
+                "status": "failed",
+                "error_summary": f"Commit failed: {error_msg[:450]}",
+                "inputs_count": 0,
+                "features_count": 0,
+                "tape_integrity": "commit_failed",
+            }).execute()
+        except Exception:
+            pass  # Best effort
 
     def get_input_hash(self) -> Optional[str]:
         """Compute current input hash (for testing/debugging)."""

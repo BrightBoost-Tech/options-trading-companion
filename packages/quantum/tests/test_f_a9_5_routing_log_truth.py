@@ -1,3 +1,6 @@
+# Live prerequisite satisfied 2026-07-15 14:32Z on bef2cdd: the natural SOFI
+# prerejection preserved the champion outcome and produced both challenger
+# observations; this suite remains the code-side non-interference proof.
 """F-A9-5 — cohort-decision logging must report the REAL routing decision.
 
 KNOWN DEFECT (bef2cdd): `_filter_for_cohort` routes on

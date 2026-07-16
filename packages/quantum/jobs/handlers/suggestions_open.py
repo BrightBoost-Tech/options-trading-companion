@@ -291,7 +291,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         # counts.failed:0 through 11 failed suggestion_rejections inserts —
         # the failure was buried in cycle_results[].counts where the A4
         # silent-failure detector (which reads counts.errors) cannot see it.
-        counts["errors"] = _persist_error_rollup(cycle_results)
+        # A per-user cycle death is an origin-to-top failure too.  Before
+        # F-MIDDAY this lived only in counts.failed, which the runner does not
+        # classify; include it in the canonical counts.errors channel so a
+        # position-read abort is persisted partial rather than green.
+        counts["errors"] = failed + _persist_error_rollup(cycle_results)
 
         timing_ms = (time.time() - start_time) * 1000
 

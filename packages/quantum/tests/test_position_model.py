@@ -950,6 +950,88 @@ class TestNormalization(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Adversarial constructor and identity invariants
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestAdversarialModelInvariants(unittest.TestCase):
+    def test_close_actions_describe_the_position_being_closed(self):
+        raw = _persisted_short_put_vertical()
+        raw["legs"][0]["action"] = "BTC"  # closes a short leg
+        raw["legs"][1]["action"] = "STC"  # closes a long leg
+        pos = normalize_position(raw)
+        by_strike = {leg.strike: leg.signed_ratio for leg in pos.legs}
+        self.assertEqual(by_strike, {100.0: -1, 95.0: +1})
+
+    def test_leg_greeks_reject_bool_nan_and_infinity(self):
+        for field in ("delta", "gamma", "vega", "theta"):
+            for bad in (True, float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, bad=bad):
+                    kwargs = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+                    kwargs[field] = bad
+                    with self.assertRaises(PositionNormalizationError):
+                        LegGreeks(**kwargs)
+
+    def test_direct_leg_constructor_rejects_bool_scalars(self):
+        for field in ("strike", "multiplier"):
+            with self.subTest(field=field):
+                kwargs = {
+                    "occ_symbol": _occ("SPY", "P", 100.0),
+                    "underlying": "SPY",
+                    "expiry": EXPIRY,
+                    "option_type": OptionType.PUT,
+                    "strike": 100.0,
+                    "signed_ratio": -1,
+                    "multiplier": 100.0,
+                }
+                kwargs[field] = True
+                with self.assertRaises(PositionNormalizationError) as ctx:
+                    CanonicalLeg(**kwargs)
+                self.assertIs(ctx.exception.reason, RejectReason.BOOL_NOT_ALLOWED)
+
+    def test_position_rejects_nonfinite_or_bool_cashflow(self):
+        for bad in (True, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PositionNormalizationError):
+                    _position(
+                        [_leg("SPY", "P", 100.0, -1)],
+                        total_entry_cashflow=bad,
+                    )
+
+    def test_entry_cashflow_rejects_nonpositive_structure_quantity(self):
+        for bad in (0, -1):
+            with self.subTest(quantity=bad):
+                with self.assertRaises(PositionNormalizationError) as ctx:
+                    entry_cashflow_from_net_premium(1.20, True, bad, 100.0)
+                self.assertIs(
+                    ctx.exception.reason,
+                    RejectReason.NON_POSITIVE_STRUCTURE_QUANTITY,
+                )
+
+    def test_position_rejects_duplicate_expected_occ_symbols(self):
+        leg = _leg("SPY", "P", 100.0, -1)
+        with self.assertRaises(PositionNormalizationError) as ctx:
+            _position([leg, leg], total_entry_cashflow=120.0)
+        self.assertIs(ctx.exception.reason, RejectReason.DUPLICATE_LEG)
+
+    def test_reconciliation_reports_duplicate_observed_occ_symbols(self):
+        short = ObservedLeg(
+            occ_symbol=_occ("SPY", "P", 100.0), signed_contracts=-2
+        )
+        observed = [
+            short,
+            short,
+            ObservedLeg(
+                occ_symbol=_occ("SPY", "P", 95.0), signed_contracts=+2
+            ),
+        ]
+        report = reconcile_legs(_f1_short_put_vertical(), observed)
+        self.assertFalse(report.matched)
+        self.assertEqual(len(report.duplicated), 1)
+        self.assertEqual(report.duplicated[0].observed, 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Non-interference — PR-1's core contract
 # ══════════════════════════════════════════════════════════════════════════
 

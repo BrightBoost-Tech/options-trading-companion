@@ -3,7 +3,7 @@
 # any fact that changes (equity, OBP, positions, counts, phase, flag value)
 # is a POINTER to its source of truth, never an embedded number. Stale
 # embedded state caused real phantom reads; this structure is the fix.
-# Rewritten 2026-06-13; registry/liars/audit synced 2026-07-02 (≤40k chars).
+# Rewritten 2026-06-13; orchestration/evidence contract synced 2026-07-16.
 # Pre-rewrite snapshots: docs/history.md (pre-06-10), git history of this
 # file. Running SHA + flags: verify on Railway (§2), never trust this file
 # for a value.
@@ -646,6 +646,56 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   smaller one. Degraded inputs must block the decision or preserve its
   shape — never silently re-parameterize it. Null-tolerate every optional
   field in external API parses; fail loud BY NAME on required ones.
+
+---
+
+## 10. ORCHESTRATION & EVIDENCE CONTRACT
+
+- **Pin and partition before parallel work.** Ground host, DB, and broker
+  clocks where those truth sources are available; otherwise state the missing
+  access explicitly. Record `origin/main`, the Railway-deployed SHA, and each
+  target PR's base/head/CI state. Enumerate changed files before assigning
+  lanes. One active owner per file; shared docs and `CLAUDE.md` belong to the
+  final reconciliation lane unless ownership is explicitly transferred.
+- **Keep proof layers separate.** Label material claims `VERIFIED-CODE`,
+  `VERIFIED-MERGE`, `VERIFIED-CI`, `VERIFIED-RUNTIME`, `INFERRED`, or
+  `NOT_PROVEN`. Green tests prove only their exercised route; a merge proves
+  neither deployment nor behavior. No qualifying natural event is
+  `INCONCLUSIVE`, never PASS. Use §9's origin-to-top rule for every defect.
+- **Empty data is not a failed read.** A successful zero-row result and a DB,
+  broker, or provider failure require different typed outcomes. Position,
+  order, and capital reads must never turn an exception into `[]`, zero, or a
+  fabricated default that makes the book look flat; propagate the error until
+  the top-level job is partial/failed or the decision is blocked.
+- **Routing intent is not execution fact.** `routing_mode='live_eligible'`
+  does not mean broker-live. Only `execution_mode='alpaca_live'` identifies
+  the broker-filled cohort; paper/internal/shadow modes stay separate in every
+  headline, denominator, calibration cohort, and falsifier.
+- **State economic basis and unit before comparing values.** Scanner/
+  orchestrator `ev` and `ev_raw` are per one structure-contract; served `ev`
+  may be calibrated while `ev_raw` remains separate. `rank_at_decision` is
+  ordinal, canonical RAeV is a dimensionless ratio, and account equity is
+  capital—not position P&L. Never threshold, aggregate, or compare a value
+  whose basis, unit, quantity scaling, and provenance are unknown.
+- **An experiment may claim only what it observes.** Raw-candidate
+  eligibility is not entry selection, capacity evaluation, execution, or
+  outcome evidence. Shadow fills and $100k-era cohort ledgers do not prove
+  live edge for the small account; preserve historical epochs and create a
+  versioned prospective cohort instead of rewriting history.
+- **Evidence clocks reset only for a named causal change.** Record the UTC
+  boundary, full SHA, population, decision mechanism, and capture state.
+  Merge/recycle/container restart alone does not reset a window. A real
+  semantic, population, decision, or capture-integrity change may reset it;
+  otherwise retain the original boundary and report `START UNVERIFIED` when
+  the exact first natural event is unknown.
+- **Close lanes in order.** Reproduce against the pinned base, make the
+  minimal patch, prove champion/control non-interference where applicable,
+  rebase, adversarially review, rerun fresh CI, then grade the natural runtime
+  falsifier. Update backlog, ledger, audit result, and this doctrine only
+  after code lanes settle; deduplicate by extending the canonical item.
+
+Pointers: `docs/backlog.md`, `audit/ledger.md`, and
+`docs/review/external-full-audit-v1.5-results-2026-07-15.md`.
 
 ---
 

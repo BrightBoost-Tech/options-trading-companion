@@ -15,9 +15,25 @@ Proof labels: `VERIFIED-CODE` · `VERIFIED-TEST-REACH` · `ATTESTED-RUNTIME` (di
 - Worktree `wt-reconcile-0714` production `.py` == bef2cdd (byte-diff = docs + `test_docs_consistency.py` only) — reads are authoritative.
 - Runtime falsifiers already graded PASS this session (ATTESTED-RUNTIME): #1200 SOFI natural falsifier PASS; #1201 calibration PASS (8 live outcomes, ev×0.5/pop×0.5); #1201 thesis PASS (execution-mode split, alpaca_live 5/7 distinct from routing); tape 9 blobs/day all `complete`; `decision_runs.git_sha='unknown'` 12/12.
 
+### 1a. Canonical denominators (kept separate everywhere — never "live n")
+
+| Denominator | Value | Label |
+|---|---|---|
+| All broker-live closes, total history | **9** | ATTESTED-RUNTIME/ledger (8 post-epoch in v3 + 1 pre-epoch NFLX 06-08 walled by `CALIBRATION_EV_EPOCH`, not in the v3 pool) |
+| Post-epoch broker-live closes (calibration pool) | **8** | ATTESTED-RUNTIME (`learning_trade_outcomes_v3 is_paper=false`) |
+| Broker-live thesis rows, total | **12** | ATTESTED-RUNTIME (`position_thesis_outcomes execution_mode=alpaca_live`) |
+| Broker-live **scored** thesis rows | **7** (5 hit / 2 miss = 5/7) | ATTESTED-RUNTIME |
+| Broker-live thesis rows **in-progress** | **5** | ATTESTED-RUNTIME (future expiries; `in_progress` ≠ position-open) |
+| Phase-3 instrumented/eligible live-close fills | **~3 of 10–15** | ATTESTED-RUNTIME (2 with computable `gap_fraction`) |
+
+Realized broker-live P&L = **1W/7L, ≈ −$178** post-epoch (ATTESTED-RUNTIME). `live_eligible` (routing) ≠ `alpaca_live` (broker execution) — never conflate.
+
+### 1b. Credential disposition (B9)
+`OPERATOR-ATTESTED: affected credentials rotated and revoked; exact classes/date not persisted in this audit to avoid fabricating provenance.` Recorded by credential class only — no value, fragment, fingerprint, account identifier, or secret-shaped text. This is a **distinct** disposition from the older `F-FREE-1` (`LOCAL-ONLY-FAKE`, no rotation warranted); the two are not conflated. No independent provider-side verification is claimed.
+
 ## 2. Executive verdict
 
-Signal quality is sound; execution and evidence-integrity carry the risk. **Two live-entry position reads fail OPEN** (`except → return []`), letting a failed DB read masquerade as a flat live book — the strongest new finding (`F-MIDDAY-POSITION-READ-FAILOPEN`, 2 sites). Capital-comparability is broken: all three cohort portfolios (including the live-eligible champion) carry a fabricated `net_liq=$100,000` vs the ~$2,067.86 live book (**48×**), so every cross-cohort P&L/promotion/thesis comparison is basis-broken — **the single first operator decision is to re-seed shadow capital to live scale (A6-2)**. Observe-window instrumentation is largely non-durable (4 of 5 windows are INFO/logs-only, ephemeral). No CRITICAL fires on live money today (book flat, n=8 live closes, learning-mode). No control-loosening is recommended anywhere. **Design score: 87/100** (VERIFIED tape/logging/calibration/thesis closures; capped below 90 by the fail-open reads + capital parity + missing canonical-risk/EV-basis/replay-reader).
+Current broker-live thesis accuracy is **directionally encouraging (5/7 scored at the 2026-07-15 census) and not yet falsified, but signal edge is NOT PROVEN at this sample size** (tiny-n; thesis-hit ≠ net economic edge — realized broker-live profitability is **1W/7L**, and execution, exits, costs, and cross-structure EV semantics remain the leading observed loss mechanisms). Shadow results are NOT used as live evidence, and the economic-ranking signal is **not** sound: A6-3 shows credit/debit/condor candidates are ranked on incoherent EV/probability bases. Two live-entry position reads fail OPEN (`except → return []`) — a *transient/selective* failure or false-empty read followed by successful downstream staging can produce an unsafe entry (`F-MIDDAY-POSITION-READ-FAILOPEN`, 2 sites; the strongest new finding; see §9 for the non-inevitable causality). Capital-comparability is degraded: all three policy-lab portfolios (incl. the live-eligible champion) use a ~$100,000 basis vs the ~$2,067.86 live book (**~48×**) at the dated observation, so raw-dollar P&L / capacity / feasibility / sizing / selected samples are not live-tier comparable. Observe-window instrumentation is largely non-durable (4 of 5 windows INFO/logs-only). No CRITICAL fires on live money today (book flat, post-epoch n=8 live closes, learning-mode). No control-loosening is recommended anywhere. **The single first operator decision** is the shadow-capital epoch (A6-2; see §6 A6-2) — a versioned live-tier observe-only cohort, NOT an in-place re-seed of historical rows. Audit-maturity is `INFERRED` qualitative (see §12 scorecard); it is not a verified profitability/reliability measurement.
 
 ## 3. Current-state reconciliation (code vs packet/attestation)
 
@@ -28,7 +44,7 @@ Signal quality is sound; execution and evidence-integrity carry the risk. **Two 
 | #1199 tape | bytea hex symmetric, atomicity, capture_partial (`blob_store.py:74,333`) | 9 blobs/day complete | none | VERIFIED-CODE + ATTESTED-RUNTIME |
 | git_sha stamped | reads only `GIT_SHA` (Dockerfile `ARG GIT_SHA=unknown`) | 12/12 rows 'unknown' | provenance exists (`RAILWAY_GIT_COMMIT_SHA`) but unwired | VERIFIED-CODE + ATTESTED-RUNTIME |
 | shadow capital | `or 100000` literal (`fork.py:210`, `evaluator.py:251`) is inert — stored net_liq **is** $100k | all 3 portfolios net_liq=$100k; live $2,067.86 | packet "shadows near $100k" understates: champion too | VERIFIED-CODE + ATTESTED-RUNTIME |
-| condor EV model | code default `strict`/0.50/1.00 (`options_scanner.py:214-216`) | env dump shows `CONDOR_EV_MODEL=tail`/0.35/0.6 | code-default ≠ deployed | VERIFIED-CODE + RUNTIME CHECK—NOT RUN (both workers) |
+| condor EV model | code default `strict`/0.50/1.00 (`options_scanner.py:214-216`) | worker service ran the `tail` model (non-secret config flag observed on the worker env, 2026-07-15 ~22:50Z) | code-default ≠ deployed | code = VERIFIED-CODE; deployed value = ATTESTED-RUNTIME (single prior-session read; NOT re-read in this lane). Not re-verified per-worker → `RUNTIME CHECK — NOT RUN` on the *background* worker |
 
 ## 4. E1–E20 exclusion-integrity table (Pass 1)
 
@@ -63,7 +79,7 @@ Signal quality is sound; execution and evidence-integrity carry the risk. **Two 
 |---|---|---|---|---|---|---|---|
 | W1 | `GATE_QTY_FIX_LIVE_ENABLED` | `655c9aa` (WARNING, pre-#1198) | Yes (WARNING) `paper_endpoints.py:1370` | logs-only (flip line) | partly; degenerate at qty=1 | none (centralized `_stage_order_internal`) | **RUNNING (sample-starved)** |
 | W2 | `RISK_BASIS_MAX_LOSS_ENABLED` | #1198 `1386834` | INFO `risk_basis_shadow.py:40,50` | logs-only | yes; would_flip real only at RBE (1/3) | 3 self-gated consumers | **START-UNVERIFIED** |
-| W3 | `BUCKET_CONTROL_ENFORCE` | #1198 `1386834` | INFO + **durable would-block alarm→risk_alerts** (`:1082-1095`, subset) | mostly logs-only | yes; reservation-id==decision-id VERIFIED | **real** (`:636` + endpoint stages bypass) | **START-UNVERIFIED** |
+| W3 | `BUCKET_CONTROL_ENFORCE` | #1198 `1386834` | INFO + **durable would-block alarm→risk_alerts** (`:1082-1095`, subset) | mostly logs-only | partial: reservation **ORDER** exists within one executor process/cycle (`bucket_control` keys on the bucket label), but **no durable reservation identity and no shared scan→executor cycle/decision identity** (`DecisionContext.decision_id` is a fresh UUID; the runner does not pass `job_runs.id` to the handler; the executor heartbeat uses a cohort label as `cycle`) → **retry and cross-job joinability UNPROVEN** (F-WINDOW-1b) | **real** (`:636` + endpoint stages bypass) | **START-UNVERIFIED** |
 | W4 | `CALIBRATION_APPLY_AT_SCORING` | #1198 `1386834` | Yes `[APPLY_ORDER_SHADOW]` | **semi-durable** (count→job_runs.result, mislabeled `universe_size`) | yes (frozen vs calibrated top-5) | single midday call site | **RUNNING** |
 | W5 | composed arm | — | none | none | — | — | **UNSTARTED** |
 
@@ -81,7 +97,7 @@ Signal quality is sound; execution and evidence-integrity carry the risk. **Two 
 
 **A5 EFFICIENCY.** *A5-1 (NOTE):* `FORECAST_V4_ENABLED` gates zero compute (doubly inert). *A5-2 (LOW, NEW):* `decision_runs` has no origin/trigger column → scheduled vs operator vs replay cycles are indistinguishable (gates A1's replay runner). *A5-3 (NOTE):* tape growth ~11 KB/day → TTL near-zero priority. Heartbeat vs reservation identity = doc-hygiene, not a code defect.
 
-**A6 VIABLE-SET.** *A6-1 (PASS):* two-track funnel is queryable without calling the raw clone "selected" (distinct tables/bases). ***A6-2 (HIGH — THE FIRST OPERATOR DECISION):*** all three cohort portfolios carry `net_liq=$100,000` (incl. the live-eligible champion, cash $106,883.75) vs the ~$2,067.86 live book (**48×**); shadow ledgers are ~48× the live basis, so cross-cohort P&L/promotion/thesis comparison is basis-broken. `promotion_normalization` (0.31 discount) mitigates only at promotion scoring under its flag; raw `policy_decisions`/thesis/`learning_trade_outcomes_v3` stay $100k-scaled. The `or 100000` fallback is **inert** (stored net_liq genuinely $100k) — the fix is re-seeding shadow portfolios to live scale, not removing the literal. *A6-3 (HIGH, EXTENDS-E12/⑤):* three incoherent probability bases (credit EV≡$0; debit breakeven-delta; condor raw `|delta|`+fixed severity) all write `suggestion["ev"]` and are jointly sorted by one structure-agnostic ranker (`canonical_ranker.py:63,240`) — a condor's cross-structure rank flips on a severity constant *before* any $-gate. Live mis-rank.
+**A6 VIABLE-SET.** *A6-1 (PASS):* two-track funnel is queryable without calling the raw clone "selected" (distinct tables/bases). ***A6-2 (HIGH — THE FIRST OPERATOR DECISION):*** all three policy-lab portfolios carry `net_liq=$100,000` (incl. the live-eligible champion, cash $106,883.75) vs the ~$2,067.86 live book at the dated observation (**~48×**). Narrowed consequence: raw-dollar **P&L, capacity, feasibility, sizing, and selected samples** are not live-tier comparable; **promotion is partially normalized** where `promotion_normalization` (0.31 discount) is enabled; the **thesis hit/miss LABELS themselves are not notional-scaled** (though capital changes *which* trades enter the sample); and `live_eligible` is **routing, not broker execution**. The `or 100000` fallback is **inert** (stored net_liq genuinely $100k) → removing it is a SEPARATE fail-closed code item (does not repair historical comparability). **Operator decision (this is the first operator decision):** preserve the legacy $100k epoch as non-live-tier evidence; at a clean boundary (no open shadow positions/orders) launch versioned live-tier observe-only cohorts on one shared broker-grounded capital snapshot, persisting `capital_basis`/source/as-of/epoch; freeze cross-epoch promotion until a fresh minimum sample exists. **Never rewrite historical fills/P&L as if they occurred at $2k.** *A6-3 (HIGH, EXTENDS-E12/⑤):* three incoherent probability bases (credit EV≡$0; debit breakeven-delta; condor raw `|delta|`+fixed severity) all write `suggestion["ev"]` and are jointly sorted by one structure-agnostic ranker (`canonical_ranker.py:63,240`) — a condor's cross-structure rank flips on a severity constant *before* any $-gate. Live mis-rank.
 
 **A7 DORMANT PHASE-3 (Pass 1; Pass 2/3 DEFERRED-DORMANT).** *A7-1 (HIGH):* live broker closes = **8 total, last 2026-07-08, 0 in the 7 days to pin** (book flat; entries throttled by streak-breaker + #1101 + 1-shot/day) → the ~10–15-fill gate ETA is **INDETERMINATE/PAUSED, entry-rate-bound**, not close-instrumentation-bound. *A7-2 (MED, EXTENDS-Phase-3):* exit-basis stamp is durable (`order_json`, not logs) but only **2 of 6** close orders have a computable `gap_fraction`; **all 3 most recent closes are fill-only** (cross/mid NULL — resting-GTC/sweep bypasses stage corroboration). Measurement quality improvable; sample size cannot be manufactured. Phase-3 stop doctrine preserved.
 
@@ -119,7 +135,9 @@ Signal quality is sound; execution and evidence-integrity carry the risk. **Two 
 - **Site A (fully silent):** `services/workflow_orchestrator.py:_fetch_positions:2240-2270` — `except Exception: print(...); return []`. Defeats `risk/position_scope.live_routed_portfolio_ids`'s loud-by-contract raise; a failed read = a flat book → bypasses the micro-tier one-at-a-time gate (`:2305 len(positions)>=1`) → oversized/duplicate **live entry**. Only source-string "tested" (`test_workflow_orchestrator_positions_query.py` inspects the source, never drives the seam).
 - **Site B (alerts, not silent):** `services/paper_autopilot_service.py:_get_open_positions_for_risk_check:1328-1343` — `except → alert(...) → return []`; the circuit-breaker's concentration/sector/expiry/stress/earnings envelopes then pass **green-on-vacuum**. Un-hardened sibling of the 3 reads #1195/F-E8-3 fixed; loss brakes separately protected (realized brake fails-safe to broker-true).
 
-Impact: live-entry safety (latent — book flat today). Smallest decision: make BOTH reads fail-CLOSED (re-raise / typed `capture_partial` that aborts entries), keeping `live_ids==[]` as the only legitimate flat-book path. Falsifier: a test injecting a read exception and asserting NO entries stage / breaker fails closed.
+**Causality (narrowed — a failed read is NOT inevitably an unsafe order):** Site A's false-flat affects scan concurrency, open-book risk usage, and small-tier allocation *before* suggestions persist; Site B's false-flat bypasses live-entry envelope inputs *before* the policy-lab executor. Broker reachability exists via `_stage_order_internal → submit_and_track` for `alpaca_live`+`live_eligible`. **But** later same-symbol dedup and the *enabled* utilization gate can independently stop an entry, and a *persistent* outage tends to fail later. **The dangerous case is a transient/selective failure or false-empty read followed by successful downstream staging.**
+Priority: **P1-safety / next live-control build.** **Escalate to `P0-before-next-entry` if** the utilization-gate enforcement is OFF/unproven, any broker-live position is open, or multi-position/qty scaling is enabled.
+Smallest decision: type the unavailable state and make BOTH scan and executor outcomes fail-CLOSED (re-raise / typed `capture_partial` that aborts entries), keeping `live_ids==[]` as the **only** legitimate flat-book path (a legitimate successful empty result must remain distinct and healthy). Acceptance: **route tests proving zero `submit_and_track` calls for BOTH a portfolio-ID exception AND a position-query exception**, and that a genuine empty result still stages/flags healthy. Falsifier: a read-exception test that still reaches `submit_and_track`.
 
 ## 10. Free look
 
@@ -130,7 +148,7 @@ Correctness hunt across execution/close/monitor/brake/streak/ingest/scope/heartb
 | Finding | Requires | Unlocks/gates | Overlaps/shared | Ordering |
 |---|---|---|---|---|
 | F-MIDDAY-POSITION-READ-FAILOPEN (2 sites) | — | live-entry safety | `position_scope`, workflow_orchestrator, paper_autopilot | **first (safety), own lane** |
-| A6-2 shadow-capital parity | DB re-seed (operator) | every cross-cohort comparison, promotion, thesis, A6-3 | shadow portfolios, init_lab, F-POLICY-CAPITAL-FALLBACK (inert) | **first operator decision**; before promotion trust |
+| A6-2 shadow-capital epoch | versioned observe-only cohort + shared capital snapshot (operator) | raw-dollar/capacity/sizing comparability (NOT thesis LABELS); cross-epoch promotion | shadow portfolios, init_lab; F-POLICY-CAPITAL-FALLBACK is a SEPARATE fail-closed code item (literal inert) | **first operator decision**; freeze cross-epoch promotion until fresh min sample; never rewrite historical rows |
 | A6-3 condor mis-rank | ⑤ terminal distribution | viable-set honesty | E12, ⑤, canonical_ranker | with ⑤ (make/fetch) |
 | A1-1 replay runner | A1-1 capture + A5-2 origin | raw-vs-calibrated replay, E19-2B | decision_context, ReplayTruthLayer | after capture |
 | A4-1/A9-2 git_sha | RAILWAY_GIT_COMMIT_SHA env | replay code-drift attribution | GIT-SHA-DECISION-PROVENANCE | one-liner, anytime |
@@ -147,6 +165,42 @@ Correctness hunt across execution/close/monitor/brake/streak/ingest/scope/heartb
 
 **Packet/code disagreements (high-value):** shadow-capital packet understated (champion is $100k too, 48×); condor code-default (strict) ≠ deployed env (tail); "needs_manual_review as routed success" inverted vs code=critical; git_sha provenance available but unwired.
 
-**Design score: 87/100.** Confidence high on code; capped below 90 by: the two fail-open reads, capital parity, missing canonical-risk/EV-basis (raw-vs-calibrated replay), and non-durable observe instrumentation. Missing proof: the 5 RUNTIME CHECKS — NOT RUN in §7.
+**Audit-maturity — `INFERRED` qualitative estimate (NOT a verified measurement; NOT profitability, reliability, or measured efficiency).** No single scalar is asserted. Weighted scorecard (weights sum to 100), evidence per dimension:
+| Dimension | Weight | State | Evidence |
+|---|---|---|---|
+| Instrument/tape integrity | 20 | strong | #1198/#1199 VERIFIED-CODE + 9 blobs/day complete (ATTESTED-RUNTIME) |
+| Exclusion-integrity (E1-E20) | 15 | strong w/ 4 conditionals | §4 |
+| Live-entry safety | 20 | **weak** | 2 fail-open reads (§9) |
+| Capital/EV/cost coherence | 20 | **weak** | A6-2 parity + A6-3 mis-rank + missing canonical-risk |
+| Evidence durability (observe windows) | 15 | **weak** | 4/5 windows ephemeral (§5) |
+| Calendar/clock | 10 | good w/ 1 gap | A10-1 holiday-blind |
+Reproducible reading: the strong dimensions (35 wt) are code+runtime verified; the weak dimensions (55 wt) carry the open risk; 10 wt is good-with-a-gap. **This is an audit-maturity judgement, not a live-money score.** Missing proof: the RUNTIME CHECKS — NOT RUN in §7.
+
+## 13. Charter-completeness matrix
+
+Every v1.5 charter requirement has a populated field or an explicit `NOT_PROVEN / RUNTIME CHECK — NOT RUN / DEFERRED-DORMANT`. **This report is not claimed `FULLY COMPLETE`** — the runtime deltas below are open by design.
+
+| Charter requirement | Where | Status |
+|---|---|---|
+| Step-0 grounding | §1 | populated |
+| Executive verdict (1 first decision) | §2 (A6-2 epoch) | populated |
+| Current-state reconciliation | §3 | populated |
+| E1–E20 disposition (PASS/CONDITIONAL/REOPENED/NOT_PROVEN) | §4 | populated (16 PASS, 4 CONDITIONAL) |
+| W1–W5 (boundary/emitter/sink/sample/bypass/status) | §5 | populated |
+| A1–A10 Pass 1/2/3 | §6 | populated; **A7 Pass 2/3 = DEFERRED-DORMANT** (no new live fills) |
+| Runtime-check list | §7 | populated; all `RUNTIME CHECK — NOT RUN` |
+| Instrument-integrity list (natural-proof field) | §8 | populated |
+| Free look | §10 | populated (dead-capability cluster; else none) |
+| Dependency/collision matrix | §11 | populated |
+| Ranked Top 3 (evidence/effort/risk/dep/doctrine/falsifier) | §12 | populated |
+| Packet/code disagreements | §12 | populated |
+| Design score | §12 | `INFERRED` qualitative scorecard (no verified scalar) |
+| Per-finding schema (12 fields) | §4/§6/§9/§11/§12 | ID/sev/label/seam/impact/backlog/decision/falsifier inline; effort/dependency/doctrine in the ranked/matrix sections |
+| EV/PoP/cost basis+unit on every number | §1a, §6 A6-3, §2 | basis+unit stated (raw/calibrated/realized; per-contract/position-total) |
+| Rejected/duplicate/superseded exclusion memory | §12 + ledger | internal-fill sign = REJECTED; SETTLED/PASS list in the ledger |
+| Credential disposition | §1b | `OPERATOR-ATTESTED` class-only |
+| DEFERRED-DORMANT items | A7 Pass 2/3; A10-2 NOT_PROVEN | marked |
+
+**Open runtime deltas (why not FULLY COMPLETE):** the 5 `RUNTIME CHECK — NOT RUN` in §7 (condor bg-worker env; RAILWAY_GIT_COMMIT_SHA presence; W2/W3 post-#1198 INFO emit; `_rth_job_status` warm-up symmetry; fail-open injection tests) + A10-2 summer warm-up `NOT_PROVEN`.
 
 **STOP.** Read-only report. No production code/config/DB/broker change; nothing merged or deployed.

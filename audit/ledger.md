@@ -10,23 +10,36 @@ Executed the v1.5 BRIEF (`docs/review/external-full-audit-v1.5-current.md`) — 
 v1.5 results existed). Full completed report: **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**.
 Audited production code at the immutable baseline **`bef2cdd`** (main moved 623044d→d18dd52 during the run =
 **docs-only** #1207+#1208, zero code). E1–E20 + W1–W5 + A1–A10 (Pass 1/2/3) + instrument-integrity + free look
-all completed; runtime adjudicated read-only. **Design score 87/100.**
+all completed; runtime adjudicated read-only. **Audit-maturity = INFERRED qualitative (weighted scorecard in
+the results §12); NOT a verified profitability/reliability/efficiency measurement — no single scalar asserted.**
 
 **RETAINED findings (exclusion memory — do not re-derive; build queue in the backlog v1.5 section):**
 - **F-MIDDAY-POSITION-READ-FAILOPEN — CONFIRMED, 2 sites, live-entry safety (HIGH).** `except → return []`:
   Site A `workflow_orchestrator.py:_fetch_positions:2240-2270` (bare `print`, defeats `position_scope`'s
   loud-by-contract raise → micro-tier gate bypass); Site B `paper_autopilot_service.py:_get_open_positions_for_risk_check:1328-1343`
   (alerts, but envelopes pass green-on-vacuum). Un-hardened siblings of the 3 reads #1195 fixed. VERIFIED-CODE.
-  Site A only source-string tested.
-- **A6-2 shadow-capital parity — HIGH, THE FIRST OPERATOR DECISION.** All three cohort portfolios `net_liq=$100,000`
-  (incl. the live-eligible champion) vs the ~$2,067.86 live book (**48×**). Cross-cohort P&L/promotion/thesis is
-  basis-broken. The `or 100000` literal is INERT (stored net_liq IS $100k) — fix = re-seed shadow portfolios to
-  live scale, not remove the literal. VERIFIED-CODE + ATTESTED-RUNTIME. Strengthens F-SHADOW-CAPITAL-PARITY.
+  Site A only source-string tested. **Causality NOT inevitable** — later same-symbol dedup + the *enabled*
+  utilization gate can independently stop an entry; the dangerous case is a transient/selective/false-empty read
+  followed by successful staging. P1-safety; **escalate to P0-before-next-entry if the utilization gate is
+  OFF/unproven, any broker-live position is open, or multi-position/qty scaling is enabled.** Acceptance: route
+  tests proving zero `submit_and_track` for BOTH a portfolio-ID and a position-query exception; a legitimate empty
+  stays healthy.
+- **A6-2 shadow-capital parity — HIGH, THE FIRST OPERATOR DECISION.** All three policy-lab portfolios `net_liq=$100,000`
+  (incl. the live-eligible champion) vs the ~$2,067.86 live book (**~48×**, dated observation). Raw-dollar
+  P&L/capacity/feasibility/sizing/selected-samples are NOT live-tier comparable; promotion is *partially* normalized
+  where enabled; **thesis hit/miss LABELS are NOT notional-scaled** (capital changes *which* trades enter the sample);
+  `live_eligible`=routing ≠ broker execution. The `or 100000` literal is INERT (stored net_liq IS $100k) — removing
+  it is a SEPARATE fail-closed code item, NOT the fix. **Operator decision: preserve the $100k epoch as non-live-tier
+  evidence; at a clean boundary (no open shadow positions/orders) launch a versioned live-tier observe-only cohort on
+  one shared broker-grounded capital snapshot (persist capital_basis/source/as-of/epoch); freeze cross-epoch promotion
+  until a fresh min sample; NEVER rewrite historical rows as if at $2k.** VERIFIED-CODE + ATTESTED-RUNTIME. Strengthens
+  F-SHADOW-CAPITAL-PARITY.
 - **A6-3 condor-EV mis-rank — HIGH, live.** Three incoherent PoP bases (credit≡$0 / debit breakeven-delta /
   condor raw |delta|+fixed severity) all write `suggestion["ev"]`, jointly sorted by one structure-agnostic
   ranker; cross-structure rank flips on a severity constant before any $-gate. EXTENDS-E12/⑤.
-- **A7-1 Phase-3 live-close accrual STALLED — HIGH.** 8 live closes total, last 2026-07-08, 0 in the 7 days to
-  pin; the ~10–15-fill gate is entry-rate-bound (INDETERMINATE/PAUSED), not close-instrumentation-bound.
+- **A7-1 Phase-3 live-close accrual STALLED — HIGH.** 8 POST-EPOCH live closes (9 all-time incl. the pre-epoch
+  NFLX 06-08), last 2026-07-08, 0 in the 7 days to pin; the ~10–15-fill gate is entry-rate-bound
+  (INDETERMINATE/PAUSED), not close-instrumentation-bound. (Denominators kept separate — see results §1a.)
 - **MED:** A2-1 watchdog writes terminal-cancelled on an unconfirmed cancel → double-entry (loud via ghost sweep;
   EXTENDS-P0-A) · A4-1/A9-2 git_sha reads `GIT_SHA` not `RAILWAY_GIT_COMMIT_SHA`, 12/12 'unknown' (= GIT-SHA-
   DECISION-PROVENANCE, one-liner) · A4-2 replay input/features hashes have a durable sink but ZERO reader (NEW) ·
@@ -302,9 +315,10 @@ while the backlog still carried the other — a silent-retirement hazard. **Spli
 **F-A9-5 — DRAFT, NOT SHIPPED (Lane A is OPEN as of this session).** `_log_cohort_decisions`
 compares dollar `ev` to a 0-100 score threshold (`fork.py:466-477`) while the real filter compares
 `sizing_metadata.score` (`:233-236`) → `ev_below_min` is an evidentiary lie (routing byte-correct).
-Lane A worktree `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with **ZERO commits vs
-origin/main** — i.e. **opened, nothing shipped.** Status stays `status:reported` / DRAFT until a
-squash SHA + H8 pin exist. Do not mark shipped on the branch's existence.
+Lane A = PR #1203 `fix/f-a9-5-routing-log-truth` is **DRAFT, 1 commit at `28e4990`** — its
+#1200-live-observation block is cleared but it is **not shipped** (BEHIND current main; needs rebase +
+adversarial/CI review). Status stays `status:reported` / DRAFT until a squash SHA + H8 pin exist.
+Do not mark shipped on branch existence.
 
 **CREDENTIAL HYGIENE (standing doctrine, re-affirmed — no incident recorded).** Diff env key
 **NAMES** only; never `list_variables`/`printenv`/`env`; never emit values (origin: the 06-18

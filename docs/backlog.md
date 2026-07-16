@@ -26,7 +26,7 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
 | Finding | Sev | Disposition | Backlog interaction | Priority | Falsifier / owner decision |
 |---|---|---|---|---|---|
 | F-MIDDAY-POSITION-READ-FAILOPEN (2 sites) | HIGH | retained | **NEW** | **P1-safety** | read-exception test stages no entry / breaker fails closed |
-| A6-2 shadow-capital parity ($100k, 48×, champion too) | HIGH | retained | **EXTENDS-F-SHADOW-CAPITAL-PARITY** | **P1 (first operator decision)** | re-seed shadow net_liq to live scale (operator DB op) |
+| A6-2 shadow-capital epoch ($100k, ~48×, champion too) | HIGH | retained | **EXTENDS-F-SHADOW-CAPITAL-PARITY** | **P1 (first operator decision)** | versioned live-tier observe-only cohort at a clean boundary; freeze cross-epoch promotion; NEVER rewrite historical rows |
 | A6-3 condor-EV mis-rank | HIGH | retained | **EXTENDS-E12 / ⑤** | P1 (with ⑤) | one terminal distribution feeds both integrations |
 | A7-1 Phase-3 accrual stalled (entry-rate-bound) | HIGH | retained | EXTENDS-Phase-3 (measurement) | gated | resume entries; ETA indeterminate until live fills |
 | A2-1 watchdog cancel-ack double-entry | MED | retained | **EXTENDS-P0-A** | before 2+ live | broker-ack before terminal write |
@@ -49,12 +49,19 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
 
 **NEW items filed (net-new, not dupes):**
 - **F-MIDDAY-POSITION-READ-FAILOPEN (P1-safety) — do NOT implement in this docs lane.** Two live-entry authoritative
-  position reads fail OPEN (`except → return []`): `workflow_orchestrator.py:2240-2270` (silent, feeds micro-tier
-  gate) + `paper_autopilot_service.py:1328-1343` (alerts, but breaker envelopes pass green-on-vacuum). Blast radius
-  = oversized/duplicate LIVE entry. Fix: **distinguish an empty `live_ids` set from a FAILED authoritative read**;
-  require typed failure propagation to top-level job truth (raise / `capture_partial` that aborts entries), keeping
-  `live_ids==[]` as the only legitimate flat-book path. Siblings of the 3 reads #1195/F-E8-3 hardened. Own safety
-  lane, priority above observational cleanup. · origin v1.5 candidate-1 + E8 fourth-sentinel.
+  position reads fail OPEN (`except → return []`): `workflow_orchestrator.py:2240-2270` (silent, feeds scan
+  concurrency/open-book risk/small-tier allocation before persist) + `paper_autopilot_service.py:1328-1343`
+  (alerts, but breaker envelopes pass green-on-vacuum before the executor). Broker-reachable via
+  `_stage_order_internal → submit_and_track` (alpaca_live+live_eligible). **Causality NOT inevitable** — later
+  same-symbol dedup + the *enabled* utilization gate can independently stop it; the dangerous case is a
+  transient/selective/false-empty read followed by successful staging. Fix: **type the unavailable state and
+  distinguish an empty `live_ids` set from a FAILED authoritative read**; make scan AND executor outcomes
+  fail-CLOSED (raise / `capture_partial` that aborts entries), keeping `live_ids==[]` as the only legitimate
+  flat-book path (a genuine empty stays healthy). **Acceptance: route tests proving zero `submit_and_track` for
+  BOTH a portfolio-ID exception AND a position-query exception.** **Escalate to P0-before-next-entry if the
+  utilization gate is OFF/unproven, any broker-live position is open, or multi-position/qty scaling is enabled.**
+  Siblings of the 3 reads #1195/F-E8-3 hardened. Own safety lane, above observational cleanup. · origin v1.5
+  candidate-1 + E8 fourth-sentinel.
 - **F-A9-6 typed-column-lie #5 (P2):** `model_version` written from `os.getenv("APP_VERSION")` (deploy string) but
   documented/consumed as model identity (`workflow_orchestrator.py:1585,3496`; `analytics_service.py:303`). Fix:
   redocument as deploy-provenance (never `GROUP BY` in calibration) OR stamp the real calibration epoch/hash. · v1.5 A9.
@@ -77,8 +84,9 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
   require a broker-ack (or re-GET) before the terminal write. · v1.5 A2-1.
 
 **STRENGTHENED existing items (EXTENDS, evidence/dependency only — NOT re-filed):** F-SHADOW-CAPITAL-PARITY gains the
-48× champion-too measurement + the "re-seed not remove-literal" fix shape (F-POLICY-CAPITAL-FALLBACK literal is
-INERT); E12/⑤ gains the live cross-structure mis-rank + the strict-vs-tail env disagreement; GIT-SHA gains the
+~48× champion-too measurement + the **versioned-epoch (not in-place re-seed)** fix shape, and the narrowed scope
+(thesis LABELS are not notional-scaled; raw-dollar/capacity/sizing are) — F-POLICY-CAPITAL-FALLBACK literal is
+INERT and is a SEPARATE fail-closed code item; E12/⑤ gains the live cross-structure mis-rank + the strict-vs-tail env disagreement; GIT-SHA gains the
 root cause (Dockerfile `ARG GIT_SHA=unknown`) + one-line RAILWAY fallback; E19-2B/replay gains the A1-1 capture gaps
 (capital/OBP/tier/book/ev_raw uncaptured); F-A9-5 gains the 56-row materialization + the raev/score secondary lie;
 Phase-3 gains A7-1 entry-rate-bound ETA + A7-2 stamp-coverage; segment-n floor gains A3-2/A3-3; OUTPUT_FRESHNESS
@@ -258,9 +266,9 @@ other — a silent-retirement hazard. Split, both preserved:
 substance (`_log_cohort_decisions` compares dollar `ev` to a 0-100 score threshold,
 `fork.py:466-477` vs the real score filter `:233-236` → `ev_below_min` lies;
 routing byte-correct; the logger must CONSUME the routing predicate's result, not
-re-derive). Lane A worktree `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with
-**ZERO commits vs origin/main** — opened, nothing shipped. **Do not mark shipped on
-the branch's existence**; needs a squash SHA + H8 pin.
+re-derive). Lane A = PR #1203 (`fix/f-a9-5-routing-log-truth`) is **DRAFT, 1 commit at `28e4990`**; its
+#1200-live-observation block is cleared, but it is **not shipped** — BEHIND current main, needs
+rebase + adversarial/CI review before any merge. **Do not mark shipped**; needs a squash SHA + H8 pin.
 
 **PENDING FALSIFIERS → the ledger's pending list owns these (not this file):**
 #1200 first calibrated-rejected candidate (**no qualifying candidate =
@@ -429,8 +437,8 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
   compares dollar `ev` to a 0-100 score threshold (`fork.py:466-477` vs the real score
   filter `:233-236`) → `ev_below_min` lies; the logger must CONSUME the routing
   predicate's result, not re-derive (join check = the test; rides ③'s fork territory if
-  clean). Branch `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with ZERO commits vs
-  origin/main — **do not mark shipped on the branch's existence** · **F-WINDOW-1 → NOW
+  clean). PR #1203 `fix/f-a9-5-routing-log-truth` is **DRAFT, 1 commit at `28e4990`**, BEHIND main,
+  block cleared by #1200 but not shipped — **do not mark shipped** · **F-WINDOW-1 → NOW
   SPLIT (see the 07-14 section): 1a EMISSION = CLOSED at `1386834` (#1198); 1b COVERAGE
   + JOINABILITY = the item that stays HERE** — per-decision-site heartbeats sharing ONE
   cycle/decision ID + W3 reservation-order identity (the arm-evidence repair's OWN second

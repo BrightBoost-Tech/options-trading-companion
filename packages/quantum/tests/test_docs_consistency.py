@@ -257,7 +257,8 @@ def test_f_a9_5_not_claimed_shipped(both: str):
     for m in re.finditer(r"F-A9-5", both):
         window = both[m.start(): m.end() + 260]
         assert "status:shipped" not in window, (
-            "F-A9-5 must not be marked shipped — Lane A has zero commits vs origin/main"
+            "F-A9-5 must not be marked shipped — Lane A (#1203) is a DRAFT with one "
+            "commit at 28e4990, block cleared by #1200 but not yet rebased/reviewed/merged"
         )
 
 
@@ -624,3 +625,95 @@ def test_v15_results_file_no_credential_values():
     for pattern, label in SECRET_SHAPES:
         hit = re.search(pattern, text)
         assert hit is None, f"v1.5 results file contains a {label}-shaped string"
+
+
+# --------------------------------------------------------------------------
+# 14. v1.5 results — document-contract completeness + corrected-claim guards
+#     (prove the report contract, not mere word presence)
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def v15() -> str:
+    return V15_RESULTS.read_text(encoding="utf-8")
+
+
+def test_v15_e1_e20_enumerated_once_with_dispositions(v15: str):
+    """E1..E20 each appear as a table row exactly once with a disposition."""
+    valid = ("PASS", "CONDITIONAL", "REOPENED", "NOT_PROVEN", "NOT PROVEN")
+    for n in range(1, 21):
+        rows = re.findall(rf"\|\s*E{n}\s*\|\s*\*\*([A-Z_ ]+)\*\*", v15)
+        assert len(rows) == 1, f"E{n} must appear exactly once with a disposition (got {rows})"
+        assert rows[0].strip() in valid, f"E{n} disposition invalid: {rows[0]}"
+
+
+def test_v15_w1_w5_enumerated_once_with_status(v15: str):
+    for n in range(1, 6):
+        assert re.search(rf"\|\s*W{n}\s*\|", v15), f"W{n} row missing"
+    for status in ("RUNNING", "START-UNVERIFIED", "UNSTARTED"):
+        assert status in v15, f"W-table status vocabulary incomplete: {status}"
+
+
+def test_v15_a1_a10_have_pass_structure(v15: str):
+    for area in ("A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10"):
+        assert re.search(rf"\*\*{area} ", v15), f"{area} section missing"
+    assert "Pass 1" in v15 and "DEFERRED-DORMANT" in v15, "A7 dormant passes must be explicit"
+
+
+def test_v15_falsifier_grades_explicit_pass(v15: str):
+    """Not merely that INCONCLUSIVE appears — #1200/#1201 are explicitly PASS."""
+    assert "#1200 SOFI natural falsifier PASS" in v15
+    assert "#1201 calibration PASS" in v15
+    assert "#1201 thesis PASS" in v15
+
+
+def test_v15_denominators_kept_separate(v15: str):
+    """B5 — the live denominators are labeled, never a bare 'live n'."""
+    assert "Post-epoch broker-live closes" in v15
+    assert "All broker-live closes, total history" in v15
+    assert re.search(r"live_eligible.{0,40}(routing).{0,40}(broker execution)", v15), \
+        "routing vs broker-execution distinction must be explicit"
+
+
+def test_v15_rejects_signal_quality_is_sound(v15: str, both: str):
+    """B6 — the unsupported 'signal quality is sound' verdict must be gone."""
+    assert "Signal quality is sound" not in v15
+    assert "Signal quality is sound" not in both
+
+
+def test_v15_rejects_reservation_equals_decision_identity(v15: str):
+    """B3 — the false durable-identity claim must be gone; the narrowed
+    order-not-identity statement present."""
+    assert "reservation-id==decision-id VERIFIED" not in v15
+    assert "no shared scan" in v15 or "no durable reservation identity" in v15
+
+
+def test_v15_no_notrun_row_claims_observed_env_value(v15: str):
+    """B4 — no single line combines 'RUNTIME CHECK — NOT RUN' with a claimed
+    observed CONDOR_EV_MODEL value."""
+    for line in v15.splitlines():
+        if "CONDOR_EV_MODEL=tail" in line:
+            assert "NOT RUN" not in line, (
+                "a claimed observed condor value must not sit on a NOT-RUN line"
+            )
+
+
+def test_v15_rejects_in_place_capital_reseed(v15: str, both: str):
+    """B8 — no instruction to rewrite/re-seed historical rows in place; the
+    versioned-epoch decision + 'never rewrite historical' must be present."""
+    assert "re-seed shadow portfolios to live scale" not in v15
+    assert re.search(r"[Nn]ever rewrite historical", v15)
+    assert "versioned" in v15 and "epoch" in v15
+
+
+def test_v15_pr1203_not_described_zero_commit(both: str, v15: str):
+    """B10 — nothing describes Lane A / #1203 as zero-commit."""
+    for doc in (both, v15):
+        assert "zero commit" not in doc.lower()
+
+
+def test_v15_f_midday_causality_narrowed(both: str):
+    """B11 — the finding is retained but not stated as an inevitable unsafe
+    order; the P0 escalation trigger is present."""
+    assert "F-MIDDAY-POSITION-READ-FAILOPEN" in both
+    assert re.search(r"[Cc]ausality.{0,20}NOT inevitable", both) or "not inevitable" in both.lower()
+    assert "P0-before-next-entry" in both

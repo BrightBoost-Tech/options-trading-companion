@@ -226,7 +226,7 @@ class TestLoadBearingWiring:
         from packages.quantum.services import workflow_orchestrator
 
         src = open(workflow_orchestrator.__file__, encoding="utf-8").read()
-        start = src.index("    async def _fetch_positions():")
+        start = src.rindex("    async def _fetch_positions():")
         end = src.index("    async def _compute_regime():", start)
         block = src[start:end]
         assert "raise LivePositionStateUnavailable" in block

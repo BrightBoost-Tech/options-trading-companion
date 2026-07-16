@@ -1,6 +1,6 @@
 from supabase import Client
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, TYPE_CHECKING
+from typing import Any, Optional, Dict, TYPE_CHECKING
 import json
 import asyncio
 import logging

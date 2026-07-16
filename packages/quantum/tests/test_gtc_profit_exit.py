@@ -141,7 +141,10 @@ class TestWatchdogTifExemption(unittest.TestCase):
         order = _working_order(idle_seconds=292)  # no tif → day
         sb, updates = _mock_supabase_for_poll(order)
         alpaca = MagicMock()
-        alpaca.get_order.return_value = {"status": "new", "filled_qty": 0}
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {"status": "canceled", "filled_qty": 0},
+        ]
 
         alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
 

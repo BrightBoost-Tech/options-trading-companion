@@ -1334,22 +1334,34 @@ class PaperAutopilotService:
             return pos_res.data or []
         except Exception as e:
             logger.warning(f"[CIRCUIT_BREAKER] Failed to fetch positions: {e}")
-            alert(
-                _get_admin_supabase(),
-                alert_type="paper_autopilot_risk_check_positions_fetch_failed",
-                severity="warning",
-                message=f"Risk-check open positions fetch failed: {type(e).__name__}",
-                user_id=user_id,
-                metadata={
-                    "function_name": "_get_open_positions_for_risk_check",
-                    "error_class": type(e).__name__,
-                    "error_message": str(e)[:500],
-                    "consequence": (
-                        "entry execution aborted; authoritative live position "
-                        "state must succeed before retry"
+            try:
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="paper_autopilot_risk_check_positions_fetch_failed",
+                    severity="warning",
+                    message=(
+                        "Risk-check open positions fetch failed: "
+                        f"{type(e).__name__}"
                     ),
-                },
-            )
+                    user_id=user_id,
+                    metadata={
+                        "function_name": "_get_open_positions_for_risk_check",
+                        "error_class": type(e).__name__,
+                        "error_message": str(e)[:500],
+                        "consequence": (
+                            "entry execution aborted; authoritative live "
+                            "position state must succeed before retry"
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                # Alert delivery is evidence, never control flow.  The
+                # authoritative read failure must still abort entry execution.
+                logger.error(
+                    "[CIRCUIT_BREAKER] Position-read alert failed "
+                    "(entry remains aborted): %s",
+                    alert_err,
+                )
             raise LivePositionStateUnavailable(
                 f"executor live position state unavailable: {type(e).__name__}"
             ) from e

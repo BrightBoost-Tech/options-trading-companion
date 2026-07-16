@@ -2,11 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { Briefcase } from 'lucide-react';
 import DashboardLayout from '@/components/DashboardLayout';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { fetchWithAuthTimeout, ApiError } from '@/lib/api';
 import { RequireAuth } from '@/components/RequireAuth';
 import { AuthRequired } from '@/components/AuthRequired';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Button } from '@/components/ui/button';
 
 export default function PortfolioPage() {
   const [holdings, setHoldings] = useState<any[]>([]);
@@ -95,16 +98,19 @@ export default function PortfolioPage() {
             </div>
 
             {holdings.length === 0 ? (
-              <div className="p-12 text-center text-gray-500">
-                <p className="mb-4 text-lg">No positions found.</p>
-                <p className="text-sm">Positions sync automatically from Alpaca. Check Settings to verify your connection.</p>
-                <button
+              <EmptyState
+                icon={Briefcase}
+                title="No positions found"
+                description="Positions sync automatically from Alpaca. Check Settings to verify your connection."
+                action={
+                  <Button
                     onClick={() => router.push('/settings')}
-                    className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
+                    className="px-4 py-2 bg-blue-600 text-white hover:bg-blue-700"
+                  >
                     Go to Settings
-                </button>
-              </div>
+                  </Button>
+                }
+              />
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full">

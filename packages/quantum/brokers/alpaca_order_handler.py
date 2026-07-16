@@ -824,35 +824,73 @@ def poll_pending_orders(
             # exempt alongside tif=gtc (belt + suspenders — a future DAY-
             # variant resting order stays watchdog-safe via the class).
             _order_cls = str(_order_oj.get("order_class") or "")
+            submitted_at = None
             if (
                 internal_status == "working"
                 and order.get("submitted_at")
                 and _order_tif != "gtc"
                 and _order_cls != "intentional_resting_exit"
             ):
+                # Only timestamp parsing is allowed to fail soft.  Broker
+                # cancellation, broker refetch, and DB writes remain outside
+                # this narrow catch so every operational failure reaches the
+                # outer poll-error contract.
                 try:
                     submitted_at = datetime.fromisoformat(
                         order["submitted_at"].replace("Z", "+00:00")
                     )
-                    idle_seconds = (now_utc - submitted_at).total_seconds()
-                    filled_qty = float(alpaca_order.get("filled_qty") or 0)
+                except (ValueError, TypeError):
+                    pass  # Malformed submitted_at, skip watchdog
 
-                    if idle_seconds > IDLE_WATCHDOG_SECONDS and filled_qty == 0:
+            if submitted_at is not None:
+                idle_seconds = (now_utc - submitted_at).total_seconds()
+                filled_qty = float(alpaca_order.get("filled_qty") or 0)
+
+                if idle_seconds > IDLE_WATCHDOG_SECONDS and filled_qty == 0:
+                    logger.warning(
+                        f"[ALPACA_HANDLER] Idle watchdog triggered: order={order_id} "
+                        f"alpaca={alpaca_id} idle={idle_seconds:.0f}s "
+                        f"(threshold={IDLE_WATCHDOG_SECONDS}s). Cancelling."
+                    )
+                    try:
+                        alpaca.cancel_order(alpaca_id)
+                    except Exception as cancel_err:
+                        # A cancel error can mean the order filled in the
+                        # cancel race.  It is not broker truth; refetch
+                        # below decides the terminal state.
                         logger.warning(
-                            f"[ALPACA_HANDLER] Idle watchdog triggered: order={order_id} "
-                            f"alpaca={alpaca_id} idle={idle_seconds:.0f}s "
-                            f"(threshold={IDLE_WATCHDOG_SECONDS}s). Cancelling."
+                            f"[ALPACA_HANDLER] Watchdog cancel failed: {cancel_err}"
                         )
-                        try:
-                            alpaca.cancel_order(alpaca_id)
-                        except Exception as cancel_err:
-                            logger.warning(
-                                f"[ALPACA_HANDLER] Watchdog cancel failed: {cancel_err}"
-                            )
 
-                        # #101 Component 4: also write cancelled_at/reason
-                        # at the row level so forensic queries don't have
-                        # to dig into broker_response JSONB.
+                    # A2-1: cancellation is terminal only after a fresh
+                    # broker acknowledgement.  AlpacaClient.cancel_order's
+                    # return and any exception are both non-authoritative.
+                    # A refetch failure escapes to the existing outer error
+                    # path, leaving the DB row pollable and untouched.
+                    try:
+                        alpaca_order = alpaca.get_order(alpaca_id)
+                        alpaca_status = alpaca_order.get("status", "")
+                        internal_status = status_map.get(
+                            alpaca_status, "working"
+                        )
+                        refreshed_filled_qty = float(
+                            alpaca_order.get("filled_qty") or 0
+                        )
+                    except Exception as refresh_err:
+                        raise RuntimeError(
+                            "watchdog broker refetch failed: "
+                            f"{type(refresh_err).__name__}: {refresh_err}"
+                        ) from refresh_err
+
+                    if (
+                        alpaca_status == "canceled"
+                        and refreshed_filled_qty == 0
+                    ):
+                        # #101 Component 4: write cancelled_at/reason only
+                        # from the freshly acknowledged broker payload.
+                        # This write is deliberately outside the timestamp
+                        # parse catch: failure leaves the row nonterminal and
+                        # makes the job partial.
                         supabase.table("paper_orders").update({
                             "broker_status": "watchdog_cancelled",
                             "status": "watchdog_cancelled",
@@ -873,9 +911,23 @@ def poll_pending_orders(
                         }).eq("id", order_id).execute()
 
                         watchdog_cancels += 1
-                        continue  # Skip normal processing for this order
-                except (ValueError, TypeError):
-                    pass  # Malformed submitted_at, skip watchdog
+                        continue  # Fresh broker truth is cleanly cancelled
+
+                    # Filled/partial/nonterminal truth falls through to the
+                    # normal reconciliation below.  In particular, a
+                    # just-filled order can never be hidden behind a stale
+                    # watchdog_cancelled terminal row.
+
+            filled_qty = float(alpaca_order.get("filled_qty") or 0)
+            if (
+                filled_qty > 0
+                and alpaca_status in ("canceled", "expired", "rejected")
+            ):
+                # Terminal broker state with a residual fill is never a clean
+                # cancellation.  Apply this on every poll (not only during the
+                # watchdog race) so custody cannot decay to cancelled on the
+                # next sync before the partial-close path is reconciled.
+                internal_status = "needs_manual_review"
 
             update = {
                 "broker_status": alpaca_status,
@@ -883,7 +935,6 @@ def poll_pending_orders(
                 "status": internal_status,
             }
 
-            filled_qty = float(alpaca_order.get("filled_qty") or 0)
             if filled_qty > 0:
                 update["filled_qty"] = filled_qty
                 if alpaca_order.get("filled_avg_price"):
@@ -1046,7 +1097,7 @@ def poll_pending_orders(
                         f"[ALPACA_HANDLER] Fill commit failed: order={order_id} "
                         f"position_id={pos_id} error={fill_err}"
                     )
-            elif internal_status == "partial":
+            elif internal_status in ("partial", "needs_manual_review"):
                 partials += 1
             elif internal_status == "cancelled":
                 cancels += 1

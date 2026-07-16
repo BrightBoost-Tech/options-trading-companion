@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 
 from packages.quantum.table_constants import TRADE_SUGGESTIONS_TABLE
 from packages.quantum.observability.alerts import alert, _get_admin_supabase
+from packages.quantum.risk.position_scope import LivePositionStateUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,12 @@ class PaperAutopilotService:
                         "force_close_ids": cb_result.force_close_ids,
                         "executed_count": 0,
                     }
+        except LivePositionStateUnavailable:
+            # Load-bearing: do not let the legacy broad circuit-breaker
+            # fail-open path below swallow an authoritative position-read
+            # failure.  paper_auto_execute turns this into RetryableJobError,
+            # and no cohort selection/staging/broker submit is reached.
+            raise
         except Exception as cb_err:
             # #72-H5b SAFETY-CRITICAL: circuit breaker check failure means
             # risk envelope state could not be verified; autopilot proceeds
@@ -1327,20 +1334,37 @@ class PaperAutopilotService:
             return pos_res.data or []
         except Exception as e:
             logger.warning(f"[CIRCUIT_BREAKER] Failed to fetch positions: {e}")
-            alert(
-                _get_admin_supabase(),
-                alert_type="paper_autopilot_risk_check_positions_fetch_failed",
-                severity="warning",
-                message=f"Risk-check open positions fetch failed: {type(e).__name__}",
-                user_id=user_id,
-                metadata={
-                    "function_name": "_get_open_positions_for_risk_check",
-                    "error_class": type(e).__name__,
-                    "error_message": str(e)[:500],
-                    "consequence": "risk check proceeds without authoritative position state — concentration/correlation gates may be bypassed",
-                },
-            )
-            return []
+            try:
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="paper_autopilot_risk_check_positions_fetch_failed",
+                    severity="warning",
+                    message=(
+                        "Risk-check open positions fetch failed: "
+                        f"{type(e).__name__}"
+                    ),
+                    user_id=user_id,
+                    metadata={
+                        "function_name": "_get_open_positions_for_risk_check",
+                        "error_class": type(e).__name__,
+                        "error_message": str(e)[:500],
+                        "consequence": (
+                            "entry execution aborted; authoritative live "
+                            "position state must succeed before retry"
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                # Alert delivery is evidence, never control flow.  The
+                # authoritative read failure must still abort entry execution.
+                logger.error(
+                    "[CIRCUIT_BREAKER] Position-read alert failed "
+                    "(entry remains aborted): %s",
+                    alert_err,
+                )
+            raise LivePositionStateUnavailable(
+                f"executor live position state unavailable: {type(e).__name__}"
+            ) from e
 
     def _estimate_equity(
         self, user_id: str, positions: List[Dict[str, Any]],

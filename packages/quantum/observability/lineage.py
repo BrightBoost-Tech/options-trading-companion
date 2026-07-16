@@ -257,18 +257,43 @@ class LineageSigner:
 # Utility Functions
 # =============================================================================
 
+def resolve_git_sha(explicit_sha: Optional[str] = None) -> str:
+    """Resolve one authoritative full 40-hex deployed commit SHA.
+
+    Candidate precedence is explicit writer value, GIT_SHA, then Railway\'s
+    deployment identity. Precedence applies after validation: placeholders,
+    short hashes, branch names, and malformed values cannot shadow a later
+    authoritative full SHA.
+    """
+    for candidate in (
+        explicit_sha,
+        os.getenv("GIT_SHA"),
+        os.getenv("RAILWAY_GIT_COMMIT_SHA"),
+    ):
+        value = (candidate or "").strip()
+        if len(value) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+            return value.lower()
+    return "unknown"
+
+
 def get_code_sha() -> str:
-    """
-    Get a stable code version identifier.
+    """Get the legacy short lineage identifier.
 
-    Uses GIT_SHA env var if available, otherwise APP_VERSION.
+    Existing suggestion lineage accepts a non-sentinel short GIT_SHA and
+    truncates longer values to 12 characters. Preserve that public contract;
+    only decision-tape provenance uses the strict full-40 resolver. When the
+    Docker value is a placeholder, Railway\'s authoritative full SHA remains
+    the fallback.
     """
-    git_sha = os.getenv("GIT_SHA", "")
-    if git_sha:
-        return git_sha[:12]  # Short SHA
+    configured = (os.getenv("GIT_SHA") or "").strip()
+    if configured.casefold() not in {"", "unknown", "none", "null"}:
+        return configured[:12]
 
-    app_version = os.getenv("APP_VERSION", "unknown")
-    return app_version
+    deployed_sha = resolve_git_sha()
+    if deployed_sha != "unknown":
+        return deployed_sha[:12]
+
+    return os.getenv("APP_VERSION", "unknown")
 
 
 def sign_payload(payload: Dict[str, Any]) -> Tuple[str, str]:

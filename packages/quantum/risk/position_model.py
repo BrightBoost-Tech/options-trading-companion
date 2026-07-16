@@ -84,6 +84,7 @@ class RejectReason(str, Enum):
     INCONSISTENT_UNDERLYING = "inconsistent_underlying"
     INCONSISTENT_EXPIRY = "inconsistent_expiry"
     MIXED_MULTIPLIER = "mixed_multiplier"
+    DUPLICATE_LEG = "duplicate_leg"
 
 
 class IncompletenessReason(str, Enum):
@@ -174,10 +175,12 @@ def _exact_int(value: Any, name: str) -> int:
     return int(out)
 
 
-_SELL_TOKENS = frozenset(
-    {"sell", "short", "sell_to_open", "sell_to_close", "sto", "stc"}
+_SHORT_POSITION_TOKENS = frozenset(
+    {"sell", "short", "sell_to_open", "buy_to_close", "sto", "btc"}
 )
-_BUY_TOKENS = frozenset({"buy", "long", "buy_to_open", "buy_to_close", "bto", "btc"})
+_LONG_POSITION_TOKENS = frozenset(
+    {"buy", "long", "buy_to_open", "sell_to_close", "bto", "stc"}
+)
 
 
 def _direction_sign(raw: Any) -> int:
@@ -188,9 +191,9 @@ def _direction_sign(raw: Any) -> int:
     """
     _reject_bool(raw, "side")
     token = str(raw or "").strip().lower()
-    if token in _BUY_TOKENS:
+    if token in _LONG_POSITION_TOKENS:
         return 1
-    if token in _SELL_TOKENS:
+    if token in _SHORT_POSITION_TOKENS:
         return -1
     raise PositionNormalizationError(RejectReason.UNKNOWN_SIDE, f"side={raw!r}")
 
@@ -242,6 +245,12 @@ class LegGreeks:
     vega: Optional[float] = None
     theta: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        for name in ("delta", "gamma", "vega", "theta"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _finite_float(value, name))
+
     def missing_fields(self) -> Tuple[str, ...]:
         return tuple(
             name
@@ -270,6 +279,12 @@ class CanonicalLeg:
     greeks: Optional[LegGreeks] = None
 
     def __post_init__(self) -> None:
+        strike = _finite_float(self.strike, f"leg {self.occ_symbol} strike")
+        multiplier = _finite_float(
+            self.multiplier, f"leg {self.occ_symbol} multiplier"
+        )
+        object.__setattr__(self, "strike", strike)
+        object.__setattr__(self, "multiplier", multiplier)
         if self.signed_ratio == 0:
             raise PositionNormalizationError(
                 RejectReason.ZERO_QUANTITY, f"leg {self.occ_symbol} signed_ratio=0"
@@ -279,11 +294,12 @@ class CanonicalLeg:
                 RejectReason.NOT_A_NUMBER,
                 f"leg {self.occ_symbol} signed_ratio must be int",
             )
-        if self.strike <= 0 or math.isnan(self.strike) or math.isinf(self.strike):
+        if self.strike <= 0:
             raise PositionNormalizationError(
-                RejectReason.MALFORMED_STRIKE, f"leg {self.occ_symbol} strike={self.strike}"
+                RejectReason.MALFORMED_STRIKE,
+                f"leg {self.occ_symbol} strike={self.strike}",
             )
-        if self.multiplier <= 0 or math.isnan(self.multiplier) or math.isinf(self.multiplier):
+        if self.multiplier <= 0:
             raise PositionNormalizationError(
                 RejectReason.NON_POSITIVE_MULTIPLIER,
                 f"leg {self.occ_symbol} multiplier={self.multiplier}",
@@ -359,12 +375,18 @@ class CanonicalPosition:
                 RejectReason.NON_POSITIVE_STRUCTURE_QUANTITY,
                 f"structure_quantity={self.structure_quantity}",
             )
-        if math.isnan(self.total_entry_cashflow) or math.isinf(
-            self.total_entry_cashflow
-        ):
+        cashflow = _finite_float(
+            self.total_entry_cashflow, "total_entry_cashflow"
+        )
+        object.__setattr__(self, "total_entry_cashflow", cashflow)
+        symbols = [leg.occ_symbol for leg in self.legs]
+        duplicate_symbols = sorted(
+            {symbol for symbol in symbols if symbols.count(symbol) > 1}
+        )
+        if duplicate_symbols:
             raise PositionNormalizationError(
-                RejectReason.NON_FINITE,
-                f"total_entry_cashflow={self.total_entry_cashflow}",
+                RejectReason.DUPLICATE_LEG,
+                f"duplicate OCC symbols={duplicate_symbols}",
             )
         for leg in self.legs:
             if leg.underlying != self.underlying:
@@ -646,7 +668,7 @@ class ObservedLeg:
 @dataclass(frozen=True)
 class LegDiscrepancy:
     occ_symbol: str
-    kind: str  # missing | extra | direction_mismatch | quantity_mismatch | attribute_mismatch
+    kind: str  # missing | extra | duplicate | direction_mismatch | quantity_mismatch | attribute_mismatch
     expected: Optional[Any] = None
     observed: Optional[Any] = None
     detail: str = ""
@@ -673,6 +695,10 @@ class ReconciliationReport:
     def quantity_mismatched(self) -> Tuple[LegDiscrepancy, ...]:
         return tuple(d for d in self.discrepancies if d.kind == "quantity_mismatch")
 
+    @property
+    def duplicated(self) -> Tuple[LegDiscrepancy, ...]:
+        return tuple(d for d in self.discrepancies if d.kind == "duplicate")
+
 
 def reconcile_legs(
     position: CanonicalPosition, observed: Sequence[ObservedLeg]
@@ -683,9 +709,27 @@ def reconcile_legs(
     A direction mismatch (sign flip) is reported distinctly from a magnitude
     mismatch: they are different incidents with different causes.
     """
-    expected_map: Dict[str, CanonicalLeg] = {leg.occ_symbol: leg for leg in position.legs}
-    observed_map: Dict[str, ObservedLeg] = {leg.occ_symbol: leg for leg in observed}
+    expected_map: Dict[str, CanonicalLeg] = {
+        leg.occ_symbol: leg for leg in position.legs
+    }
+    observed_map: Dict[str, ObservedLeg] = {}
     discrepancies: List[LegDiscrepancy] = []
+    for leg in observed:
+        if leg.occ_symbol in observed_map:
+            discrepancies.append(
+                LegDiscrepancy(
+                    occ_symbol=leg.occ_symbol,
+                    kind="duplicate",
+                    expected=1,
+                    observed=sum(
+                        1 for candidate in observed
+                        if candidate.occ_symbol == leg.occ_symbol
+                    ),
+                    detail="observed source returned duplicate OCC symbol",
+                )
+            )
+            continue
+        observed_map[leg.occ_symbol] = leg
 
     for occ, leg in expected_map.items():
         want = leg.total_contracts(position.structure_quantity)
@@ -782,6 +826,11 @@ def entry_cashflow_from_net_premium(
             f"net_premium_abs must be absolute, got {net_premium_abs!r}",
         )
     qty = _exact_int(structure_quantity, "structure_quantity")
+    if qty <= 0:
+        raise PositionNormalizationError(
+            RejectReason.NON_POSITIVE_STRUCTURE_QUANTITY,
+            f"structure_quantity={structure_quantity!r}",
+        )
     mult = _finite_float(multiplier, "multiplier")
     if mult <= 0:
         raise PositionNormalizationError(

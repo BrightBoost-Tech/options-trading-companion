@@ -1,10 +1,9 @@
 """Canonical typed position representation — the honest defined-risk basis.
 
-PR-1 SCOPE: TYPED CONTRACT + PURE MATH ONLY. This module is ADDITIVE and
-DELIBERATELY UNWIRED — no production consumer imports it. Every existing
-risk / gate / ranking / order output is byte-identical with this module
-present. Consumer migration is PR-2+, one consumer per PR, in the order:
-risk_envelope -> stress -> sizing/reconciliation.
+PR-1 shipped the typed contract + pure math unwired. Consumer PR-2 now
+migrates exactly one production seam: risk_envelope._pos_risk uses the exact
+payoff-derived max-loss total. Greeks, stress, sizing, reconciliation, ranking,
+and order paths remain unmigrated and retain their separate PR boundaries.
 
 WHY THIS EXISTS (defects reproduced by tests/test_position_model.py, all in
 risk/risk_envelope.py as of bef2cdd):

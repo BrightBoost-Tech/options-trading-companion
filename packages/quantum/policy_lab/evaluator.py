@@ -23,6 +23,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 from collections import defaultdict
 
+from packages.quantum.policy_lab.capital import (
+    require_capital,
+    require_cash_balance,
+)
 from packages.quantum.policy_lab.scoring import (
     CohortDailyMetrics,
     CohortScore,
@@ -78,6 +82,7 @@ def evaluate_cohorts(
 
     eval_date_str = eval_date.isoformat()
     results = []
+    error_count = 0
 
     for cohort in cohorts:
         cohort_id = cohort["id"]
@@ -141,6 +146,7 @@ def evaluate_cohorts(
             )
 
         except Exception as e:
+            error_count += 1
             logger.exception(
                 "policy_lab_eval_error: cohort=%s",
                 cohort_name,
@@ -175,7 +181,12 @@ def evaluate_cohorts(
                 )
             results.append({"cohort_name": cohort_name, "error": str(e)})
 
-    return {"status": "ok", "eval_date": eval_date_str, "results": results}
+    return {
+        "status": "partial" if error_count else "ok",
+        "eval_date": eval_date_str,
+        "counts": {"errors": error_count},
+        "results": results,
+    }
 
 
 def _position_unrealized(p: dict) -> float:
@@ -247,9 +258,9 @@ def _compute_cohort_metrics(
         .eq("id", portfolio_id) \
         .single() \
         .execute()
-    portfolio = port_res.data or {}
-    net_liq = float(portfolio.get("net_liq") or portfolio.get("cash_balance") or 100000)
-    cash = float(portfolio.get("cash_balance") or 0)
+    portfolio = port_res.data
+    net_liq = require_capital(portfolio)
+    cash = require_cash_balance(portfolio)
     capital_deployed = max(0, net_liq - cash)
 
     total_pl = realized_pl + unrealized_pl

@@ -205,7 +205,7 @@ class TestWatchdogCancelOnly(unittest.TestCase):
         self.assertEqual(len(result["errors"]), 1)
         self.assertIn("broker read unavailable", result["errors"][0]["error"])
 
-    def test_canceled_with_fill_is_not_clean_watchdog_cancel(self):
+    def test_canceled_with_fill_enters_explicit_residual_custody(self):
         order = _working_order(idle_seconds=292)
         sb, updates, _ = _mock_supabase(order)
         alpaca = MagicMock()
@@ -220,9 +220,42 @@ class TestWatchdogCancelOnly(unittest.TestCase):
         self.assertFalse(
             [p for (_n, p) in updates if p.get("status") == "watchdog_cancelled"]
         )
-        cancelled = [p for (_n, p) in updates if p.get("status") == "cancelled"]
-        self.assertEqual(len(cancelled), 1)
-        self.assertEqual(cancelled[0]["filled_qty"], 0.5)
+        self.assertFalse(
+            [p for (_n, p) in updates if p.get("status") == "cancelled"]
+        )
+        custody = [
+            p for (_n, p) in updates
+            if p.get("status") == "needs_manual_review"
+        ]
+        self.assertEqual(len(custody), 1)
+        self.assertEqual(custody[0]["filled_qty"], 0.5)
+        self.assertEqual(result["partials"], 1)
+
+    def test_value_and_type_errors_during_refetch_are_not_swallowed(self):
+        for exc in (
+            ValueError("bad broker payload"),
+            TypeError("unexpected broker payload"),
+        ):
+            with self.subTest(error=type(exc).__name__):
+                order = _working_order(idle_seconds=292)
+                sb, updates, _ = _mock_supabase(order)
+                alpaca = MagicMock()
+                alpaca.get_order.side_effect = [
+                    {"status": "new", "filled_qty": 0},
+                    exc,
+                ]
+
+                result = alpaca_order_handler.poll_pending_orders(
+                    alpaca, sb, USER_ID
+                )
+
+                self.assertEqual(updates, [])
+                self.assertEqual(result["watchdog_cancels"], 0)
+                self.assertEqual(len(result["errors"]), 1)
+                self.assertIn(
+                    "watchdog broker refetch failed",
+                    result["errors"][0]["error"],
+                )
 
     def test_fresh_order_under_threshold_not_cancelled(self):
         order = _working_order(idle_seconds=30)

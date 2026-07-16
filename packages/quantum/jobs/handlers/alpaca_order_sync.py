@@ -115,6 +115,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 "total_polled": 0, "fills": 0, "partials": 0,
                 "cancels": 0, "unchanged": 0, "users": 0,
                 "orphans_repaired": 0,
+                "errors": 0,
+                "error_details": [],
             }
 
             # ── Step 1: Poll Alpaca for pending orders ──────────────────
@@ -163,8 +165,25 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 totals["users"] = len(poll_user_ids)
                 for uid in poll_user_ids:
                     result = poll_pending_orders(alpaca, client, uid)
-                    for key in ("total_polled", "fills", "partials", "cancels", "unchanged"):
+                    for key in (
+                        "total_polled",
+                        "fills",
+                        "partials",
+                        "cancels",
+                        "unchanged",
+                    ):
                         totals[key] += result.get(key, 0)
+                    poll_errors = result.get("errors") or []
+                    totals["errors"] += len(poll_errors)
+                    totals["error_details"].extend(
+                        {
+                            "user_id": uid,
+                            "order_id": item.get("order_id"),
+                            "error": str(item.get("error") or "")[:500],
+                        }
+                        for item in poll_errors[:20]
+                        if isinstance(item, dict)
+                    )
 
             # ── Step 1.5: Targeted resolve of response-lost submits (PR2) ─
             # A submit that raised BEFORE returning an alpaca_order_id (network
@@ -361,9 +380,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         sync_result = run_async(sync_orders())
 
+        poll_errors = int(sync_result.get("errors") or 0)
         return {
-            "ok": True,
+            "ok": poll_errors == 0,
             "timing_ms": (time.time() - start_time) * 1000,
+            "counts": {"errors": poll_errors},
             **sync_result,
         }
 

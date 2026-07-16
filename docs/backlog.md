@@ -42,8 +42,21 @@ falsifiers remain in the ledger.
 - **F-A10-4 expiry-day thesis lag** — #1220 scores only after the regular-session
   close; no entry/exit rule changed.
 - **Doctrinal reconciliation** — #1222 records the cost/funnel/expiry contracts.
-- **Legacy PoP test debt (#775)** — draft #1223 restores the skipped suite;
-  tests-only and not shipped until merged.
+- **Legacy PoP test debt (#775)** — shipped in #1223; the previously skipped
+  suite now pins the current credit/debit PoP contract.
+
+### Tonight's independent draft lanes
+
+- **#1225 — small-tier fleet foundation:** CI green on the current head;
+  dormant schema + side-effect-free contract only. No migration applied.
+- **#1226 — prequential rolling-floor fixture:** CI green; tests-only removal
+  of the 120/365-day calendar time bomb.
+- **#1227 — calibration-report fetch truth:** draft; makes the read-only report
+  distinguish DB failure from a legitimate empty cohort. Live calibration
+  behavior is untouched.
+- These drafts are not shipped and do not change the next trading session until
+  independently reviewed and merged; #1225 additionally requires an
+  operator-applied migration and later activation transaction.
 
 ### Partial families — only these remainders are open
 
@@ -64,10 +77,13 @@ falsifiers remain in the ledger.
 
 ### Actual next priorities
 
-1. **Operator decision — F-SHADOW-CAPITAL-PARITY.** Start a prospective,
-   versioned shadow-capital epoch comparable to the ~$2k live tier, or retain
-   the $100k historical cohort with an explicit non-comparability label. Do not
-   rewrite historical rows. E19-2B remains gated on this decision.
+1. **F-SHADOW-CAPITAL-PARITY foundation — AUTHORIZED / DRAFT #1225.**
+   Prospective `small_tier_v1` = 50 isolated $2,000 accounts; $100,000 is an
+   administrative total only. Activate only uniquely pre-registered policies,
+   preserve `legacy_100k`, require terminal legacy positions+orders and one
+   explicit DB-time epoch boundary, and count distinct source decision events
+   rather than account rows. #1225 is schema+pure-contract only: migration
+   unapplied, no rows created, no runtime caller, no flag changed.
 2. **⑤ Independent terminal-distribution probability source.** One versioned
    terminal distribution feeding two integrations: vertical payoff and condor
    payoff. Observe/prequential first; baseline wins on Brier, EV-RMSE, and net
@@ -85,9 +101,12 @@ falsifiers remain in the ledger.
 - #1214–#1222 deployment identity, H8 health, first natural exact-max-loss
   decision, first natural leg-aware ranking decision, first natural git-SHA
   tape row, and the next post-close thesis run are **NOT_PROVEN_RUNTIME** here.
-- **F-SHADOW-CAPITAL-PARITY** is an operator/data-epoch choice, not permission
-  for an unreviewed production write.
-- **E19-2B** is gated on capital parity; **Phase 3** remains evidence-gated;
+- **F-SHADOW-CAPITAL-PARITY** is authorized in design but not activated.
+  #1225 must pass review, its migration must follow the migration procedure,
+  the legacy terminal boundary must be runtime-proven, and policy assignments
+  must be separately pre-registered before any account row may become active.
+- **E19-2B** remains gated on an activated, comparable fleet epoch; **Phase 3**
+  remains evidence-gated;
   **prequential operationalization** remains an operator choice between a study
   tool and a scheduled observe-only job.
 - No live threshold, stop, gate, structure width, universe membership, or

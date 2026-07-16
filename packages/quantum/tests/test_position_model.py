@@ -2,8 +2,9 @@
 
 Two halves:
 
-  PHASE 1 — TestCurrentDefects now proves D1 closed at the first production
-  consumer while retaining executable evidence for D2-D5. Each later consumer
+  PHASE 1 — TestCurrentDefects proves the first production consumer closes
+  D1, D4, and the correlation-one slice of D5, while retaining executable
+  evidence for D2, D3, and unclamped linear stress. Each later consumer
   migration must invert its defect assertion rather than delete it.
 
   PHASE 2 — the golden fixtures, payoff/greek/reconciliation contracts, and the
@@ -243,6 +244,29 @@ def _persisted_short_put_vertical(qty: int = -2, premium: float = 1.20) -> dict:
     }
 
 
+def _persisted_iron_condor() -> dict:
+    """_f3 as a persisted one-contract credit structure."""
+    return {
+        "id": "qqq-ic",
+        "quantity": -1,
+        "avg_entry_price": 1.49,
+        "legs": [
+            {"symbol": _occ("QQQ", "P", 650.0), "action": "sell",
+             "type": "put", "strike": 650.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "P", 645.0), "action": "buy",
+             "type": "put", "strike": 645.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "C", 765.0), "action": "sell",
+             "type": "call", "strike": 765.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "C", 770.0), "action": "buy",
+             "type": "call", "strike": 770.0, "expiry": "2026-09-18",
+             "quantity": 1},
+        ],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — reproduce the current defects against LIVE risk_envelope code
 # ══════════════════════════════════════════════════════════════════════════
@@ -251,8 +275,9 @@ def _persisted_short_put_vertical(qty: int = -2, premium: float = 1.20) -> dict:
 class TestCurrentDefects(unittest.TestCase):
     """Consumer-closure evidence plus the remaining live defects.
 
-    D1 is inverted by canonical-position PR-2. D2-D5 remain pinned to the live
-    envelope until their own one-consumer migrations; never delete them.
+    D1, D4, and correlation-one D5 are inverted by canonical-position PR-2.
+    D2, D3, and the unclamped linear-stress slice of D5 remain pinned; never
+    delete them.
     """
 
     def test_d1_exact_max_loss_replaces_credit_received(self):
@@ -392,24 +417,26 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertAlmostEqual(true_loss, 8900.0, places=2)
         self.assertAlmostEqual(blind_loss, 0.0, places=2)  # "cannot lose"
 
-    def test_d4_multiplier_is_hardcoded_100(self):
-        """No per-leg multiplier is read anywhere; 100 is a literal."""
-        pos = {"max_credit": 1.00, "quantity": 1}
-        self.assertAlmostEqual(_pos_risk(pos), 100.0, places=2)
+    def test_d4_multiplier_is_read_from_each_leg(self):
+        """The canonical consumer prices standard and mini multipliers honestly."""
+        standard = _persisted_short_put_vertical()
+        mini = _persisted_short_put_vertical()
+        for leg in mini["legs"]:
+            leg["multiplier"] = 10
 
-        # A mini/non-standard contract (multiplier 10) is unrepresentable: the
-        # live code has no field to carry it, so it prices at 100 regardless.
-        pos_mini = {"max_credit": 1.00, "quantity": 1, "multiplier": 10}
-        self.assertAlmostEqual(_pos_risk(pos_mini), 100.0, places=2)
-        self.assertEqual(_pos_risk(pos), _pos_risk(pos_mini))
+        self.assertAlmostEqual(_pos_risk(standard), 760.0, places=2)
+        self.assertAlmostEqual(_pos_risk(mini), 76.0, places=2)
+        self.assertNotEqual(_pos_risk(standard), _pos_risk(mini))
 
-        # The honest module carries it and the payoff scales with it.
         ten = _position(
-            [_leg("SPY", "P", 100.0, -1, multiplier=10.0), _leg("SPY", "P", 95.0, +1, multiplier=10.0)],
+            [_leg("SPY", "P", 100.0, -1, multiplier=10.0),
+             _leg("SPY", "P", 95.0, +1, multiplier=10.0)],
             total_entry_cashflow=+1.20 * 10 * 2,
             structure_quantity=2,
         )
-        self.assertAlmostEqual(analyze_payoff(ten).max_loss_total, 76.0, places=2)
+        self.assertAlmostEqual(
+            _pos_risk(mini), analyze_payoff(ten).max_loss_total, places=2
+        )
 
     def test_d5_stress_can_exceed_the_defined_risk_payoff_bound(self):
         """A linear delta extrapolation has no payoff floor.
@@ -433,16 +460,21 @@ class TestCurrentDefects(unittest.TestCase):
         # The unclamped number is 14x the structure's true worst case.
         self.assertLess(clamp.raw_total_pnl, clamp.floor_total)
 
-    def test_d5_correlation_one_stress_inherits_the_credit_basis(self):
-        """`corr_one_loss = -total_risk` (:535) is -sum(credit), not -max_loss."""
-        pos = {"max_credit": 1.49, "quantity": -1, "legs": []}
-        _violations, results = compute_stress_scenarios([pos], equity=10000.0, config=EnvelopeConfig())
+    def test_d5_correlation_one_uses_exact_payoff_max_loss(self):
+        """Correlation-one stress inherits the canonical position risk."""
+        pos = _persisted_iron_condor()
+        _violations, results = compute_stress_scenarios(
+            [pos], equity=10000.0, config=EnvelopeConfig()
+        )
 
-        # Live: "all positions at max loss" reports -$149 (the credit).
-        self.assertAlmostEqual(results["correlation_one"] * 10000.0, -149.0, places=2)
-        # Honest max loss for that structure is -$351.
         honest = analyze_payoff(_f3_qqq_iron_condor()).max_loss_total
         self.assertAlmostEqual(honest, 351.0, places=2)
+        self.assertAlmostEqual(
+            results["correlation_one"] * 10000.0, -honest, places=2
+        )
+        self.assertNotAlmostEqual(
+            results["correlation_one"] * 10000.0, -149.0, places=2
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════

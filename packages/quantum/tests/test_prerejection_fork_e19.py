@@ -1094,6 +1094,34 @@ class TestTopLevelFailurePropagation(_EnvRawOn):
                           else [q._payload])))
         self._assert_partial(_drive_suggestions_open(client))
 
+    def test_legacy_normal_clone_insert_failure_job_partial(self):
+        client = self._client()
+        client.raise_when(
+            "trade_suggestions", "insert",
+            predicate=lambda q: any(
+                r.get("cohort_name") in {"neutral", "conservative"}
+                and "shadow_prerejection_fork" != r.get("blocked_reason")
+                for r in (
+                    q._payload if isinstance(q._payload, list)
+                    else [q._payload]
+                )
+            ),
+        )
+        result = _drive_suggestions_open(client)
+        self._assert_partial(result)
+        self.assertEqual(
+            result["cycle_results"][0]["fork_champion_status"], "partial"
+        )
+
+    def test_champion_tag_failure_job_partial(self):
+        client = self._client()
+        client.raise_when("trade_suggestions", "update")
+        result = _drive_suggestions_open(client)
+        self._assert_partial(result)
+        cycle = result["cycle_results"][0]
+        self.assertEqual(cycle["fork_champion_status"], "partial")
+        self.assertEqual(cycle["fork_champion_tagged"], 0)
+
     def test_verdict_upsert_failure_job_partial(self):
         client = self._client()
         client.raise_when("policy_decisions", "upsert")
@@ -1104,8 +1132,8 @@ class TestTopLevelFailurePropagation(_EnvRawOn):
         client.raise_when("policy_decisions", "upsert")
         result = _drive_suggestions_open(client)
         cr = result["cycle_results"][0]
-        # B18 honest non-claim: the legacy champion path is not measured.
-        self.assertEqual(cr["fork_champion_status"], "legacy_unmeasured")
+        # The legacy path is measured; unrelated prerejection failure leaves it ok.
+        self.assertEqual(cr["fork_champion_status"], "ok")
         self.assertEqual(cr["fork_status"], "partial")
 
 

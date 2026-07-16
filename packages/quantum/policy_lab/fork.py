@@ -20,6 +20,7 @@ from packages.quantum.policy_lab.config import (
     is_policy_lab_enabled,
 )
 from packages.quantum.policy_lab.champion import get_current_champion
+from packages.quantum.policy_lab.capital import normalize_capital
 
 logger = logging.getLogger(__name__)
 
@@ -145,13 +146,20 @@ def fork_suggestions_for_cohorts(
     # without integration.
     champion_name = get_current_champion(user_id, supabase)
 
+    champion_tagged = 0
     for s in source_suggestions:
         try:
             supabase.table("trade_suggestions").update({
                 "cohort_name": champion_name,
             }).eq("id", s["id"]).execute()
-        except Exception:
-            pass  # Non-critical
+            champion_tagged += 1
+        except Exception as tag_err:
+            fork_errors.append({
+                "stage": "champion_tag_failed",
+                "source_suggestion_id": s.get("id"),
+                "error_class": type(tag_err).__name__,
+                "error": str(tag_err)[:200],
+            })
 
     # Get cohort portfolio mapping and cohort IDs. B16: an ids-fetch
     # failure is TYPED (never an authoritative-empty {}) — downstream every
@@ -198,17 +206,19 @@ def fork_suggestions_for_cohorts(
         # and continue. This changes NOTHING about successful-path normal-clone
         # behavior — it only adds isolation of the read exceptions.
         try:
-            # Get cohort's current portfolio for capital-aware sizing.
-            # NOTE: the legacy `net_liq or cash_balance or 100000` fallback is
-            # UNTOUCHED here (frozen-path contract); the $100,000 fabrication
-            # removal is E19-2A-only. See F-POLICY-CAPITAL-FALLBACK backlog.
+            # Get the cohort's actual capital. Missing/zero/non-finite
+            # net_liq is never reinterpreted as cash or a nominal $100,000.
             port_res = supabase.table("paper_portfolios") \
                 .select("cash_balance, net_liq") \
                 .eq("id", portfolio_id) \
                 .single() \
                 .execute()
-            portfolio = port_res.data or {}
-            deployable = float(portfolio.get("net_liq") or portfolio.get("cash_balance") or 100000)
+            portfolio = port_res.data
+            deployable, capital_reason = normalize_capital(portfolio)
+            if capital_reason is not None or deployable is None:
+                raise RuntimeError(
+                    f"legacy_normal_clone_capital_invalid:{capital_reason}"
+                )
 
             # Count existing open positions for this cohort's portfolio
             open_pos_res = supabase.table("paper_positions") \
@@ -250,6 +260,14 @@ def fork_suggestions_for_cohorts(
                     supabase.table("trade_suggestions").insert(clone).execute()
                     cloned += 1
             except Exception as e:
+                fork_errors.append({
+                    "stage": "legacy_normal_clone_insert_failed",
+                    "cohort": cohort_name,
+                    "source_suggestion_id": s.get("id"),
+                    "ticker": s.get("ticker") or s.get("symbol"),
+                    "error_class": type(e).__name__,
+                    "error": str(e)[:200],
+                })
                 logger.warning(
                     f"policy_lab_fork_clone_error: cohort={cohort_name} "
                     f"ticker={s.get('ticker')} error={e}"
@@ -316,8 +334,10 @@ def fork_suggestions_for_cohorts(
         )
 
     # (E19-2A coverage already ran ABOVE, before the legacy loop — B26.)
-    return _fork_result("ok", created, prerej_counts, fork_errors,
-                        champion_tagged=len(source_suggestions))
+    return _fork_result(
+        "ok", created, prerej_counts, fork_errors,
+        champion_tagged=champion_tagged,
+    )
 
 
 def _run_prerejection_coverage(
@@ -435,28 +455,8 @@ def _read_portfolio_row(supabase, portfolio_id: str) -> Optional[Dict]:
 
 
 def _normalize_capital(portfolio_row: Optional[Dict]) -> tuple:
-    """B19-I pure capital normalizer — FAIL CLOSED. Returns (value, None) on
-    a usable positive finite float, else (None, typed_reason). No $100,000
-    default. net_liq is authoritative when present (even if invalid → do NOT
-    fall back to cash_balance); cash_balance only when net_liq is
-    absent/null."""
-    if not isinstance(portfolio_row, dict):
-        return None, "portfolio_row_missing"
-    if "net_liq" in portfolio_row and portfolio_row.get("net_liq") is not None:
-        chosen = portfolio_row.get("net_liq")           # authoritative
-    elif portfolio_row.get("cash_balance") is not None:
-        chosen = portfolio_row.get("cash_balance")
-    else:
-        return None, "capital_absent"
-    try:
-        val = float(chosen)
-    except (TypeError, ValueError):
-        return None, "capital_non_numeric"
-    if not math.isfinite(val):
-        return None, "capital_non_finite"
-    if val <= 0:
-        return None, "capital_not_positive"
-    return val, None
+    """Compatibility seam for E19 tests; authoritative logic is shared."""
+    return normalize_capital(portfolio_row)
 
 
 def _get_active_cohort_bindings(user_id: str, supabase) -> Dict[str, Dict[str, Any]]:
@@ -502,10 +502,18 @@ def _fork_result(
     return {
         "status": status,
         "reason": result_reason,
-        # B18 honest non-claim: the LEGACY champion-tagging/normal-clone path
-        # still swallows its own failures (pre-existing behavior, untouched
-        # by this PR) — 'ok' would be a claim nothing measures.
-        "champion_status": "legacy_unmeasured",
+        "champion_status": (
+            "partial"
+            if any(
+                e.get("stage") in {
+                    "champion_tag_failed",
+                    "legacy_normal_clone_insert_failed",
+                    "legacy_normal_clone_state_failed",
+                }
+                for e in fork_errors
+            )
+            else "ok"
+        ),
         "champion_tagged": champion_tagged,
         "created": created,
         "existing": prerej_counts.get("existing", 0),

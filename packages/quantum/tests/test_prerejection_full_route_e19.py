@@ -321,7 +321,8 @@ class TestFullProductionRoute(unittest.TestCase):
             # --- expected eligibility values from ARTIFACTS + constants ---
             ev_raw = float(src["ev_raw"])
             expected_slippage = abs(ev_raw) * 0.05
-            expected_fee = DEFAULT_FEE_PER_CONTRACT * 2
+            leg_count = len(src["order_json"]["legs"])
+            expected_fee = DEFAULT_FEE_PER_CONTRACT * leg_count * 2
             expected_net = ev_raw - expected_slippage - expected_fee
             expected_raev = round(expected_net / per_contract_denom, 6)
 

@@ -742,6 +742,31 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
+## Small-tier shadow-fleet evidence contract
+
+- `small_tier_v1` is exactly 50 isolated virtual accounts, each initialized
+  with $2,000 net liquidation and $2,000 cash. The $100,000 sum is
+  administrative/reporting-only: it is never a sizing balance and capital,
+  utilization, or loss recovery never crosses account boundaries.
+- A micro account remains inactive until it has one unique pre-registered
+  policy identity. Unassigned slots stay inactive; identical policy copies do
+  not manufacture independent evidence.
+- Preserve historical $100k portfolios as `legacy_100k`; never rescale,
+  rewrite, or pool their fills/P&L with the small-tier epoch. Activation
+  requires zero legacy open positions, zero legacy working orders, and one
+  explicit timezone-aware effective timestamp at the durable transaction.
+- Evaluate each natural candidate once. Every account evaluation carries the
+  source suggestion UUID as immutable `decision_event_id`. Statistical n is
+  `COUNT(DISTINCT decision_event_id)`, never evaluation/position/account-row
+  count; cross-policy analysis is paired on that identity.
+- A schema migration, merged contract, or operator design approval is not fleet
+  activation. Migration application, policy registration, clean-boundary
+  runtime proof, row creation, and any runtime caller are separate gates.
+- The fleet is shadow/observe-only. It never authorizes a live flag, control,
+  threshold, stop, gate, strategy, universe, cadence, or broker action.
+
+---
+
 ## Backlog standing and closure discipline
 
 - The newest dated **POST-MERGE STANDING** block in `docs/backlog.md` is the

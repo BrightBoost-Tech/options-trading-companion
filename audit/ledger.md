@@ -59,7 +59,7 @@ unsupported 87/100 (the arithmetic independently yields 60).**
   hard trigger < 09-07) · E2 roundtrip qty-fix LIVE-INERT (default OFF) · observe-window durability: four of five
   windows (W1/W2/W3/W5) lack complete durable evidence — W1/W2 strictly logs-only, W3 partially durable (cap-breach
   alarm subset → risk_alerts), W4 semi-durable (count → job_runs.result), W5 absent/unstarted. Backlog interaction:
-  **EXTENDS F-WINDOW-1a/1b; not a new finding identifier.**
+  **EXTENDS the existing split: F-WINDOW-1a EMISSION is CLOSED at `1386834`/#1198; F-WINDOW-1b COVERAGE+JOINABILITY remains OPEN; not a new finding identifier.**
 - **LOW/NOTE:** A1-1 replay runner input-blocked (capital/OBP/book/ev_raw uncaptured; EXTENDS-E19-2B) · A5-2 no
   decision_runs origin column (**EXTENDS the existing `suggestions_open untraced extra runs` item and replay runner;
   not a new standalone filing**) · A3-1 stop-vs-thesis signal readable but unconsumed (NEW) ·

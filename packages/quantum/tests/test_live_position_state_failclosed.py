@@ -147,6 +147,51 @@ class TestExecutorOriginToTop:
         assert "trade_suggestions" not in client.tables
         assert "paper_orders" not in client.tables
 
+    def test_position_read_and_alert_failure_still_abort_execution(self):
+        from packages.quantum.jobs.handlers import paper_auto_execute
+
+        client = _FakeClient(
+            fail_on="paper_positions",
+            portfolios=[{"id": "live", "routing_mode": "live_eligible"}],
+        )
+        with (
+            mock.patch.dict(
+                os.environ, {"PAPER_AUTOPILOT_ENABLED": "1"}, clear=False
+            ),
+            mock.patch.object(
+                paper_auto_execute, "get_admin_client", return_value=client
+            ),
+            mock.patch(
+                "packages.quantum.ops_endpoints.is_trading_paused",
+                return_value=(False, ""),
+            ),
+            mock.patch(
+                "packages.quantum.ops_endpoints.are_entries_paused",
+                return_value=(False, ""),
+            ),
+            mock.patch(
+                "packages.quantum.risk.staleness_gate.check_staleness_gate",
+                return_value=SimpleNamespace(blocked=False),
+            ),
+            mock.patch.object(
+                autopilot_mod,
+                "alert",
+                side_effect=RuntimeError("alert transport unavailable"),
+            ),
+            mock.patch.object(
+                autopilot_mod, "_get_admin_supabase", return_value=object()
+            ),
+            mock.patch.object(
+                autopilot_mod.PaperAutopilotService, "_execute_per_cohort"
+            ) as execute_cohorts,
+            pytest.raises(paper_auto_execute.RetryableJobError),
+        ):
+            paper_auto_execute.run({"user_id": "user-1"})
+
+        execute_cohorts.assert_not_called()
+        assert "trade_suggestions" not in client.tables
+        assert "paper_orders" not in client.tables
+
 
 class TestScanTruthPropagation:
     def test_scheduled_suggestions_open_is_partial_on_read_abort(self):

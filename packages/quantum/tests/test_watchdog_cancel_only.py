@@ -93,11 +93,15 @@ class TestWatchdogCancelOnly(unittest.TestCase):
         order = _working_order(idle_seconds=292)
         sb, updates, _ = _mock_supabase(order)
         alpaca = MagicMock()
-        alpaca.get_order.return_value = {"status": "new", "filled_qty": 0}
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {"status": "canceled", "filled_qty": 0},
+        ]
 
         alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
 
         alpaca.cancel_order.assert_called_once_with("alp-1")
+        self.assertEqual(alpaca.get_order.call_count, 2)
         watchdog_updates = [
             p for (_n, p) in updates if p.get("status") == "watchdog_cancelled"
         ]
@@ -113,7 +117,10 @@ class TestWatchdogCancelOnly(unittest.TestCase):
         order = _working_order(idle_seconds=292)
         sb, _updates, inserts = _mock_supabase(order)
         alpaca = MagicMock()
-        alpaca.get_order.return_value = {"status": "new", "filled_qty": 0}
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {"status": "canceled", "filled_qty": 0},
+        ]
 
         alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
 
@@ -126,6 +133,96 @@ class TestWatchdogCancelOnly(unittest.TestCase):
             broker_methods.issubset({"get_order", "cancel_order"}),
             f"unexpected broker calls (resubmission?): {broker_methods}",
         )
+
+    def test_cancel_race_filled_uses_fresh_broker_truth(self):
+        """A cancel exception can mean the order filled in the race.  The
+        refetched fill must use normal reconciliation, never the stale
+        watchdog terminal."""
+        from unittest.mock import patch
+
+        order = _working_order(idle_seconds=292)
+        order["position_id"] = "pos-1"
+        sb, updates, inserts = _mock_supabase(order)
+        alpaca = MagicMock()
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {
+                "status": "filled",
+                "filled_qty": "1",
+                "filled_avg_price": "1.25",
+                "filled_at": "2026-07-15T20:00:00Z",
+            },
+        ]
+        alpaca.cancel_order.side_effect = RuntimeError("already filled")
+
+        with patch.object(
+            alpaca_order_handler, "_close_position_on_fill"
+        ) as commit_fill:
+            result = alpaca_order_handler.poll_pending_orders(
+                alpaca, sb, USER_ID
+            )
+
+        self.assertFalse(
+            [p for (_n, p) in updates if p.get("status") == "watchdog_cancelled"]
+        )
+        filled = [p for (_n, p) in updates if p.get("status") == "filled"]
+        self.assertEqual(len(filled), 1)
+        commit_fill.assert_called_once()
+        self.assertEqual(result["fills"], 1)
+        self.assertEqual(inserts, [])
+
+    def test_nonterminal_refetch_stays_pollable(self):
+        order = _working_order(idle_seconds=292)
+        sb, updates, _ = _mock_supabase(order)
+        alpaca = MagicMock()
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {"status": "pending_cancel", "filled_qty": 0},
+        ]
+
+        result = alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
+
+        self.assertEqual(result["watchdog_cancels"], 0)
+        self.assertFalse(
+            [p for (_n, p) in updates if p.get("status") == "watchdog_cancelled"]
+        )
+        working = [p for (_n, p) in updates if p.get("status") == "working"]
+        self.assertEqual(len(working), 1)
+
+    def test_refetch_failure_makes_no_terminal_write(self):
+        order = _working_order(idle_seconds=292)
+        sb, updates, _ = _mock_supabase(order)
+        alpaca = MagicMock()
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            RuntimeError("broker read unavailable"),
+        ]
+
+        result = alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
+
+        self.assertEqual(updates, [])
+        self.assertEqual(result["watchdog_cancels"], 0)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("broker read unavailable", result["errors"][0]["error"])
+
+    def test_canceled_with_fill_is_not_clean_watchdog_cancel(self):
+        order = _working_order(idle_seconds=292)
+        sb, updates, _ = _mock_supabase(order)
+        alpaca = MagicMock()
+        alpaca.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            {"status": "canceled", "filled_qty": "0.5"},
+        ]
+
+        result = alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
+
+        self.assertEqual(result["watchdog_cancels"], 0)
+        self.assertFalse(
+            [p for (_n, p) in updates if p.get("status") == "watchdog_cancelled"]
+        )
+        cancelled = [p for (_n, p) in updates if p.get("status") == "cancelled"]
+        self.assertEqual(len(cancelled), 1)
+        self.assertEqual(cancelled[0]["filled_qty"], 0.5)
 
     def test_fresh_order_under_threshold_not_cancelled(self):
         order = _working_order(idle_seconds=30)

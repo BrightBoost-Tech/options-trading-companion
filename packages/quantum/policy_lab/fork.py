@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone, date
 from typing import Dict, List, Optional, Any
 
@@ -225,14 +226,16 @@ def fork_suggestions_for_cohorts(
             })
             continue
 
-        # Filter source suggestions by cohort policy
-        filtered = _filter_for_cohort(source_suggestions, config, open_count)
-        filtered_ids = {s["id"] for s in filtered}
+        # F-A9-5: ONE canonical routing evaluation feeds BOTH the clone filter
+        # and the decision log — the logger never re-derives from ev/score.
+        cohort_decisions = _evaluate_cohort_policy(
+            source_suggestions, config, open_count,
+        )
+        filtered = [d.suggestion for d in cohort_decisions if d.accepted]
 
         # Decision logging: log every (cohort, suggestion) decision
         _log_cohort_decisions(
-            supabase, user_id, cohort_name, cohort_id,
-            source_suggestions, filtered_ids, config, open_count,
+            supabase, user_id, cohort_name, cohort_id, cohort_decisions,
         )
 
         # Clone with adjusted sizing
@@ -305,12 +308,11 @@ def fork_suggestions_for_cohorts(
     # source suggestions ARE the champion's output, so every one is accepted).
     champion_cohort_id = cohort_ids.get(champion_name)
     if champion_cohort_id and source_suggestions:
-        all_ids = {s["id"] for s in source_suggestions}
+        # Champion: every source suggestion is accepted (its own output) — no
+        # cohort filter, no routing re-derivation (F-A9-5).
         _log_cohort_decisions(
             supabase, user_id, champion_name, champion_cohort_id,
-            source_suggestions, all_ids,
-            configs.get(champion_name, PolicyConfig()),
-            0,  # champion doesn't filter by open positions at fork time
+            _champion_accept_all(source_suggestions),
         )
 
     # (E19-2A coverage already ran ABOVE, before the legacy loop — B26.)
@@ -545,34 +547,132 @@ def _fork_result(
     }
 
 
+@dataclass
+class CohortPolicyDecision:
+    """Canonical result of evaluating ONE source suggestion against a cohort's
+    PolicyConfig. Produced ONCE by `_evaluate_cohort_policy` and consumed by
+    BOTH `_filter_for_cohort` (the accepted subset) and `_log_cohort_decisions`
+    (the decision rows). The logger MUST NOT re-derive routing from ev /
+    risk_adjusted_ev / score / threshold — that was the F-A9-5 defect: the
+    logger compared dollar `ev` against the 0-100 `min_score_threshold`, so
+    `ev_below_min` fired on capacity rejections whose score PASSED, and genuine
+    score rejections were logged as the generic `filtered_by_policy` (the real
+    reason erased)."""
+    suggestion: Dict
+    suggestion_id: Optional[str]
+    accepted: bool
+    reason_codes: List[str]
+    score_value: Optional[float]
+    score_basis: str
+    capacity_state: str   # within_capacity | capacity_exhausted | champion_unfiltered
+    rank: int
+
+
+_SCORE_BASIS = "sizing_metadata.score"
+
+
+def _score_for_log(value) -> Optional[float]:
+    """Best-effort numeric score for the decision RECORD only (informational —
+    routing never consumes this). Never raises; missing/non-numeric → None."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _evaluate_cohort_policy(
+    suggestions: List[Dict],
+    config: PolicyConfig,
+    open_positions: int,
+) -> List["CohortPolicyDecision"]:
+    """The SINGLE routing evaluation for a challenger cohort. Precedence and
+    arithmetic mirror the pre-F-A9-5 inline filter EXACTLY — capacity binds
+    first (the old filter `break`s), then missing score, then score < threshold
+    — so the accepted set and its order are byte-identical; each rejection just
+    carries a truthful typed reason. `sizing_metadata.get("score")` (0-100) is
+    the routing quantity; dollar `ev` is NEVER a routing input.
+
+    (#95 lineage: score is read from sizing_metadata, persisted at insert by
+    workflow_orchestrator; the old bug read risk_adjusted_ev — 0-2 ratio —
+    against min_score_threshold (0-100), filtering every non-aggressive cohort
+    to zero. Missing score → rejected, safe default.)"""
+    available_slots = max(0, config.max_positions_open - open_positions)
+    max_new = min(config.max_suggestions_per_day, available_slots)
+
+    decisions: List[CohortPolicyDecision] = []
+    accepted = 0
+    for rank, s in enumerate(suggestions, start=1):
+        sid = s.get("id")
+        sizing_metadata = s.get("sizing_metadata") or {}
+        score_value = sizing_metadata.get("score")
+
+        # 1) Capacity binds FIRST (the inline filter `break`s here): every
+        #    remaining candidate is a capacity rejection regardless of score.
+        if accepted >= max_new:
+            reason = (
+                "max_positions_reached"
+                if open_positions >= config.max_positions_open
+                else "daily_limit_reached"
+            )
+            decisions.append(CohortPolicyDecision(
+                s, sid, False, [reason], _score_for_log(score_value),
+                _SCORE_BASIS, "capacity_exhausted", rank))
+            continue
+
+        # 2) Missing predicate evidence → typed unavailable, never fabricated.
+        if score_value is None:
+            decisions.append(CohortPolicyDecision(
+                s, sid, False, ["routing_decision_unavailable"], None,
+                _SCORE_BASIS, "within_capacity", rank))
+            continue
+
+        # 3) Score below the cohort bar (0-100 vs 0-100). `float()` mirrors the
+        #    inline filter's comparison exactly (identical raise on non-numeric).
+        if float(score_value) < config.min_score_threshold:
+            decisions.append(CohortPolicyDecision(
+                s, sid, False, ["score_below_min"], float(score_value),
+                _SCORE_BASIS, "within_capacity", rank))
+            continue
+
+        accepted += 1
+        decisions.append(CohortPolicyDecision(
+            s, sid, True, [], float(score_value),
+            _SCORE_BASIS, "within_capacity", rank))
+
+    return decisions
+
+
+def _champion_accept_all(
+    suggestions: List[Dict],
+) -> List["CohortPolicyDecision"]:
+    """Champion decisions: the source suggestions ARE the champion's output, so
+    every one is accepted with no reason (the champion never runs the cohort
+    filter). No routing re-derivation — preserves the pre-F-A9-5 champion
+    contract (all accepted, empty reason_codes, rank in source order)."""
+    return [
+        CohortPolicyDecision(
+            s, s.get("id"), True, [],
+            _score_for_log((s.get("sizing_metadata") or {}).get("score")),
+            _SCORE_BASIS, "champion_unfiltered", rank)
+        for rank, s in enumerate(suggestions, start=1)
+    ]
+
+
 def _filter_for_cohort(
     suggestions: List[Dict],
     config: PolicyConfig,
     open_positions: int,
 ) -> List[Dict]:
-    """Filter source suggestions by cohort's PolicyConfig."""
-    available_slots = max(0, config.max_positions_open - open_positions)
-    max_new = min(config.max_suggestions_per_day, available_slots)
-
-    filtered = []
-    for s in suggestions:
-        if len(filtered) >= max_new:
-            break
-        # #95 fix: read score (0-100 scale) from sizing_metadata, where it's
-        # persisted at insert time by workflow_orchestrator.py. Was previously
-        # reading risk_adjusted_ev (0-2 dollar-EV-per-dollar-risk ratio)
-        # against min_score_threshold (0-100), a semantic mismatch that
-        # filtered every non-aggressive cohort to zero clones across all
-        # DB history. Missing-score → filtered out (safe default).
-        sizing_metadata = s.get("sizing_metadata") or {}
-        score_value = sizing_metadata.get("score")
-        if score_value is None:
-            continue
-        if float(score_value) < config.min_score_threshold:
-            continue
-        filtered.append(s)
-
-    return filtered
+    """The accepted subset per the canonical `_evaluate_cohort_policy` — the
+    routing side of the single evaluation the logger also consumes (F-A9-5).
+    Byte-identical accepted set + order to the pre-F-A9-5 inline filter."""
+    return [
+        d.suggestion
+        for d in _evaluate_cohort_policy(suggestions, config, open_positions)
+        if d.accepted
+    ]
 
 
 def _is_shadow_raw_ev_enabled() -> bool:
@@ -1510,59 +1610,31 @@ def _log_cohort_decisions(
     user_id: str,
     cohort_name: str,
     cohort_id: Optional[str],
-    all_suggestions: List[Dict],
-    accepted_ids: set,
-    config: PolicyConfig,
-    open_positions: int,
+    decisions: List["CohortPolicyDecision"],
 ) -> None:
     """
-    Log a decision record for every (cohort, suggestion) pair.
+    Persist one `policy_decisions` row per cohort decision.
 
-    Called once per cohort during fork. Records whether each suggestion
-    was accepted or rejected, with reason codes explaining why.
+    Consumes the CANONICAL evaluation (challengers: `_evaluate_cohort_policy`;
+    champion: `_champion_accept_all`). It NEVER recomputes routing from ev /
+    risk_adjusted_ev / score / thresholds — that was the F-A9-5 defect. The
+    `reason_codes`, decision, and rank come straight from the evaluation.
     """
     if not cohort_id:
         logger.debug(f"policy_decision_log_skip: no cohort_id for {cohort_name}")
         return
 
-    available_slots = max(0, config.max_positions_open - open_positions)
-    max_new = min(config.max_suggestions_per_day, available_slots)
-
     rows = []
-    accepted_so_far = 0
-
-    for rank, s in enumerate(all_suggestions, start=1):
-        sid = s.get("id")
-        ev = float(s.get("ev") or 0)
-
-        # Determine decision and reasons
-        if sid in accepted_ids:
-            decision = "accepted"
-            reason_codes = []
-            accepted_so_far += 1
-        else:
-            # Figure out WHY it was rejected
-            reason_codes = []
-            if ev < config.min_score_threshold:
-                reason_codes.append("ev_below_min")
-            if accepted_so_far >= max_new:
-                if open_positions >= config.max_positions_open:
-                    reason_codes.append("max_positions_reached")
-                else:
-                    reason_codes.append("daily_limit_reached")
-            if not reason_codes:
-                reason_codes.append("filtered_by_policy")
-            decision = "rejected"
-
+    for d in decisions:
         rows.append({
             "cohort_id": cohort_id,
-            "suggestion_id": sid,
+            "suggestion_id": d.suggestion_id,
             "user_id": user_id,
-            "decision": decision,
-            "rank_at_decision": rank,
-            "reason_codes": reason_codes,
-            "features_snapshot": _build_features_snapshot(s),
-            "simulated_fill": _build_simulated_fill(s),
+            "decision": "accepted" if d.accepted else "rejected",
+            "rank_at_decision": d.rank,
+            "reason_codes": list(d.reason_codes),
+            "features_snapshot": _build_features_snapshot(d.suggestion),
+            "simulated_fill": _build_simulated_fill(d.suggestion),
         })
 
     if not rows:

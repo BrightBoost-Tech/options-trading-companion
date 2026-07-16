@@ -6,7 +6,7 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
 ## 2026-07-16 — POST-MERGE RECONCILIATION · status:shipped-code/runtime-pending
 
-Grounded repository truth at `main=38f6e6396de1b76de6359976d4e4996a1d839af7`.
+Grounded repository truth through `main=b6496b60d46d137806a80577581d19a4b06eec8c`.
 The following closures supersede stale `status:reported` and queue language
 below; historical entries remain exclusion memory.
 
@@ -30,8 +30,32 @@ below; historical entries remain exclusion memory.
 - #1220 shipped regular-session-close-aware thesis expiry scoring. It changes
   evidence timing only, not trading exits.
 - #1222 shipped the durable doctrine for those three contracts.
-- #1223 is draft/test-only: restores the legacy #775 PoP suite; not counted
-  shipped until merged.
+- #1223 shipped the restored legacy #775 PoP suite; tests only.
+
+### Operator authorization — prospective small_tier_v1 fleet
+
+The operator authorized a prospective fleet of exactly 50 isolated virtual
+accounts, each with $2,000 initial net liquidation and $2,000 cash. The
+$100,000 sum is administrative only and can never enter sizing, allocation, or
+cross-account loss recovery. Only uniquely pre-registered policy slots may
+activate; all other slots remain inactive. Existing $100k portfolios and their
+history remain `legacy_100k` and are never rewritten. Activation requires all
+legacy positions and working orders to be terminal plus one explicit
+timezone-aware effective timestamp. All parallel evaluations share the source
+suggestion UUID as immutable `decision_event_id`; evidence n is distinct
+decision events, never account-row count. No live control, threshold, stop,
+gate, strategy, universe, or cadence change was authorized.
+
+Implementation status:
+
+- #1225 **DRAFT / CI GREEN** — dormant schema and side-effect-free validation
+  only. Migration unapplied; no fleet/account/portfolio/cohort rows created; no
+  runtime caller or activation path.
+- #1226 **DRAFT / CI GREEN** — test-only rolling calibration-floor fixture.
+- #1227 **DRAFT** — report-only typed fetch-failure semantics; live multiplier
+  behavior untouched.
+- E19-2B stays gated until the fleet is actually activated at a proven clean
+  legacy boundary. Authorization alone is not runtime parity.
 
 ### Practical effect on the next trading session
 

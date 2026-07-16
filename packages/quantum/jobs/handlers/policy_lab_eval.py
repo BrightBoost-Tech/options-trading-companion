@@ -37,10 +37,17 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             return {"status": "error", "reason": "no active users found"}
         # Process all users and aggregate results
         all_results = []
+        error_count = 0
         for uid in user_ids:
             r = _evaluate_user(uid, supabase)
             all_results.append(r)
-        return {"status": "ok", "users": len(all_results), "results": all_results}
+            error_count += int((r.get("counts") or {}).get("errors") or 0)
+        return {
+            "status": "partial" if error_count else "ok",
+            "users": len(all_results),
+            "counts": {"errors": error_count},
+            "results": all_results,
+        }
 
     from packages.quantum.jobs.handlers.utils import get_admin_client
     supabase = get_admin_client()
@@ -66,8 +73,10 @@ def _evaluate_user(user_id: str, supabase) -> Dict[str, Any]:
         f"decision_accuracy_cohorts={len(accuracy_result)}"
     )
 
+    error_count = int((eval_result.get("counts") or {}).get("errors") or 0)
     return {
-        "status": "ok",
+        "status": "partial" if error_count else "ok",
+        "counts": {"errors": error_count},
         "evaluation": eval_result,
         "promotion": promo_result,
         "decision_accuracy": accuracy_result,

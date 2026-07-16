@@ -205,6 +205,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                                 cycle_result["fork_status"] = _fork_status
                                 cycle_result["fork_champion_status"] = (
                                     fork_result.get("champion_status"))
+                                cycle_result["fork_champion_tagged"] = int(
+                                    fork_result.get("champion_tagged") or 0
+                                )
                                 cycle_result["fork_error_details"] = (
                                     fork_result.get("error_details") or [])[:5]
                                 notes.append(

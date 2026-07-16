@@ -246,9 +246,19 @@ class TestReadChecks(unittest.TestCase):
 
 class TestEnvelopeSymbolLossStops(unittest.TestCase):
     def _pos(self, pid, symbol, upl, cohort=LIVE):
-        return {"id": pid, "symbol": symbol, "unrealized_pl": upl,
-                "cohort_id": cohort, "quantity": 1, "avg_entry_price": 3.0,
-                "portfolio_id": "pf"}
+        return {
+            "id": pid, "symbol": symbol, "unrealized_pl": upl,
+            "cohort_id": cohort, "quantity": 1, "avg_entry_price": 3.0,
+        "legs": [
+            {"symbol": "NFLX260918P00100000", "action": "buy",
+             "type": "put", "strike": 100.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": "NFLX260918P00095000", "action": "sell",
+             "type": "put", "strike": 95.0, "expiry": "2026-09-18",
+             "quantity": 1},
+        ],
+            "portfolio_id": "pf",
+        }
 
     def test_per_symbol_breach_recorded(self):
         # equity 2300 → 3% = $69 threshold; −$200 breaches.

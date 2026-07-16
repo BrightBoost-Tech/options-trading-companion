@@ -257,18 +257,38 @@ class LineageSigner:
 # Utility Functions
 # =============================================================================
 
+def resolve_git_sha(explicit_sha: Optional[str] = None) -> str:
+    """Resolve the full deployed commit SHA without trusting sentinels.
+
+    Railway injects RAILWAY_GIT_COMMIT_SHA at runtime, while the image
+    currently defaults GIT_SHA to the truthy literal "unknown". Treat
+    blank/unknown/null-like values as absent so that placeholder cannot shadow
+    the authoritative Railway deployment identity.
+    """
+    invalid = {"", "unknown", "none", "null"}
+    for candidate in (
+        explicit_sha,
+        os.getenv("GIT_SHA"),
+        os.getenv("RAILWAY_GIT_COMMIT_SHA"),
+    ):
+        value = (candidate or "").strip()
+        if value.casefold() not in invalid:
+            return value
+    return "unknown"
+
+
 def get_code_sha() -> str:
-    """
-    Get a stable code version identifier.
+    """Get the existing short lineage identifier.
 
-    Uses GIT_SHA env var if available, otherwise APP_VERSION.
+    The public contract remains a 12-character SHA when one is available,
+    otherwise APP_VERSION. Decision tapes use resolve_git_sha directly because
+    decision_runs.git_sha must retain the full deployment SHA.
     """
-    git_sha = os.getenv("GIT_SHA", "")
-    if git_sha:
-        return git_sha[:12]  # Short SHA
+    git_sha = resolve_git_sha()
+    if git_sha != "unknown":
+        return git_sha[:12]
 
-    app_version = os.getenv("APP_VERSION", "unknown")
-    return app_version
+    return os.getenv("APP_VERSION", "unknown")
 
 
 def sign_payload(payload: Dict[str, Any]) -> Tuple[str, str]:

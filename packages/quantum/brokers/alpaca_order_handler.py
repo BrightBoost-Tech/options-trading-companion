@@ -846,34 +846,57 @@ def poll_pending_orders(
                         try:
                             alpaca.cancel_order(alpaca_id)
                         except Exception as cancel_err:
+                            # A cancel error can mean the order filled in the
+                            # cancel race.  It is not broker truth; refetch
+                            # below decides the terminal state.
                             logger.warning(
                                 f"[ALPACA_HANDLER] Watchdog cancel failed: {cancel_err}"
                             )
 
-                        # #101 Component 4: also write cancelled_at/reason
-                        # at the row level so forensic queries don't have
-                        # to dig into broker_response JSONB.
-                        supabase.table("paper_orders").update({
-                            "broker_status": "watchdog_cancelled",
-                            "status": "watchdog_cancelled",
-                            "cancelled_at": now_utc.isoformat(),
-                            "cancelled_reason": (
-                                f"watchdog_idle_timeout idle={round(idle_seconds)}s "
-                                f"threshold={IDLE_WATCHDOG_SECONDS}s"
-                            ),
-                            "broker_response": {
-                                **alpaca_order,
-                                "watchdog": {
-                                    "reason": "idle_timeout",
-                                    "idle_seconds": round(idle_seconds),
-                                    "threshold": IDLE_WATCHDOG_SECONDS,
-                                    "cancelled_at": now_utc.isoformat(),
-                                },
-                            },
-                        }).eq("id", order_id).execute()
+                        # A2-1: cancellation is terminal only after a fresh
+                        # broker acknowledgement.  AlpacaClient.cancel_order's
+                        # return and any exception are both non-authoritative.
+                        # A refetch failure escapes to the existing outer error
+                        # path, leaving the DB row pollable and untouched.
+                        alpaca_order = alpaca.get_order(alpaca_id)
+                        alpaca_status = alpaca_order.get("status", "")
+                        internal_status = status_map.get(alpaca_status, "working")
+                        refreshed_filled_qty = float(
+                            alpaca_order.get("filled_qty") or 0
+                        )
 
-                        watchdog_cancels += 1
-                        continue  # Skip normal processing for this order
+                        if (
+                            alpaca_status == "canceled"
+                            and refreshed_filled_qty == 0
+                        ):
+                            # #101 Component 4: write cancelled_at/reason only
+                            # from the freshly acknowledged broker payload.
+                            supabase.table("paper_orders").update({
+                                "broker_status": "watchdog_cancelled",
+                                "status": "watchdog_cancelled",
+                                "cancelled_at": now_utc.isoformat(),
+                                "cancelled_reason": (
+                                    f"watchdog_idle_timeout idle={round(idle_seconds)}s "
+                                    f"threshold={IDLE_WATCHDOG_SECONDS}s"
+                                ),
+                                "broker_response": {
+                                    **alpaca_order,
+                                    "watchdog": {
+                                        "reason": "idle_timeout",
+                                        "idle_seconds": round(idle_seconds),
+                                        "threshold": IDLE_WATCHDOG_SECONDS,
+                                        "cancelled_at": now_utc.isoformat(),
+                                    },
+                                },
+                            }).eq("id", order_id).execute()
+
+                            watchdog_cancels += 1
+                            continue  # Fresh broker truth is cleanly cancelled
+
+                        # Filled/partial/nonterminal truth falls through to the
+                        # normal reconciliation below.  In particular, a
+                        # just-filled order can never be hidden behind a stale
+                        # watchdog_cancelled terminal row.
                 except (ValueError, TypeError):
                     pass  # Malformed submitted_at, skip watchdog
 

@@ -22,6 +22,7 @@ from packages.quantum.services.replay.canonical import (
     compute_aggregate_hash,
     compute_content_hash,
 )
+from packages.quantum.observability.lineage import resolve_git_sha
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,11 @@ class DecisionContext:
     _committed: bool = field(default=False, repr=False)
 
     def __post_init__(self):
+        # Resolve the full deployment SHA at the writer boundary.  This repairs
+        # handlers that pass the Docker placeholder "unknown" while preserving
+        # an explicit real SHA supplied by replay/tests.
+        self.git_sha = resolve_git_sha(self.git_sha)
+
         # Ensure as_of_ts is timezone-aware
         if self.as_of_ts.tzinfo is None:
             self.as_of_ts = self.as_of_ts.replace(tzinfo=timezone.utc)
@@ -384,9 +390,10 @@ class DecisionContext:
                 # The RPC's signature predates tape_integrity — stamp it with
                 # a follow-up update (best effort; the column is annotation).
                 try:
-                    supabase.table("decision_runs").update(
-                        {"tape_integrity": tape_integrity}
-                    ).eq("decision_id", str(self.decision_id)).execute()
+                    supabase.table("decision_runs").update({
+                        "tape_integrity": tape_integrity,
+                        "git_sha": self.git_sha,
+                    }).eq("decision_id", str(self.decision_id)).execute()
                 except Exception as ti_err:
                     logger.warning(
                         f"tape_integrity stamp failed (non-fatal): {ti_err}")
@@ -541,6 +548,7 @@ class DecisionContext:
                 "status": "failed",
                 "error_summary": f"Commit failed: {error_msg[:450]}",
                 "tape_integrity": "commit_failed",
+                "git_sha": self.git_sha,
             }).eq("decision_id", str(self.decision_id)).execute()
         except Exception:
             # If update fails, try insert
@@ -550,6 +558,7 @@ class DecisionContext:
                     "strategy_name": self.strategy_name,
                     "as_of_ts": self.as_of_ts.isoformat(),
                     "user_id": self.user_id,
+                    "git_sha": self.git_sha,
                     "status": "failed",
                     "error_summary": f"Commit failed: {error_msg[:450]}",
                     "inputs_count": 0,

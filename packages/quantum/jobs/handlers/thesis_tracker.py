@@ -8,8 +8,9 @@ spot-score into a standing number. Writes position_thesis_outcomes only;
 alerts nothing, modulates nothing.
 
 Idempotent: a terminal verdict (hit/miss) is never re-scored; in_progress
-(expiry not yet passed) and unknown (price source failed) are re-scored each
-run. Born under the F-A4-1 typed-outcome contract: a position that cannot be
+(expiry date not yet reached) and unknown (price source failed) are re-scored
+each run. The scheduled post-close run treats same-day expiry as terminal-eligible
+so Friday expiries do not wait through the weekend. Born under the F-A4-1 typed-outcome contract: a position that cannot be
 scored raises counts.errors → the runner records the job PARTIAL, never
 green-on-vacuum.
 """
@@ -203,8 +204,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         if expiry is None:
             outcome, U, basis, price_basis = "unknown", None, "no original expiry on position", "no_expiry"
-        elif expiry >= today:
-            outcome, U, basis, price_basis = "in_progress", None, f"expiry {expiry.isoformat()} not yet passed", "in_progress"
+        elif expiry > today:
+            outcome, U, basis, price_basis = "in_progress", None, f"expiry {expiry.isoformat()} not yet reached", "in_progress"
         else:
             if truth:
                 U, price_basis, price_date = _underlying_at_expiry(truth, pos.get("symbol"), expiry)

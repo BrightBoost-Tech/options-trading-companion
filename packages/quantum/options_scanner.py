@@ -271,6 +271,11 @@ class RejectionStats:
         self.symbols_processed = 0
         self.chains_loaded = 0
         self.chains_empty = 0
+        # Funnel truth: selection denominators are distinct from emitted
+        # candidates. None means the upstream measurement was unavailable.
+        self.active_universe_count: Optional[int] = None
+        self.selected_symbol_count: Optional[int] = None
+        self.universe_selection_source: str = "not_measured"
         self._samples: List[Dict[str, Any]] = []
         self._samples_cap: int = int(os.getenv("REJECTION_SAMPLES_CAP", str(self.DEFAULT_SAMPLES_CAP)))
         # Tier 1C (2026-05-13): granular per-rejection persistence.
@@ -516,6 +521,9 @@ class RejectionStats:
             return {
                 "rejection_counts": dict(self._counts),
                 "counts": dict(self._counts),  # FIX 1 alias for cycle_metadata reads
+                "active_universe_count": self.active_universe_count,
+                "selected_symbol_count": self.selected_symbol_count,
+                "universe_selection_source": self.universe_selection_source,
                 "symbols_processed": self.symbols_processed,
                 "chains_loaded": self.chains_loaded,
                 "chains_empty": self.chains_empty,
@@ -2753,6 +2761,13 @@ def scan_for_opportunities(
                     caller="options_scanner.scan_for_opportunities",
                 )
                 symbols = [u['symbol'] for u in universe]
+                _selection_counts = universe_service.last_selection_counts
+                rejection_stats.active_universe_count = _selection_counts.get(
+                    "active_universe_count"
+                )
+                rejection_stats.universe_selection_source = _selection_counts.get(
+                    "selection_source", "unknown"
+                )
                 # Prefill from Universe if available
                 earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}
             except Exception as e:
@@ -2782,6 +2797,9 @@ def scan_for_opportunities(
     if not is_production():
         symbols = symbols[:SCANNER_LIMIT_DEV]
 
+    rejection_stats.selected_symbol_count = len(symbols)
+    if rejection_stats.universe_selection_source == "not_measured":
+        rejection_stats.universe_selection_source = "caller_supplied"
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
     # Enrich Earnings Map via Service (Batch)

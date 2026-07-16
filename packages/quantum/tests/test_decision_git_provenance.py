@@ -43,10 +43,17 @@ class _Chain:
 
     def execute(self):
         if self.kind == "update":
+            self.db.update_calls += 1
             if self.db.fail_updates:
                 raise RuntimeError("update unavailable")
             self.db.updates.append((self.table, self.payload))
-        elif self.kind == "insert":
+            data = (
+                self.db.update_results.pop(0)
+                if self.db.update_results
+                else []
+            )
+            return _Result(data)
+        if self.kind == "insert":
             self.db.inserts.append((self.table, self.payload))
         return _Result([])
 
@@ -59,12 +66,28 @@ class _RPC:
 
     def execute(self):
         self.db.rpc_calls.append((self.name, self.payload))
-        return _Result([{"ok": True}])
+        was_update = self.db.rpc_was_update
+        return _Result([{
+            "commit_status": "updated" if was_update else "inserted",
+            "decision_id": self.payload["p_decision_id"],
+            "inputs_inserted": 0,
+            "features_inserted": 0,
+            "was_update": was_update,
+        }])
 
 
 class _DB:
-    def __init__(self, *, fail_updates=False):
+    def __init__(
+        self,
+        *,
+        fail_updates=False,
+        rpc_was_update=False,
+        update_results=None,
+    ):
         self.fail_updates = fail_updates
+        self.rpc_was_update = rpc_was_update
+        self.update_results = list(update_results or [])
+        self.update_calls = 0
         self.rpc_calls = []
         self.updates = []
         self.inserts = []
@@ -105,6 +128,30 @@ class TestResolver:
             clear=True,
         ):
             assert resolve_git_sha(FULL_SHA) == FULL_SHA
+
+    def test_short_or_malformed_explicit_sha_cannot_shadow_railway(self):
+        for invalid in ("abc123", "main", "g" * 40, "1" * 39, "1" * 41):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_SHA": "also-short",
+                    "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
+                },
+                clear=True,
+            ):
+                assert resolve_git_sha(invalid) == FULL_SHA
+
+    def test_short_or_malformed_git_sha_falls_back_to_railway(self):
+        for invalid in ("abc123", "main", "z" * 40):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_SHA": invalid,
+                    "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
+                },
+                clear=True,
+            ):
+                assert resolve_git_sha() == FULL_SHA
 
     def test_docker_unknown_falls_back_to_railway_sha(self):
         with mock.patch.dict(
@@ -192,23 +239,28 @@ class TestDecisionWriterBoundary:
         )
         assert db.rpc_calls[0][1]["p_git_sha"] == FULL_SHA
 
-    def test_rpc_post_stamp_repairs_existing_row_sha(self):
-        with (
-            mock.patch.dict(
-                os.environ,
-                {
-                    "REPLAY_ENABLE": "1",
-                    "GIT_SHA": "unknown",
-                    "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
-                },
-                clear=True,
-            ),
+    def test_rpc_post_stamp_repairs_production_shaped_existing_row(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "REPLAY_ENABLE": "1",
+                "GIT_SHA": "unknown",
+                "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
+            },
+            clear=True,
         ):
             ctx = _ctx("unknown")
-            db = _DB()
+            db = _DB(
+                rpc_was_update=True,
+                update_results=[[{"decision_id": str(ctx.decision_id)}]],
+            )
             result = ctx.commit(db)
 
         assert result["commit_method"] == "rpc"
+        assert result["rpc_was_update"] is True
+        assert result["status"] == "ok"
+        assert "error" not in result
+        assert db.rpc_calls[0][1]["p_decision_id"] == str(ctx.decision_id)
         stamps = [
             payload
             for table, payload in db.updates
@@ -218,6 +270,50 @@ class TestDecisionWriterBoundary:
             "tape_integrity": "complete",
             "git_sha": FULL_SHA,
         }]
+
+    def test_rpc_existing_row_zero_stamp_is_typed_non_green(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "REPLAY_ENABLE": "1",
+                "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
+            },
+            clear=True,
+        ):
+            ctx = _ctx()
+            db = _DB(rpc_was_update=True, update_results=[[], []])
+            result = ctx.commit(db)
+
+        assert result["commit_method"] == "rpc"
+        assert result["rpc_was_update"] is True
+        assert result["status"] == "failed"
+        assert result["tape_integrity"] == "commit_failed"
+        assert result["error_type"] == "decision_run_stamp_failed"
+        assert "expected_one_row_got_0" in result["error"]
+        failed = [
+            payload
+            for table, payload in db.inserts
+            if table == "decision_runs"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["git_sha"] == FULL_SHA
+
+    def test_rpc_existing_row_stamp_exception_is_typed_non_green(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "REPLAY_ENABLE": "1",
+                "RAILWAY_GIT_COMMIT_SHA": FULL_SHA,
+            },
+            clear=True,
+        ):
+            ctx = _ctx()
+            result = ctx.commit(_DB(rpc_was_update=True, fail_updates=True))
+
+        assert result["status"] == "failed"
+        assert result["tape_integrity"] == "commit_failed"
+        assert result["error_type"] == "decision_run_stamp_failed"
+        assert "update_error" in result["error"]
 
     def test_sequential_insert_carries_full_sha(self):
         with mock.patch.dict(
@@ -243,16 +339,35 @@ class TestDecisionWriterBoundary:
         ][0]
         assert row["git_sha"] == FULL_SHA
 
-    def test_failed_update_carries_git_sha(self):
+    def test_failed_existing_row_update_carries_git_sha(self):
         with mock.patch.dict(
             os.environ,
             {"RAILWAY_GIT_COMMIT_SHA": FULL_SHA},
             clear=True,
         ):
             ctx = _ctx()
-        db = _DB()
+        db = _DB(update_results=[[{"decision_id": str(ctx.decision_id)}]])
         ctx._try_mark_failed(db, "boom")
         assert db.updates[0][1]["git_sha"] == FULL_SHA
+        assert db.inserts == []
+
+    def test_failed_zero_row_update_falls_back_to_insert(self):
+        with mock.patch.dict(
+            os.environ,
+            {"RAILWAY_GIT_COMMIT_SHA": FULL_SHA},
+            clear=True,
+        ):
+            ctx = _ctx()
+        db = _DB(update_results=[[]])
+        ctx._try_mark_failed(db, "boom")
+        rows = [
+            payload
+            for table, payload in db.inserts
+            if table == "decision_runs"
+        ]
+        assert len(rows) == 1
+        assert rows[0]["git_sha"] == FULL_SHA
+        assert rows[0]["status"] == "failed"
 
     def test_failed_insert_fallback_carries_git_sha(self):
         with mock.patch.dict(

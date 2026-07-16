@@ -146,13 +146,20 @@ def fork_suggestions_for_cohorts(
     # without integration.
     champion_name = get_current_champion(user_id, supabase)
 
+    champion_tagged = 0
     for s in source_suggestions:
         try:
             supabase.table("trade_suggestions").update({
                 "cohort_name": champion_name,
             }).eq("id", s["id"]).execute()
-        except Exception:
-            pass  # Non-critical
+            champion_tagged += 1
+        except Exception as tag_err:
+            fork_errors.append({
+                "stage": "champion_tag_failed",
+                "source_suggestion_id": s.get("id"),
+                "error_class": type(tag_err).__name__,
+                "error": str(tag_err)[:200],
+            })
 
     # Get cohort portfolio mapping and cohort IDs. B16: an ids-fetch
     # failure is TYPED (never an authoritative-empty {}) — downstream every
@@ -253,6 +260,14 @@ def fork_suggestions_for_cohorts(
                     supabase.table("trade_suggestions").insert(clone).execute()
                     cloned += 1
             except Exception as e:
+                fork_errors.append({
+                    "stage": "legacy_normal_clone_insert_failed",
+                    "cohort": cohort_name,
+                    "source_suggestion_id": s.get("id"),
+                    "ticker": s.get("ticker") or s.get("symbol"),
+                    "error_class": type(e).__name__,
+                    "error": str(e)[:200],
+                })
                 logger.warning(
                     f"policy_lab_fork_clone_error: cohort={cohort_name} "
                     f"ticker={s.get('ticker')} error={e}"
@@ -319,8 +334,10 @@ def fork_suggestions_for_cohorts(
         )
 
     # (E19-2A coverage already ran ABOVE, before the legacy loop — B26.)
-    return _fork_result("ok", created, prerej_counts, fork_errors,
-                        champion_tagged=len(source_suggestions))
+    return _fork_result(
+        "ok", created, prerej_counts, fork_errors,
+        champion_tagged=champion_tagged,
+    )
 
 
 def _run_prerejection_coverage(
@@ -485,10 +502,18 @@ def _fork_result(
     return {
         "status": status,
         "reason": result_reason,
-        # B18 honest non-claim: the LEGACY champion-tagging/normal-clone path
-        # still swallows its own failures (pre-existing behavior, untouched
-        # by this PR) — 'ok' would be a claim nothing measures.
-        "champion_status": "legacy_unmeasured",
+        "champion_status": (
+            "partial"
+            if any(
+                e.get("stage") in {
+                    "champion_tag_failed",
+                    "legacy_normal_clone_insert_failed",
+                    "legacy_normal_clone_state_failed",
+                }
+                for e in fork_errors
+            )
+            else "ok"
+        ),
         "champion_tagged": champion_tagged,
         "created": created,
         "existing": prerej_counts.get("existing", 0),

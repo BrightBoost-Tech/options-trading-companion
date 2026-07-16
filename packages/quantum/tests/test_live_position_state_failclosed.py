@@ -251,10 +251,15 @@ class TestScanTruthPropagation:
             result = midday_scan.run({})
 
         assert result["ok"] is False
+        # #1218 (2026-07-16): the handler now also surfaces
+        # suggestion_insert_failures (0 here — this abort RAISED, it was not a
+        # per-suggestion insert exhaustion). The read-abort contract is
+        # unchanged: failed=1 -> errors=1 -> partial.
         assert result["counts"] == {
             "processed": 0,
             "failed": 1,
             "errors": 1,
+            "suggestion_insert_failures": 0,
         }
         assert _classify_handler_return(result) == "partial"
 

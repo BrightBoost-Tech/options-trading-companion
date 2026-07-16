@@ -2,10 +2,10 @@
 
 Two halves:
 
-  PHASE 1 — TestCurrentDefects reproduces, against the LIVE risk_envelope code,
-  the five defects this module exists to fix. These tests assert the WRONG
-  numbers on purpose: they are executable evidence, and they must be inverted
-  (not deleted) by the PR-2+ consumer migration that fixes each defect.
+  PHASE 1 — TestCurrentDefects proves the first production consumer closes
+  D1, D4, and the correlation-one slice of D5, while retaining executable
+  evidence for D2, D3, and unclamped linear stress. Each later consumer
+  migration must invert its defect assertion rather than delete it.
 
   PHASE 2 — the golden fixtures, payoff/greek/reconciliation contracts, and the
   typed rejection matrices for the new module.
@@ -21,6 +21,7 @@ from pathlib import Path
 
 from packages.quantum.risk.risk_envelope import (
     EnvelopeConfig,
+    PositionRiskUnavailable,
     _pos_risk,
     check_greeks,
     compute_stress_scenarios,
@@ -243,40 +244,89 @@ def _persisted_short_put_vertical(qty: int = -2, premium: float = 1.20) -> dict:
     }
 
 
+def _persisted_iron_condor() -> dict:
+    """_f3 as a persisted one-contract credit structure."""
+    return {
+        "id": "qqq-ic",
+        "quantity": -1,
+        "avg_entry_price": 1.49,
+        "legs": [
+            {"symbol": _occ("QQQ", "P", 650.0), "action": "sell",
+             "type": "put", "strike": 650.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "P", 645.0), "action": "buy",
+             "type": "put", "strike": 645.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "C", 765.0), "action": "sell",
+             "type": "call", "strike": 765.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("QQQ", "C", 770.0), "action": "buy",
+             "type": "call", "strike": 770.0, "expiry": "2026-09-18",
+             "quantity": 1},
+        ],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — reproduce the current defects against LIVE risk_envelope code
 # ══════════════════════════════════════════════════════════════════════════
 
 
 class TestCurrentDefects(unittest.TestCase):
-    """Executable evidence. These assert the WRONG numbers deliberately.
+    """Consumer-closure evidence plus the remaining live defects.
 
-    Every assertion here is pinned to risk_envelope.py as of bef2cdd. PR-2+
-    must INVERT these, never delete them.
+    D1, D4, and correlation-one D5 are inverted by canonical-position PR-2.
+    D2, D3, and the unclamped linear-stress slice of D5 remain pinned; never
+    delete them.
     """
 
-    def test_d1_credit_received_is_used_as_risk(self):
-        """risk_envelope.py:200-201 returns the credit RECEIVED as risk."""
-        pos = {"max_credit": 1.20, "quantity": -2, "avg_entry_price": 1.20}
+    def test_d1_exact_max_loss_replaces_credit_received(self):
+        """The first consumer returns exact payoff max loss, already qty-scaled."""
+        pos = _persisted_short_put_vertical()
 
         actual = _pos_risk(pos)
         honest = analyze_payoff(_f1_short_put_vertical()).max_loss_total
 
-        # What the live code says: the credit, i.e. the maximum GAIN.
-        self.assertAlmostEqual(actual, 240.0, places=2)
-        # What the structure can actually lose.
-        self.assertAlmostEqual(honest, 760.0, places=2)
-        # The defect: risk is understated 3.2x, and no width term is involved.
-        self.assertLess(actual, honest)
-        self.assertAlmostEqual(honest / actual, 3.1667, places=3)
+        self.assertAlmostEqual(actual, 760.0, places=2)
+        self.assertAlmostEqual(actual, honest, places=2)
+        self.assertNotAlmostEqual(actual, 240.0, places=2)
 
-    def test_d1_strikes_are_never_read(self):
-        """Proof there is no width term: widen the spread 4x, risk is unchanged."""
-        narrow = {"max_credit": 1.20, "quantity": -2}
-        wide = {"max_credit": 1.20, "quantity": -2}
-        # _pos_risk takes no legs at all — the signature cannot see strikes.
-        self.assertEqual(_pos_risk(narrow), _pos_risk(wide))
-        self.assertAlmostEqual(_pos_risk(wide), 240.0, places=2)
+    def test_d1_strike_width_changes_risk(self):
+        """Widening the protective leg changes exact risk; strikes are consumed."""
+        narrow = _persisted_short_put_vertical()
+        wide = _persisted_short_put_vertical()
+        wide["legs"][1]["symbol"] = _occ("SPY", "P", 80.0)
+        wide["legs"][1]["strike"] = 80.0
+
+        self.assertAlmostEqual(_pos_risk(narrow), 760.0, places=2)
+        self.assertAlmostEqual(_pos_risk(wide), 3760.0, places=2)
+        self.assertGreater(_pos_risk(wide), _pos_risk(narrow))
+
+    def test_d1_missing_structure_fails_closed(self):
+        """Premium alone can no longer masquerade as a finite risk number."""
+        with self.assertRaises(PositionRiskUnavailable):
+            _pos_risk(
+                {"id": "missing-legs", "max_credit": 1.20,
+                 "quantity": -2, "avg_entry_price": 1.20}
+            )
+
+    def test_d1_unbounded_structure_fails_closed(self):
+        """The defined-risk envelope must not fabricate a cap for a naked call."""
+        naked = {
+            "id": "naked-call",
+            "quantity": -1,
+            "avg_entry_price": 3.00,
+            "legs": [{
+                "symbol": _occ("SPY", "C", 100.0),
+                "action": "sell",
+                "type": "call",
+                "strike": 100.0,
+                "expiry": "2026-09-18",
+                "quantity": 1,
+            }],
+        }
+        with self.assertRaises(PositionRiskUnavailable):
+            _pos_risk(naked)
 
     def test_d2_opposing_leg_greeks_add_instead_of_netting(self):
         """risk_envelope.py:226-233 reads no side, so long+short ADD."""
@@ -367,24 +417,26 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertAlmostEqual(true_loss, 8900.0, places=2)
         self.assertAlmostEqual(blind_loss, 0.0, places=2)  # "cannot lose"
 
-    def test_d4_multiplier_is_hardcoded_100(self):
-        """No per-leg multiplier is read anywhere; 100 is a literal."""
-        pos = {"max_credit": 1.00, "quantity": 1}
-        self.assertAlmostEqual(_pos_risk(pos), 100.0, places=2)
+    def test_d4_multiplier_is_read_from_each_leg(self):
+        """The canonical consumer prices standard and mini multipliers honestly."""
+        standard = _persisted_short_put_vertical()
+        mini = _persisted_short_put_vertical()
+        for leg in mini["legs"]:
+            leg["multiplier"] = 10
 
-        # A mini/non-standard contract (multiplier 10) is unrepresentable: the
-        # live code has no field to carry it, so it prices at 100 regardless.
-        pos_mini = {"max_credit": 1.00, "quantity": 1, "multiplier": 10}
-        self.assertAlmostEqual(_pos_risk(pos_mini), 100.0, places=2)
-        self.assertEqual(_pos_risk(pos), _pos_risk(pos_mini))
+        self.assertAlmostEqual(_pos_risk(standard), 760.0, places=2)
+        self.assertAlmostEqual(_pos_risk(mini), 76.0, places=2)
+        self.assertNotEqual(_pos_risk(standard), _pos_risk(mini))
 
-        # The honest module carries it and the payoff scales with it.
         ten = _position(
-            [_leg("SPY", "P", 100.0, -1, multiplier=10.0), _leg("SPY", "P", 95.0, +1, multiplier=10.0)],
+            [_leg("SPY", "P", 100.0, -1, multiplier=10.0),
+             _leg("SPY", "P", 95.0, +1, multiplier=10.0)],
             total_entry_cashflow=+1.20 * 10 * 2,
             structure_quantity=2,
         )
-        self.assertAlmostEqual(analyze_payoff(ten).max_loss_total, 76.0, places=2)
+        self.assertAlmostEqual(
+            _pos_risk(mini), analyze_payoff(ten).max_loss_total, places=2
+        )
 
     def test_d5_stress_can_exceed_the_defined_risk_payoff_bound(self):
         """A linear delta extrapolation has no payoff floor.
@@ -408,16 +460,21 @@ class TestCurrentDefects(unittest.TestCase):
         # The unclamped number is 14x the structure's true worst case.
         self.assertLess(clamp.raw_total_pnl, clamp.floor_total)
 
-    def test_d5_correlation_one_stress_inherits_the_credit_basis(self):
-        """`corr_one_loss = -total_risk` (:535) is -sum(credit), not -max_loss."""
-        pos = {"max_credit": 1.49, "quantity": -1, "legs": []}
-        _violations, results = compute_stress_scenarios([pos], equity=10000.0, config=EnvelopeConfig())
+    def test_d5_correlation_one_uses_exact_payoff_max_loss(self):
+        """Correlation-one stress inherits the canonical position risk."""
+        pos = _persisted_iron_condor()
+        _violations, results = compute_stress_scenarios(
+            [pos], equity=10000.0, config=EnvelopeConfig()
+        )
 
-        # Live: "all positions at max loss" reports -$149 (the credit).
-        self.assertAlmostEqual(results["correlation_one"] * 10000.0, -149.0, places=2)
-        # Honest max loss for that structure is -$351.
         honest = analyze_payoff(_f3_qqq_iron_condor()).max_loss_total
         self.assertAlmostEqual(honest, 351.0, places=2)
+        self.assertAlmostEqual(
+            results["correlation_one"] * 10000.0, -honest, places=2
+        )
+        self.assertNotAlmostEqual(
+            results["correlation_one"] * 10000.0, -149.0, places=2
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1037,15 +1094,10 @@ class TestAdversarialModelInvariants(unittest.TestCase):
 
 
 class TestNonInterference(unittest.TestCase):
-    def test_no_production_module_imports_position_model(self):
-        """PR-1 is additive and unwired. Wiring is PR-2+, one consumer per PR.
-
-        This test must FAIL the moment a consumer is migrated — that failure is
-        the signal to move the consumer's evidence into its own PR, not to
-        weaken this assertion.
-        """
+    def test_exactly_one_production_consumer_imports_position_model(self):
+        """PR-2 migrates risk_envelope only; later consumers stay separate."""
         root = Path(__file__).resolve().parents[3]
-        offenders = []
+        consumers = []
         for path in root.rglob("*.py"):
             parts = path.parts
             if any(
@@ -1060,12 +1112,18 @@ class TestNonInterference(unittest.TestCase):
             except OSError:
                 continue
             if "position_model" in text:
-                offenders.append(str(path.relative_to(root)))
-        self.assertEqual(offenders, [], f"position_model must stay unwired: {offenders}")
+                consumers.append(str(path.relative_to(root)))
+        self.assertEqual(
+            consumers,
+            ["packages/quantum/risk/risk_envelope.py"],
+            f"canonical consumer boundary drifted: {consumers}",
+        )
 
-    def test_module_import_does_not_mutate_risk_envelope_behavior(self):
-        """The live functions return what they returned before this module existed."""
-        self.assertAlmostEqual(_pos_risk({"max_credit": 1.20, "quantity": -2}), 240.0, places=2)
+    def test_first_consumer_changes_only_risk_basis(self):
+        """D1 closes while the separately-gated greeks migration stays dormant."""
+        self.assertAlmostEqual(
+            _pos_risk(_persisted_short_put_vertical()), 760.0, places=2
+        )
         _violations, greeks = check_greeks(
             [{"quantity": 1, "legs": [{"action": "buy", "greeks": {"delta": 0.5}}]}],
             EnvelopeConfig(),

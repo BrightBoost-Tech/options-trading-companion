@@ -184,6 +184,14 @@ class TestResolver:
         ):
             assert resolve_git_sha() == "unknown"
 
+    def test_get_code_sha_preserves_legacy_short_git_sha(self):
+        with mock.patch.dict(
+            os.environ,
+            {"GIT_SHA": "abc123def456"},
+            clear=True,
+        ):
+            assert get_code_sha() == "abc123def456"
+
     def test_get_code_sha_keeps_short_contract(self):
         with mock.patch.dict(
             os.environ,

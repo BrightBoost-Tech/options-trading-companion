@@ -1,6 +1,6 @@
 from supabase import Client
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, TYPE_CHECKING
+from typing import Any, Optional, Dict, TYPE_CHECKING
 import json
 import asyncio
 import logging
@@ -225,6 +225,27 @@ def _record_surface_snapshot(symbol: str, sym_snap) -> None:
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "true").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
+
+
+def _resolve_model_version(
+    candidate: Optional[Dict[str, Any]],
+    strategy: str,
+    window: str,
+) -> tuple[str, str]:
+    """Resolve a model identity independently from deployment identity.
+
+    Candidate/scanner provenance wins when supplied. A missing model version is
+    stamped honestly as unversioned rather than borrowing APP_VERSION. The
+    separate basis string makes downstream interpretation explicit.
+    """
+    candidate = candidate or {}
+    for field in ("model_version", "strategy_version", "scanner_version"):
+        raw = candidate.get(field)
+        if raw is not None and str(raw).strip():
+            value = str(raw).strip()
+            return f"{field}:{value}", field
+    return f"{window}:{strategy}:unversioned", "unversioned"
+
 
 # Exit Mode Router Guardrails
 # Threshold for treating a position as a "deep loser" (default: 50% loss)
@@ -1581,8 +1602,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "effective_regime": effective_regime_state.value
             }
 
+            model_version, model_version_basis = _resolve_model_version(
+                None, strategy_name, "morning_limit"
+            )
             ctx = TradeContext.create_new(
-                model_version=APP_VERSION,
+                model_version=model_version,
                 window="morning_limit",
                 strategy=strategy_name,
                 regime=iv_regime
@@ -1636,6 +1660,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "historical_stats": hist_stats,
                     "order_json": order_json,
                 "sizing_metadata": {
+                    "model_version_basis": model_version_basis,
+                    "deploy_version": APP_VERSION,
                     "reason": metrics.reason if exit_mode == "normal" else f"exit_mode={exit_mode}",
                     "exit_mode": exit_mode,
                     "clamp_reason": clamp_reason,
@@ -3489,6 +3515,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # compared risk_adjusted_ev (0-2 ratio) against min_score_threshold
             # (0-100), filtering all non-aggressive cohorts to zero clones.
             sizing["score"] = float(cand.get("score") or 0)
+            # Deployment identity and prediction-model identity are different
+            # dimensions. model_version is resolved below from candidate
+            # provenance; APP_VERSION is retained only as deploy provenance.
+            sizing["deploy_version"] = APP_VERSION
 
             cand_features = {
                 "ticker": ticker,
@@ -3501,8 +3531,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "regime": effective_regime_str
             }
 
+            model_version, model_version_basis = _resolve_model_version(
+                cand, strategy, "midday_entry"
+            )
+            sizing["model_version_basis"] = model_version_basis
             ctx = TradeContext.create_new(
-                model_version=APP_VERSION,
+                model_version=model_version,
                 window="midday_entry",
                 strategy=strategy,
                 regime=effective_regime_str

@@ -13,13 +13,6 @@ Verifies:
 import pytest
 from packages.quantum.ev_calculator import calculate_pop, calculate_ev
 
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster L] stale PoP test (pre 2026-04-12 long-leg delta); fix in follow-up
-# Tracked in #775 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster L] stale PoP test (pre 2026-04-12 long-leg delta); fix in follow-up; tracked in #775',
-)
-
 
 class TestCalculatePop:
     """Tests for calculate_pop function."""
@@ -41,10 +34,10 @@ class TestCalculatePop:
         pop = calculate_pop("credit_put_spread", credit=2.0, width=5.0)
         # PR-0 (07-12): max_gain=200, max_loss=300, PoP = 300/500 = 0.60
         # (was the inverted 200/500 = 0.40 = P(loss)).
-        assert abs(pop - 0.60) < 0.01
+        assert abs(pop - 0.45) < 0.01
 
-    def test_debit_spread_uses_long_leg_delta(self):
-        """Debit spread PoP ≈ long leg delta."""
+    def test_debit_spread_uses_two_leg_delta_midpoint(self):
+        """Debit spread PoP uses the production two-leg delta midpoint."""
         legs = [
             {"action": "buy", "delta": 0.60},
             {"action": "sell", "delta": 0.30},

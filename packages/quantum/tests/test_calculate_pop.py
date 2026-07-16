@@ -3,7 +3,7 @@ Tests for Phase 3: strategy-aware probability of profit (PoP) via calculate_pop.
 
 Verifies:
 1. Credit spread PoP uses credit/width ratio
-2. Debit spread PoP uses long leg delta
+2. Debit spread PoP uses the two-leg delta midpoint
 3. Single-leg long uses raw delta
 4. Single-leg short uses 1 - delta
 5. Fallback to delta when strategy-specific data is missing
@@ -12,13 +12,6 @@ Verifies:
 
 import pytest
 from packages.quantum.ev_calculator import calculate_pop, calculate_ev
-
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster L] stale PoP test (pre 2026-04-12 long-leg delta); fix in follow-up
-# Tracked in #775 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster L] stale PoP test (pre 2026-04-12 long-leg delta); fix in follow-up; tracked in #775',
-)
 
 
 class TestCalculatePop:
@@ -43,14 +36,14 @@ class TestCalculatePop:
         # (was the inverted 200/500 = 0.40 = P(loss)).
         assert abs(pop - 0.60) < 0.01
 
-    def test_debit_spread_uses_long_leg_delta(self):
-        """Debit spread PoP ≈ long leg delta."""
+    def test_debit_spread_uses_two_leg_delta_midpoint(self):
+        """Debit spread PoP uses the production two-leg delta midpoint."""
         legs = [
             {"action": "buy", "delta": 0.60},
             {"action": "sell", "delta": 0.30},
         ]
         pop = calculate_pop("debit_spread", legs=legs)
-        assert abs(pop - 0.60) < 0.01
+        assert abs(pop - 0.45) < 0.01
 
     def test_long_call_uses_delta(self):
         """Long call PoP ≈ delta."""

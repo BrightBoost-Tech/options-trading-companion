@@ -258,22 +258,21 @@ class LineageSigner:
 # =============================================================================
 
 def resolve_git_sha(explicit_sha: Optional[str] = None) -> str:
-    """Resolve the full deployed commit SHA without trusting sentinels.
+    """Resolve one authoritative full 40-hex deployed commit SHA.
 
-    Railway injects RAILWAY_GIT_COMMIT_SHA at runtime, while the image
-    currently defaults GIT_SHA to the truthy literal "unknown". Treat
-    blank/unknown/null-like values as absent so that placeholder cannot shadow
-    the authoritative Railway deployment identity.
+    Candidate precedence is explicit writer value, GIT_SHA, then Railway\'s
+    deployment identity. Precedence applies after validation: placeholders,
+    short hashes, branch names, and malformed values cannot shadow a later
+    authoritative full SHA.
     """
-    invalid = {"", "unknown", "none", "null"}
     for candidate in (
         explicit_sha,
         os.getenv("GIT_SHA"),
         os.getenv("RAILWAY_GIT_COMMIT_SHA"),
     ):
         value = (candidate or "").strip()
-        if value.casefold() not in invalid:
-            return value
+        if len(value) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+            return value.lower()
     return "unknown"
 
 

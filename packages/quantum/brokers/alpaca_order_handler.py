@@ -858,12 +858,25 @@ def poll_pending_orders(
                         # return and any exception are both non-authoritative.
                         # A refetch failure escapes to the existing outer error
                         # path, leaving the DB row pollable and untouched.
-                        alpaca_order = alpaca.get_order(alpaca_id)
-                        alpaca_status = alpaca_order.get("status", "")
-                        internal_status = status_map.get(alpaca_status, "working")
-                        refreshed_filled_qty = float(
-                            alpaca_order.get("filled_qty") or 0
-                        )
+                        try:
+                            alpaca_order = alpaca.get_order(alpaca_id)
+                            alpaca_status = alpaca_order.get("status", "")
+                            internal_status = status_map.get(
+                                alpaca_status, "working"
+                            )
+                            refreshed_filled_qty = float(
+                                alpaca_order.get("filled_qty") or 0
+                            )
+                        except Exception as refresh_err:
+                            # Convert every broker/refetch/decoding failure,
+                            # including ValueError/TypeError, so the narrow
+                            # malformed-timestamp handler below cannot swallow
+                            # it.  The outer poll error path leaves the row
+                            # nonterminal and makes the failure observable.
+                            raise RuntimeError(
+                                "watchdog broker refetch failed: "
+                                f"{type(refresh_err).__name__}: {refresh_err}"
+                            ) from refresh_err
 
                         if (
                             alpaca_status == "canceled"
@@ -892,6 +905,16 @@ def poll_pending_orders(
 
                             watchdog_cancels += 1
                             continue  # Fresh broker truth is cleanly cancelled
+
+                        if (
+                            refreshed_filled_qty > 0
+                            and alpaca_status != "filled"
+                        ):
+                            # Broker terminal + residual fill is not a clean
+                            # cancellation.  Keep it in the poll set under
+                            # explicit custody until the partial-close path is
+                            # reconciled; never hide it as cancelled.
+                            internal_status = "needs_manual_review"
 
                         # Filled/partial/nonterminal truth falls through to the
                         # normal reconciliation below.  In particular, a
@@ -1069,7 +1092,7 @@ def poll_pending_orders(
                         f"[ALPACA_HANDLER] Fill commit failed: order={order_id} "
                         f"position_id={pos_id} error={fill_err}"
                     )
-            elif internal_status == "partial":
+            elif internal_status in ("partial", "needs_manual_review"):
                 partials += 1
             elif internal_status == "cancelled":
                 cancels += 1

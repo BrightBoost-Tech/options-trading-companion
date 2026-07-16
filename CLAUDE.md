@@ -742,6 +742,24 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
+## Backlog standing and closure discipline
+
+- The newest dated **POST-MERGE STANDING** block in `docs/backlog.md` is the
+  actionable queue. Older dated queue text is preserved as history and must not
+  be rebuilt when it conflicts with the newest standing.
+- Before opening a lane, verify the alleged gap against current `origin/main`
+  code and merged PRs. Classify it as **shipped**, **partial**, **runtime
+  pending**, **gated/operator-owned**, or **open**.
+- A partial closure must name both the shipped slice and the exact remainder.
+  Never close a broad family because one consumer was fixed, and never present
+  the shipped slice as a new backlog item.
+- Merged code is not runtime proof. Record the natural falsifier separately;
+  lack of a qualifying event is **INCONCLUSIVE**, not failure or success.
+- Reconciliation/docs work never authorizes a flag, threshold, stop, gate,
+  schedule, broker, DB, migration, or environment change.
+
+---
+
 ## Working style
 
 Exact SQL, exact file:line, exact Railway commands — no placeholders. Show

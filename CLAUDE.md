@@ -677,6 +677,33 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   ordinal, canonical RAeV is a dimensionless ratio, and account equity is
   capital—not position P&L. Never threshold, aggregate, or compare a value
   whose basis, unit, quantity scaling, and provenance are unknown.
+- **Structure risk requires a canonical payoff representation.** Premium
+  received, entry debit, and account equity are not substitutes for defined-
+  risk max loss. Normalize signed legs, ratios, strikes, expiries, structure
+  quantity, and per-leg multipliers; consume a position-level `*_total`
+  exactly once. Missing/malformed legs or unbounded payoff must produce a
+  typed non-green outcome—never a premium fallback, zero, or finite cap. When
+  migrating consumers, invert the existing defect pins and keep unrelated
+  greek/stress/sizing seams in separately reviewable changes.
+- **Capital evidence has strict precedence.** When `net_liq` is present and
+  non-null it is authoritative, including when it is invalid: zero, negative,
+  non-numeric, NaN, or infinity must fail closed and may not fall through to
+  cash. `cash_balance` is a basis only when `net_liq` is absent/null.
+  Never fabricate nominal shadow capital. A failed cohort capital read must
+  create no clone/score and must propagate to `counts.errors` plus a
+  partial/failed top-level job.
+- **Count effects from successful writes, not intended rows.** Tag, clone,
+  verdict, and manifest counts increment only after the durable operation
+  succeeds. A caught write exception must carry a typed stage to the job
+  result; an alert receipt does not convert the failed effect into success.
+  Report champion/control status separately from experimental-path status.
+- **Model identity and deploy identity are different provenance axes.**
+  `APP_VERSION` or a Git SHA identifies deployed code, not the prediction
+  model. Persist model/strategy/scanner version from its own source and stamp
+  the basis; if none exists, say `unversioned`. Preserve deploy version/SHA
+  separately. A model-only change must alter model identity without requiring
+  an application-version fiction.
+
 - **An experiment may claim only what it observes.** Raw-candidate
   eligibility is not entry selection, capacity evaluation, execution, or
   outcome evidence. Shadow fills and $100k-era cohort ledgers do not prove

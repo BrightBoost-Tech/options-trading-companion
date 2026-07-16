@@ -50,6 +50,26 @@ JOB_NAME = "ops_health_check"
 SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 
+def _broker_market_open() -> Any:
+    """Read the broker-authoritative session state once per health cycle.
+
+    ``None`` is a typed degraded result: callers then retain the existing ET
+    wall-clock fallback. A successful ``False`` is load-bearing on exchange
+    holidays and must never be collapsed with failure.
+    """
+    try:
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+
+        clock = get_alpaca_client().get_market_clock()
+        return bool(clock["is_open"])
+    except Exception as exc:
+        logger.warning(
+            "[OPS_HEALTH_CHECK] broker clock unavailable; using ET fallback: %s",
+            exc,
+        )
+        return None
+
+
 def _run_alert_relay(client: Any) -> Dict[str, Any]:
     """A3 egress-relay step, fail-isolated: a relay bug must never fail the
     health check, and the relay itself already never raises — this wrapper
@@ -249,6 +269,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         logger.info("[OPS_HEALTH_CHECK] Relaying direct-insert alerts...")
         alert_relay = _run_alert_relay(client)
 
+        # One broker-clock read controls both RTH alert families. A successful
+        # closed reading covers weekends, exchange holidays, and half-days;
+        # failure stays distinguishable from closed and degrades to the
+        # existing ET wall-clock predicate.
+        broker_is_open = _broker_market_open()
+
         # ==============================================================
         # 1. Build expanded freshness universe and check market data
         # ==============================================================
@@ -282,7 +308,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # is market-hours-gated so the new risk_alerts channel doesn't
             # import nightly noise; the snapshot still records staleness).
             suppressed, last_sent = should_suppress_alert(client, fingerprint, cooldown_minutes)
-            if not is_us_market_hours():
+            # Keep the legacy wall-clock predicate as the explicit degraded
+            # fallback. A successful broker False is authoritative on exchange
+            # holidays; None means the broker read failed, not that it closed.
+            market_is_open = (
+                broker_is_open
+                if broker_is_open is not None
+                else is_us_market_hours()
+            )
+            if not market_is_open:
                 suppressed, last_sent = True, "outside_market_hours"
 
             if not suppressed:
@@ -316,7 +350,10 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         # 2. Check expected job status
         # ==============================================================
         logger.info("[OPS_HEALTH_CHECK] Checking expected jobs...")
-        expected_jobs = get_expected_jobs(client)
+        expected_jobs = get_expected_jobs(
+            client,
+            broker_is_open=broker_is_open,
+        )
 
         for job in expected_jobs:
             if job.status == "late":

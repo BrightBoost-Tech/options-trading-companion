@@ -35,6 +35,14 @@ def _pos(pos_id, unrealized_pl, unpriceable=False, symbol="NFLX"):
     p = {
         "id": pos_id, "symbol": symbol, "quantity": 2.0,
         "avg_entry_price": 3.08, "unrealized_pl": unrealized_pl,
+        "legs": [
+            {"symbol": "NFLX260918P00100000", "action": "buy",
+             "type": "put", "strike": 100.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": "NFLX260918P00095000", "action": "sell",
+             "type": "put", "strike": 95.0, "expiry": "2026-09-18",
+             "quantity": 1},
+        ],
         "portfolio_id": "pf-1",
     }
     if unpriceable:

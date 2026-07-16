@@ -742,6 +742,49 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
+## Small-tier shadow-fleet evidence contract
+
+- `small_tier_v1` is exactly 50 isolated virtual accounts, each initialized
+  with $2,000 net liquidation and $2,000 cash. The $100,000 sum is
+  administrative/reporting-only: it is never a sizing balance and capital,
+  utilization, or loss recovery never crosses account boundaries.
+- A micro account remains inactive until it has one unique pre-registered
+  policy identity. Unassigned slots stay inactive; identical policy copies do
+  not manufacture independent evidence.
+- Preserve historical $100k portfolios as `legacy_100k`; never rescale,
+  rewrite, or pool their fills/P&L with the small-tier epoch. Activation
+  requires zero legacy open positions, zero legacy working orders, and one
+  explicit timezone-aware effective timestamp at the durable transaction.
+- Evaluate each natural candidate once. Every account evaluation carries the
+  source suggestion UUID as immutable `decision_event_id`. Statistical n is
+  `COUNT(DISTINCT decision_event_id)`, never evaluation/position/account-row
+  count; cross-policy analysis is paired on that identity.
+- A schema migration, merged contract, or operator design approval is not fleet
+  activation. Migration application, policy registration, clean-boundary
+  runtime proof, row creation, and any runtime caller are separate gates.
+- The fleet is shadow/observe-only. It never authorizes a live flag, control,
+  threshold, stop, gate, strategy, universe, cadence, or broker action.
+
+---
+
+## Backlog standing and closure discipline
+
+- The newest dated **POST-MERGE STANDING** block in `docs/backlog.md` is the
+  actionable queue. Older dated queue text is preserved as history and must not
+  be rebuilt when it conflicts with the newest standing.
+- Before opening a lane, verify the alleged gap against current `origin/main`
+  code and merged PRs. Classify it as **shipped**, **partial**, **runtime
+  pending**, **gated/operator-owned**, or **open**.
+- A partial closure must name both the shipped slice and the exact remainder.
+  Never close a broad family because one consumer was fixed, and never present
+  the shipped slice as a new backlog item.
+- Merged code is not runtime proof. Record the natural falsifier separately;
+  lack of a qualifying event is **INCONCLUSIVE**, not failure or success.
+- Reconciliation/docs work never authorizes a flag, threshold, stop, gate,
+  schedule, broker, DB, migration, or environment change.
+
+---
+
 ## Working style
 
 Exact SQL, exact file:line, exact Railway commands — no placeholders. Show

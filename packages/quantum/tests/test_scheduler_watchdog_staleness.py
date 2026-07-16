@@ -103,6 +103,25 @@ def test_monitor_never_ran_during_rth_is_flagged():
     assert _status(results, "intraday_risk_monitor") == "never_run"
 
 
+def test_labor_day_broker_clock_suppresses_intraday_late_alerts():
+    """2026-09-07 is Monday but the exchange is closed for Labor Day."""
+    labor_day = datetime(2026, 9, 7, 16, 0, tzinfo=timezone.utc)
+    old = labor_day - timedelta(days=4)
+
+    results = get_expected_jobs(
+        _mock_client(old.isoformat()),
+        now=labor_day,
+        broker_is_open=False,
+    )
+
+    for job_name in (
+        "alpaca_order_sync",
+        "intraday_risk_monitor",
+        "scheduler_heartbeat",
+    ):
+        assert _status(results, job_name) == "ok"
+
+
 def test_monitor_stale_when_market_closed_not_flagged_weekend():
     """NO FALSE POSITIVE: the SAME 2h-stale monitor on a WEEKEND is NOT flagged
     (weekend silence is by design)."""

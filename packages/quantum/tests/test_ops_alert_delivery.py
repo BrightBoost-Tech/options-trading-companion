@@ -162,6 +162,21 @@ class TestDualChannel(unittest.TestCase):
 
 
 class TestMarketHoursGate(unittest.TestCase):
+    def test_broker_closed_overrides_weekday_wall_clock_on_holiday(self):
+        labor_day_rth = datetime(2026, 9, 7, 15, 0, tzinfo=timezone.utc)
+        self.assertFalse(
+            ohs.is_us_market_hours(
+                labor_day_rth,
+                broker_is_open=False,
+            )
+        )
+
+    def test_broker_open_overrides_wall_clock(self):
+        saturday = datetime(2026, 6, 13, 15, 0, tzinfo=timezone.utc)
+        self.assertTrue(
+            ohs.is_us_market_hours(saturday, broker_is_open=True)
+        )
+
     def test_weekday_open(self):
         self.assertTrue(ohs.is_us_market_hours(
             datetime(2026, 6, 11, 14, 0, tzinfo=timezone.utc)))

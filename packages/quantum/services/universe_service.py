@@ -44,6 +44,14 @@ class UniverseService:
         self.supabase = supabase
         self.polygon = polygon_service or PolygonService()
         self.earnings_service = EarningsCalendarService(self.polygon)
+        # Reporting-only handoff to options_scanner. Values describe this
+        # instance's most recent selection; None means the DB measurement was
+        # unavailable, never a fabricated zero.
+        self.last_selection_counts = {
+            "active_universe_count": None,
+            "selected_symbol_count": None,
+            "selection_source": "not_run",
+        }
 
     # Int-like keys that must be sanitized for Postgres BigInt
     INT_LIKE_KEYS = {
@@ -382,6 +390,7 @@ class UniverseService:
         all_rows: List[Dict] = []
         fallback_used = False
         fallback_reason: Optional[str] = None
+        active_universe_count: Optional[int] = None
         sort_order = "liquidity_score DESC, symbol ASC"  # overwritten below
 
         try:
@@ -420,6 +429,7 @@ class UniverseService:
                 .execute()
 
             all_rows = list(res.data or [])
+            active_universe_count = len(all_rows)
 
             if _weighting_on and all_rows:
                 # #1015 blended priority — sort key deliberately untouched
@@ -528,6 +538,11 @@ class UniverseService:
                     "failed: %s", alert_err,
                 )
 
+        self.last_selection_counts = {
+            "active_universe_count": active_universe_count,
+            "selected_symbol_count": len(candidates),
+            "selection_source": "fallback" if fallback_used else "scanner_universe",
+        }
         return candidates
 
     def _log_selection(

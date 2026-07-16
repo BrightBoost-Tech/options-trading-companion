@@ -7,7 +7,8 @@ price.
 """
 import unittest
 from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
+from zoneinfo import ZoneInfo
 
 from packages.quantum.analytics.thesis_scoring import score_thesis, classify_structure
 from packages.quantum.jobs.handlers import thesis_tracker as tt
@@ -193,6 +194,39 @@ class TestHandlerContract(unittest.TestCase):
         store = self._store([self._pos("p3", future, _ic())])
         out = _run_handler(store, {"QQQ": [{"date": future, "close": 700.0}]})
         self.assertEqual(out["counts"]["errors"], 0)  # in_progress is NOT an error
+        self.assertEqual(store["upserts"][0]["thesis_outcome"], "in_progress")
+
+    def test_scores_on_expiry_day_post_close_run(self):
+        # The production job is scheduled post-close. Same-day expiry is
+        # terminal-eligible so a Friday contract does not remain in_progress
+        # until the next scheduled run after the weekend.
+        market_day = datetime.now(ZoneInfo("America/New_York")).date()
+        expiry = market_day.isoformat()
+        as_of = datetime.combine(
+            market_day, time(16, 16), tzinfo=ZoneInfo("America/New_York")
+        ).astimezone(timezone.utc)
+        store = self._store([self._pos("p3-today", expiry, _ic(expiry=expiry))])
+        with patch.object(tt, "_utc_now", return_value=as_of):
+            out = _run_handler(
+                store, {"QQQ": [{"date": expiry, "close": 700.0}]}
+            )
+        self.assertEqual(out["counts"]["errors"], 0)
+        row = store["upserts"][0]
+        self.assertEqual(row["thesis_outcome"], "hit")
+        self.assertEqual(row["price_basis"], "expiry_close")
+
+    def test_same_day_manual_preclose_run_stays_in_progress(self):
+        market_day = datetime.now(ZoneInfo("America/New_York")).date()
+        expiry = market_day.isoformat()
+        as_of = datetime.combine(
+            market_day, time(15, 59), tzinfo=ZoneInfo("America/New_York")
+        ).astimezone(timezone.utc)
+        store = self._store([self._pos("p3-preclose", expiry, _ic(expiry=expiry))])
+        with patch.object(tt, "_utc_now", return_value=as_of):
+            out = _run_handler(
+                store, {"QQQ": [{"date": expiry, "close": 700.0}]}
+            )
+        self.assertEqual(out["counts"]["errors"], 0)
         self.assertEqual(store["upserts"][0]["thesis_outcome"], "in_progress")
 
     def test_idempotent_skips_terminal(self):

@@ -195,6 +195,18 @@ class TestHandlerContract(unittest.TestCase):
         self.assertEqual(out["counts"]["errors"], 0)  # in_progress is NOT an error
         self.assertEqual(store["upserts"][0]["thesis_outcome"], "in_progress")
 
+    def test_scores_on_expiry_day_post_close_run(self):
+        # The production job is scheduled post-close. Same-day expiry is
+        # terminal-eligible so a Friday contract does not remain in_progress
+        # until the next scheduled run after the weekend.
+        today = datetime.now(timezone.utc).date().isoformat()
+        store = self._store([self._pos("p3-today", today, _ic(expiry=today))])
+        out = _run_handler(store, {"QQQ": [{"date": today, "close": 700.0}]})
+        self.assertEqual(out["counts"]["errors"], 0)
+        row = store["upserts"][0]
+        self.assertEqual(row["thesis_outcome"], "hit")
+        self.assertEqual(row["price_basis"], "expiry_close")
+
     def test_idempotent_skips_terminal(self):
         store = self._store(
             [self._pos("p4", "2026-06-18", _ic())],

@@ -4,6 +4,108 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-16 — ADJUDICATED: Fable 5 options-entry strategy verification · status:reported
+
+Prompt: `docs/review/fable5-options-entry-strategy-verification-prompt-2026-07-16.md`
+(rides PR #1232, unmerged at audit time). Results:
+`docs/review/fable5-options-entry-strategy-verification-results-2026-07-16.md`.
+Model `claude-fable-5`. Code basis `b95d3a3f5766ff3689be9816f0f90d13fc8cfa3c`
+== deployed SHA on BE/worker/worker-background (Railway SUCCESS 13:19Z,
+verified) — no merged-vs-running gap. Docs basis: same SHA (backlog blob
+`5d3157b`, ledger blob `9ce8ffa`). Runtime scope: read-only Alpaca live
+(clock/account/config/positions/orders ≈19:57Z: $2,067.86 flat,
+approved/effective options level 3), Supabase aggregates, Railway deployment
+list. Env VALUES deliberately unread (hygiene: env key NAMES only; never
+list_variables with values) → deployed flag values labeled NOT-PROVEN.
+
+**Do not re-derive (exclusion memory):**
+- H1 selector pool CONFIRMED exactly {4 verticals, IRON_CONDOR, HOLD/CASH or
+  empty-list}; `get_candidates` + IC phase gate have ZERO executing tests;
+  `/paper/order/stage`+`/paper/execute` are UI-orphaned arbitrary-ticket
+  seams (leg-count-only strategy validation, #1038/#1101 still apply).
+- H4 credit-vertical raw EV ≡ $0 CONFIRMED numerically (real module import, 6
+  credit/width pairs, exact zeros) AND calibration is a pure multiplier
+  (0×mult=0) — a credit vertical can never clear either $15 floor; 0 credit
+  suggestions ALL-TIME (DB census). ⑤ already owns this — evidence
+  strengthened, NOT re-filed.
+- H5: condor EV is env-model-selectable; code default `strict`
+  (`options_scanner.py:214`); the ⑤ charter's "CONDOR_EV_MODEL=tail deployed
+  / ×0.6 / 0.35" matches NO code default → **pending verification: operator
+  env read-back**, then fix whichever text is stale.
+- H6/H7: account small tier (broker re-read 07-16); micro↔small cliff is
+  DOCUMENTED-INTENTIONAL doctrine with an unreconciled risk-RAISING step
+  crossing down $1,000 (2.5× NORMAL / 9× SHOCK — micro bypasses the 5% shock
+  cap); boundary tests pin the legacy $38.88 number, production is ~$360 →
+  F-TIER-CLIFF-REVIEW (RESEARCH, owner) + F-SELECTOR-ROUTE-TESTS (P2).
+- H8: $15 MIN_EDGE binding-by-design at $2k (`execution_cost_exceeds_ev` 744
+  in 14d vs `ev_non_positive` 5); the three distinct cost bases at
+  scanner/ranker/stage gates are multi-basis phase 2's charter measured live —
+  no threshold change recommended, no new filing.
+- H9 CONFIRMED: wrapper drops both options-level fields
+  (`alpaca_client.py:252-267`); no strategy→level preflight; no permission
+  bucket in `_TERMINAL_REJECT_MARKERS` → **F-OPTIONS-LEVEL-PREFLIGHT (P2)**.
+- H10 VERIFIED end-to-end: phase = `micro_live` (DB, 2026-04-25) → IC live;
+  fail-CLOSED to `alpaca_paper` on read failure; phase-excluded IC is
+  indistinguishable from no-candidate in `suggestion_rejections` → extends
+  funnel telemetry phase 2 (with `strategy_key` NULL-on-all-rows attribution
+  gap, 5,076/5,076 in 14d).
+- H11 narrowed: lifecycle migration EXISTS and self-verifies; the fail-open
+  to `live_full` is intentional loader/consumer behavior; inert today (5 rows
+  all `live_full`); exits lifecycle-independent → **F-LIFECYCLE-TYPED-DEGRADE
+  (P2, hard trigger: first non-live_full row)**.
+- H12 CONFIRMED phantom feature: no migration defines
+  `settings.banned_strategies` (production column = untracked drift; table has
+  0 rows); reader degrades to `[]` at logger.debug; zero write surface; full
+  enforcement machinery live-routed and permanently inert → **F-BAN-INTEGRITY
+  (P2, owner: build-or-remove)**.
+- H13 CONFIRMED: DTE 25–45 enforced at chain-fetch, target 35, one scan/day;
+  `midday_scan.py` is the same cycle (not separately scheduled); no 0DTE path
+  exists — 0DTE stays unfiled.
+- H14: single-leg longs supported at every seam EXCEPT the selector pool;
+  repair-first defects: scanner `max_profit=inf` primitive + naked-collateral
+  placeholder → **F-SINGLE-LEG-EXPERIMENTAL (RESEARCH, owner-gated)**.
+- H15/H16: butterfly/calendar/diagonal/straddle/strangle/CSP/covered-call/
+  naked/0DTE all ABSENT end-to-end (verdict table in results §6); covered_call
+  exists ONLY in the Compose mock; strangle/naked are half-wired
+  (`calculate_ev` raises NotImplementedError). Naked shorts:
+  PROHIBIT-UNDEFINED-RISK. None filed.
+- H17 CONFIRMED: Compose "New Trade" CTA = `Math.random()` mock, stale
+  2025-02-21 example, zero network calls; paper page manages-only; the ONLY UI
+  entry action (TradeInbox Stage) rides the same gated `_stage_order_internal`
+  — **no UI gate bypass exists** (REJECTED worst case) →
+  **F-UI-CAPABILITY-HONESTY (P2)**.
+- H18 CONFIRMED: ≥11 naming schemes; registry matches zero persisted strategy
+  strings; two behavior-relevant consumers (LossMinimizer debit→naked-long
+  misclass, production-wired morning path; risk-cap substring miss → 0.05
+  floor fail-TIGHT) → **F-STRAT-ID-CONSUMERS (P2, extends canonical-position
+  remainder)**; exit evaluator is safe on unknown names via qty-fallback
+  (only a `condor`-alias would miss the IC stop-bypass); `take_profit_limit`
+  polluted `trade_suggestions.strategy` historically (12 rows, ended
+  2026-04-08).
+- H3 PARTIAL: debit verticals structurally suitable; superiority NOT
+  evidence-rankable at n=8 broker-live closes (IC 0W/4 −$143 · LCDS 0W/3 −$83
+  · LPDS 1W/1 +$48; paper/shadow 94 all-time kept separate).
+
+Disposition counts: 13 CONFIRMED-NEW · 3 CONFIRMED-EXTENDS-EXISTING (H5, H8,
+H10) · 1 CONFIRMED-ALREADY-OWNED (H4→⑤) · 1 PARTIAL (H3) · 0 DUPLICATE-rows ·
+0 REJECTED-rows · 0 NOT-PROVEN-rows (deployed-env sub-claims NOT-PROVEN inside
+rows). Backlog destinations: 07-16 Fable-5 backlog section (5 new P2 + 2
+RESEARCH + 2 extends + 1 pending-verification). Priority ordering of "Actual
+next priorities": UNCHANGED.
+
+**Pending runtime falsifiers (this entry owns):** operator env read-back
+`CONDOR_EV_MODEL`/`CONDOR_TAIL_*`/`MIN_EDGE_AFTER_COSTS`/`MULTI_STRATEGY_EVAL`
+(names-only hygiene) · first morning-cycle loss analysis on a losing debit
+spread (LossMinimizer blast radius) · first non-live_full lifecycle row
+(H11 trigger) · any broker permission-shaped rejection (H9 retry misclass;
+do not manufacture).
+
+**No production code, migration, DB/broker write, deploy, flag, gate,
+threshold, sizing, strategy activation, entry, exit, or control changed.**
+Session worked in an isolated pinned worktree; the operator tree's uncommitted
+ledger rewrite (+104/−455 vs origin/main) was preserved untouched — reconcile
+at merge (results §13.1).
+
 ## 2026-07-16 — OVERNIGHT BACKLOG LANES · status:merged-foundation/draft
 
 Grounded GitHub main at `0e3e54f0821f2114b3d1b10074f15686f5e555c5`.

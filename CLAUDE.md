@@ -660,7 +660,7 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
 - **Keep proof layers separate.** Label material claims `VERIFIED-CODE`,
   `VERIFIED-MERGE`, `VERIFIED-CI`, `VERIFIED-RUNTIME`, `INFERRED`, or
   `NOT_PROVEN`. Green tests prove only their exercised route; a merge proves
-  neither deployment nor behavior. No qualifying natural event is
+  neither deployment nor behavior. When no qualifying natural event occurs, the result is
   `INCONCLUSIVE`, never PASS. Use §9's origin-to-top rule for every defect.
 - **Empty data is not a failed read.** A successful zero-row result and a DB,
   broker, or provider failure require different typed outcomes. Position,

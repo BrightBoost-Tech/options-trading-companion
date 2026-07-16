@@ -277,15 +277,21 @@ def resolve_git_sha(explicit_sha: Optional[str] = None) -> str:
 
 
 def get_code_sha() -> str:
-    """Get the existing short lineage identifier.
+    """Get the legacy short lineage identifier.
 
-    The public contract remains a 12-character SHA when one is available,
-    otherwise APP_VERSION. Decision tapes use resolve_git_sha directly because
-    decision_runs.git_sha must retain the full deployment SHA.
+    Existing suggestion lineage accepts a non-sentinel short GIT_SHA and
+    truncates longer values to 12 characters. Preserve that public contract;
+    only decision-tape provenance uses the strict full-40 resolver. When the
+    Docker value is a placeholder, Railway\'s authoritative full SHA remains
+    the fallback.
     """
-    git_sha = resolve_git_sha()
-    if git_sha != "unknown":
-        return git_sha[:12]
+    configured = (os.getenv("GIT_SHA") or "").strip()
+    if configured.casefold() not in {"", "unknown", "none", "null"}:
+        return configured[:12]
+
+    deployed_sha = resolve_git_sha()
+    if deployed_sha != "unknown":
+        return deployed_sha[:12]
 
     return os.getenv("APP_VERSION", "unknown")
 

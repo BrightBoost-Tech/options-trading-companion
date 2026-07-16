@@ -295,7 +295,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         # F-MIDDAY this lived only in counts.failed, which the runner does not
         # classify; include it in the canonical counts.errors channel so a
         # position-read abort is persisted partial rather than green.
-        counts["errors"] = failed + _persist_error_rollup(cycle_results)
+        counts["errors"] = _persist_error_rollup(cycle_results)\n        counts["errors"] += failed
 
         timing_ms = (time.time() - start_time) * 1000
 

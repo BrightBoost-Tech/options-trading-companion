@@ -10,7 +10,7 @@ JOB_NAME = "midday_scan"
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     start_time = time.time()
     notes = []
-    counts = {"processed": 0, "failed": 0}
+    counts = {"processed": 0, "failed": 0, "errors": 0}
 
     try:
         client = get_admin_client()
@@ -31,10 +31,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         processed, failed = run_async(process_users())
         counts["processed"] = processed
         counts["failed"] = failed
+        # The public/manual midday route shares run_midday_cycle with the
+        # scheduled handler.  Preserve the same non-green truth contract.
+        counts["errors"] = failed
 
         timing_ms = (time.time() - start_time) * 1000
         return {
-            "ok": True,
+            "ok": failed == 0,
             "counts": counts,
             "timing_ms": timing_ms,
             "notes": notes

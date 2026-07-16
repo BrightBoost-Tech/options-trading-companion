@@ -704,6 +704,23 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   separately. A model-only change must alter model identity without requiring
   an application-version fiction.
 
+- **Option transaction costs are leg- and quantity-aware.** State whether EV
+  is per structure-contract or total before subtracting costs. Commission is
+  per leg × structure quantity × side; round-trip measurement includes both
+  entry and exit. Never subtract quantity-total fees from per-contract EV.
+  Missing or malformed leg count on a production candidate is a typed
+  unavailable/fail-closed measurement, not an assumed one-leg structure.
+- **Funnel denominators are separate semantic facts.** Active universe,
+  selected symbols, scanner-emitted candidates, persisted suggestions, and
+  executable suggestions are not aliases. Preserve each name and count; zero
+  means measured-empty while null/typed unavailable means unmeasured. On
+  retries, report durable unique effects rather than attempted writes.
+- **Expiry-day thesis measurement resolves post-close.** The naturally
+  scheduled post-close tracker may grade an original expiry equal to its run
+  date from the exact expiry-date close only after the post-close guard. A
+  missing close remains typed unknown/partial; never defer a Friday expiry
+  merely because `expiry == today`, and never fabricate a terminal price.
+
 - **An experiment may claim only what it observes.** Raw-candidate
   eligibility is not entry selection, capacity evaluation, execution, or
   outcome evidence. Shadow fills and $100k-era cohort ledgers do not prove

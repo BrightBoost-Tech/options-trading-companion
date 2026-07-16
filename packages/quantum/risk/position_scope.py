@@ -24,6 +24,15 @@ from typing import List
 LIVE_ROUTING_MODE = "live_eligible"
 
 
+class LivePositionStateUnavailable(RuntimeError):
+    """Authoritative live position state could not be read.
+
+    This is deliberately distinct from a successful zero-row result. Entry
+    paths must fail closed on this error; a real empty portfolio/position
+    query remains the only representation of a flat live book.
+    """
+
+
 def live_routed_portfolio_ids(supabase, user_id: str) -> List[str]:
     """Return the user's portfolio ids whose routing_mode is live_eligible.
 

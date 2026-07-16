@@ -741,9 +741,9 @@ class TestEvUnitContract(_EnvRawOn):
         # clone risk STILL scales with clone quantity (per-ct 60.0)
         for qty, _raev, mlt in results:
             self.assertAlmostEqual(mlt, 60.0 * qty, places=2)
-        # the normalized value itself: net = 30.73 − 5%·30.73 − 1.30 = 27.8935;
-        # raev = 27.8935 / 60 (per-contract max loss)
-        self.assertAlmostEqual(results[0][1], round(27.8935 / 60.0, 6), places=6)
+        # the normalized value itself is leg-aware: two-leg vertical fees are
+        # 0.65 × 2 legs × 2 sides = 2.60. Net = 26.5935; denominator = 60.
+        self.assertAlmostEqual(results[0][1], round(26.5935 / 60.0, 6), places=6)
 
     def test_below_15_per_contract_refuses_at_every_quantity(self):
         # net = 0.95×16 − 1.30 = 13.90 < 15 → refuse regardless of clone size
@@ -753,12 +753,12 @@ class TestEvUnitContract(_EnvRawOn):
             self.assertEqual(reason, "raw_edge_below_minimum")
 
     def test_above_15_per_contract_accepts_at_every_quantity(self):
-        # net = 0.95×18 − 1.30 = 15.80 ≥ 15 → accept regardless of clone size
+        # two-leg fee = 2.60; net = 0.95×19 − 2.60 = 15.45 ≥ 15.
         for deployable in (400.0, 900.0, 2500.0, 10000.0):
-            clone, reason = self._clone_at(deployable, ev_raw=18.0)
+            clone, reason = self._clone_at(deployable, ev_raw=19.0)
             self.assertIsNone(reason)
             self.assertAlmostEqual(clone["risk_adjusted_ev"],
-                                   round((0.95 * 18.0 - 1.30) / 60.0, 6),
+                                   round((0.95 * 19.0 - 2.60) / 60.0, 6),
                                    places=6)
 
     def test_sofi_fixture_no_longer_uses_mixed_units(self):
@@ -771,7 +771,7 @@ class TestEvUnitContract(_EnvRawOn):
                           / clone["max_loss_total"], 6)
         self.assertNotEqual(clone["risk_adjusted_ev"], old_mixed)
         self.assertAlmostEqual(clone["risk_adjusted_ev"],
-                               round(27.8935 / 60.0, 6), places=6)
+                               round(26.5935 / 60.0, 6), places=6)
 
     def test_invalid_ev_and_max_loss_typed_refusals(self):
         cases = [

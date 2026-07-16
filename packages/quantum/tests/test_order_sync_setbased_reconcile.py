@@ -122,6 +122,70 @@ class TestSetBasedReconcile(unittest.TestCase):
         self.assertEqual(closed, [])
         self.assertEqual(result.get("stuck_open_closed"), 0)
 
+    def test_poll_failure_reaches_runner_as_partial(self):
+        from packages.quantum.jobs.handlers import alpaca_order_sync
+        from packages.quantum.jobs.runner import _classify_handler_return
+
+        pending = {
+            "id": "ord-pending",
+            "user_id": "U",
+            "portfolio_id": "port-live",
+            "status": "working",
+            "alpaca_order_id": "alp-pending",
+            "filled_qty": 0,
+            "position_id": None,
+            "order_json": {},
+        }
+        supa = _FakeSupabase({
+            "paper_portfolios": [
+                {
+                    "id": "port-live",
+                    "user_id": "U",
+                    "routing_mode": "live_eligible",
+                },
+            ],
+            "paper_orders": [pending],
+            "paper_positions": [],
+        })
+        poll_result = {
+            "total_polled": 1,
+            "fills": 0,
+            "partials": 0,
+            "cancels": 0,
+            "unchanged": 0,
+            "errors": [
+                {
+                    "order_id": "ord-pending",
+                    "error": "watchdog broker refetch failed",
+                }
+            ],
+        }
+
+        with (
+            mock.patch.object(
+                alpaca_order_sync, "get_admin_client", return_value=supa
+            ),
+            mock.patch(
+                "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+                return_value=mock.MagicMock(),
+            ),
+            mock.patch(
+                "packages.quantum.brokers.alpaca_order_handler.poll_pending_orders",
+                return_value=poll_result,
+            ) as poll,
+            mock.patch.dict(
+                os.environ, {"RECONCILE_POSITIONS_ENABLED": "0"}, clear=False
+            ),
+        ):
+            result = alpaca_order_sync.run({})
+
+        poll.assert_called_once()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["counts"]["errors"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(len(result["error_details"]), 1)
+        self.assertEqual(_classify_handler_return(result), "partial")
+
 
 if __name__ == "__main__":
     unittest.main()

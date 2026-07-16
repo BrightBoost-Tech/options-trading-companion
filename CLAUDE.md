@@ -694,8 +694,7 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   falsifier. Update backlog, ledger, audit result, and this doctrine only
   after code lanes settle; deduplicate by extending the canonical item.
 
-Pointers: `docs/backlog.md`, `audit/ledger.md`, and
-`docs/review/external-full-audit-v1.5-results-2026-07-15.md`.
+Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 

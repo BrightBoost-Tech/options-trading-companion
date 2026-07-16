@@ -38,10 +38,10 @@ def _pos(pos_id, unrealized_pl, unpriceable=False, symbol="NFLX"):
         "legs": [
             {"symbol": "NFLX260918P00100000", "action": "buy",
              "type": "put", "strike": 100.0, "expiry": "2026-09-18",
-             "quantity": 1},
+             "quantity": 2},
             {"symbol": "NFLX260918P00095000", "action": "sell",
              "type": "put", "strike": 95.0, "expiry": "2026-09-18",
-             "quantity": 1},
+             "quantity": 2},
         ],
         "portfolio_id": "pf-1",
     }

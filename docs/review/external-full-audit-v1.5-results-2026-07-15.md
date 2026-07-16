@@ -42,6 +42,7 @@ Current broker-live thesis accuracy is **directionally encouraging (5/7 scored a
 | #1200 E19-2A narrow scope | obs_scope/selected_for_entry=false/exec=not_executed stamped (`fork.py:1101-1136`) | SOFI 14:32Z falsifier PASS | none | VERIFIED-CODE + ATTESTED-RUNTIME |
 | #1201 shared fetch + headline | single predicate delegation (`calibration_service.py:397-404`); thesis split (`thesis_tracker.py:66-97`) | calibration + thesis PASS | none | VERIFIED-CODE + ATTESTED-RUNTIME |
 | #1199 tape | bytea hex symmetric, atomicity, capture_partial (`blob_store.py:74,333`) | 9 blobs/day complete | none | VERIFIED-CODE + ATTESTED-RUNTIME |
+| #1203 F-A9-5 | runtime prerequisite (#1200 natural observation) is satisfied | PR title/body still carry stale `[BLOCKED FROM MERGE]`; rebase/review/fresh CI still required | prerequisite cleared ≠ PR merge-ready | VERIFIED-RUNTIME + VERIFIED-GITHUB-METADATA |
 | git_sha stamped | reads only `GIT_SHA` (Dockerfile `ARG GIT_SHA=unknown`) | 12/12 rows 'unknown' | provenance exists (`RAILWAY_GIT_COMMIT_SHA`) but unwired | VERIFIED-CODE + ATTESTED-RUNTIME |
 | shadow capital | `or 100000` literal (`fork.py:210`, `evaluator.py:251`) is inert — stored net_liq **is** $100k | all 3 portfolios net_liq=$100k; live $2,067.86 | packet "shadows near $100k" understates: champion too | VERIFIED-CODE + ATTESTED-RUNTIME |
 | condor EV model | code default `strict`/0.50/1.00 (`options_scanner.py:214-216`) | worker service ran the `tail` model (non-secret config flag observed on the worker env, 2026-07-15 ~22:50Z) | code-default ≠ deployed | code = VERIFIED-CODE; deployed value = ATTESTED-RUNTIME (single prior-session read; NOT re-read in this lane). Not re-verified per-worker → `RUNTIME CHECK — NOT RUN` on the *background* worker |
@@ -77,15 +78,17 @@ Current broker-live thesis accuracy is **directionally encouraging (5/7 scored a
 
 Durability taxonomy is exact, not a bare count: **W1/W2 are strictly logs-only; W3 is partially durable (INFO plus a would-block cap-breach alarm subset persisted to `risk_alerts`); W4 is semi-durable (arm count persisted to `job_runs.result`); W5 is absent/unstarted.** "Sample/sufficiency" never reuses a run-state word — an unknown live-flip count is `NOT_PROVEN` (the Verdict column carries the run-state).
 
-| W | Flag / default | First-valid boundary (UTC + SHA) | Emitter (post-#1198) | Durable sink | Sample / sufficiency | Reset rule | Bypass | Exact runtime check | Expected PASS | Expected FAIL | Why code alone cannot settle | Verdict |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| W1 | `GATE_QTY_FIX_LIVE_ENABLED` / OFF | `655c9aa` (WARNING, pre-#1198) | WARNING `paper_endpoints.py:1370` | **strictly logs-only** (flip line) | `NOT_PROVEN` (degenerate at qty=1; no live-flip count) | container restart (log stream) | none (centralized `_stage_order_internal`) | grep Railway worker logs for the qty-fix WARNING flip line over an armed window | ≥1 flip line for a qty>1 live stage | zero flip lines while qty>1 live stages occurred | log retention & arm state are runtime facts, not in source | **RUNNING** (sample-starved) |
-| W2 | `RISK_BASIS_MAX_LOSS_ENABLED` / OFF | #1198 `1386834` | INFO `risk_basis_shadow.py:40,50` | **strictly logs-only** | `NOT_PROVEN` (would_flip real only at RBE, 1 of 3 consumers) | container restart | 3 self-gated consumers | confirm INFO `[RISK_BASIS…]` emit present in Railway logs post-#1198 | INFO lines present at scoring cadence | no INFO lines (emitter never reached / setup-logging gap) | emit presence is a deploy/log-retention fact | **START-UNVERIFIED** |
-| W3 | `BUCKET_CONTROL_ENFORCE` / OFF | #1198 `1386834` | INFO + would-block alarm (`:1082-1095`) | **partially durable** (cap-breach alarm subset → `risk_alerts`; the rest INFO) | `NOT_PROVEN` (alarm subset persists; arm-flip count unknown) | container restart (INFO) / `risk_alerts` durable | **real** (`:636` + endpoint stages bypass) | query `risk_alerts` for the bucket would-block type over an armed window AND confirm INFO reservation-order emit | alarm rows present for breaches + INFO order lines | breaches with no alarm rows / no INFO | retry & cross-job joinability are runtime facts; no shared `decision_id` in source (F-WINDOW-1b) | **START-UNVERIFIED** |
-| W4 | `CALIBRATION_APPLY_AT_SCORING` / OFF | #1198 `1386834` | `[APPLY_ORDER_SHADOW]` | **semi-durable** (count→`job_runs.result`, mislabeled `universe_size`) | `NOT_PROVEN` (count durable; sufficiency of arm-flip evidence unproven) | per-run `job_runs` row | single midday call site | read `job_runs.result` apply-order count for the midday cycle | non-null frozen-vs-calibrated top-5 delta count | null/absent count | the count exists only at runtime in `job_runs` | **RUNNING** |
-| W5 | composed arm | — | none | **absent** | `NONE` (unstarted) | — | — | none (no emitter to check) | n/a | n/a | nothing is emitted — settled by code inspection as unstarted | **UNSTARTED** |
+“First-valid boundary” separates the earliest code/capture-capable commit from the first naturally observed evidence. A merge, deploy, worker recycle, container restart, or log-retention loss does not itself start or reset an evidence window. A window resets only when its population, decision semantics, capture integrity, or decision-generating mechanism changes; the invalidated evidence must be named.
 
-**Biggest W gap (R4-corrected):** four of five windows lack complete durable decision evidence (W1, W2, W3, W5); of those only **W1/W2 are strictly logs-only** (silently dropped pre-#1198, born 07-11; Railway-retention-bounded even now), **W3 is partially durable** (its cap-breach alarm subset reaches `risk_alerts`), **W4 is semi-durable** (a count reaches `job_runs.result`), and **W5 is absent**. "How many live decisions would arming flip" is not queryable for W1/W2/W3/W5.
+| W | Flag / default | First-valid boundary (absolute UTC + full SHA) | Emitter (post-#1198) | Durable sink | Sample / sufficiency | Reset rule | Bypass | Exact runtime check | Expected PASS | Expected FAIL | Why code alone cannot settle | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W1 | `GATE_QTY_FIX_LIVE_ENABLED` / OFF | first recovered natural scan `2026-07-10T16:00:00Z` @ `655c9aa2d21e3f21312ac60a9592ceafa0932170` | WARNING `paper_endpoints.py:1370` | **strictly logs-only** (flip line) | `NOT_PROVEN` (degenerate at qty=1; no live-flip count) | reset only if routing/quantity economics, gate basis, eligible population, or capture semantics change; merge/recycle/log truncation does not reset | none (centralized `_stage_order_internal`) | grep Railway worker logs for the qty-fix WARNING flip line over an armed window | ≥1 flip line for a qty>1 live stage | zero flip lines while qty>1 live stages occurred | log retention and arm state are runtime facts, not source facts | **RUNNING** (sample-starved) |
+| W2 | `RISK_BASIS_MAX_LOSS_ENABLED` / OFF | capture-capable `2026-07-13T20:03:07Z` @ `1386834daed4bfed9a18206338c0fe6b2aa8a8ce`; exact first natural W2 emit UTC=`NOT_PROVEN` | INFO `risk_basis_shadow.py:40,50` | **strictly logs-only** | `NOT_PROVEN` (would_flip real only at RBE, 1 of 3 consumers) | reset only if max-loss basis, consumer set, risk-model semantics, eligible population, or capture integrity changes; merge/recycle does not reset | 3 self-gated consumers | confirm INFO `[RISK_BASIS…]` emit in Railway logs after the boundary | INFO lines present at scoring cadence | no INFO lines (emitter never reached / capture gap) | emitter reach and retained logs are runtime facts | **START UNVERIFIED** |
+| W3 | `BUCKET_CONTROL_ENFORCE` / OFF | capture-capable `2026-07-13T20:03:07Z` @ `1386834daed4bfed9a18206338c0fe6b2aa8a8ce`; exact first natural W3 emit UTC=`NOT_PROVEN` | INFO + would-block alarm (`:1082-1095`) | **partially durable** (cap-breach alarm subset → `risk_alerts`; the rest INFO) | `NOT_PROVEN` (alarm subset persists; arm-flip count unknown) | reset only if bucket semantics, reservation/identity model, bypass set, eligible population, or capture integrity changes; merge/recycle does not reset | **real** (`:636` + endpoint stages bypass) | query `risk_alerts` for bucket would-block rows AND confirm INFO reservation-order emits | alarm rows present for breaches + INFO order lines | breaches with no alarm rows / no INFO | retry/cross-job joinability and emitter reach are runtime facts | **START UNVERIFIED** |
+| W4 | `CALIBRATION_APPLY_AT_SCORING` / OFF | capture-capable `2026-07-13T20:03:07Z` @ `1386834daed4bfed9a18206338c0fe6b2aa8a8ce`; exact first natural `job_runs.result` sample UTC=`NOT_PROVEN` | `[APPLY_ORDER_SHADOW]` | **semi-durable** (count→`job_runs.result`, mislabeled `universe_size`) | `NOT_PROVEN` (count durable; sufficiency of arm-flip evidence unproven) | reset only if calibration population, score/rank semantics, ordering mechanism, or capture schema changes; each job row adds a sample and merge/recycle does not reset | single midday call site | read `job_runs.result` apply-order count for the midday cycle | non-null frozen-vs-calibrated top-5 delta count | null/absent count | sample sufficiency exists only in runtime rows | **RUNNING** |
+| W5 | composed arm | **UNSTARTED — no evidence boundary** | none | **absent** | `NONE` (unstarted) | no reset rule until the composed window starts; start only after recorded dependencies and capture identity are stable | — | none (no emitter to check) | n/a | n/a | nothing is emitted — settled by code inspection as unstarted | **UNSTARTED** |
+
+**Biggest W gap:** four of five windows lack complete durable decision evidence (**W1/W2/W3/W5**); only **W1/W2 are strictly logs-only**, **W3 is partially durable**, **W4 is semi-durable**, and **W5 is absent**. “How many live decisions would arming flip?” is not queryable for W1/W2/W3/W5.
 
 ## 6. A1–A10 (Pass 1/2/3)
 
@@ -99,11 +102,11 @@ Durability taxonomy is exact, not a bare count: **W1/W2 are strictly logs-only; 
 
 **A5 EFFICIENCY.** *A5-1 (NOTE):* `FORECAST_V4_ENABLED` gates zero compute (doubly inert). *A5-2 (LOW, NEW):* `decision_runs` has no origin/trigger column → scheduled vs operator vs replay cycles are indistinguishable (gates A1's replay runner). *A5-3 (NOTE):* tape growth ~11 KB/day → TTL near-zero priority. Heartbeat vs reservation identity = doc-hygiene, not a code defect.
 
-**A6 VIABLE-SET.** *A6-1 (PASS):* two-track funnel is queryable without calling the raw clone "selected" (distinct tables/bases). ***A6-2 (HIGH — THE FIRST OPERATOR DECISION):*** all three policy-lab portfolios carry `net_liq=$100,000` (incl. the live-eligible champion, cash $106,883.75) vs the ~$2,067.86 live book at the dated observation (**~48×** [basis=realized, unit=position-total]). Narrowed consequence: raw-dollar **P&L, capacity, feasibility, sizing, and selected samples** are not live-tier comparable; **promotion is partially normalized** where `promotion_normalization` (0.31 discount) is enabled; the **thesis hit/miss LABELS themselves are not notional-scaled** (though capital changes *which* trades enter the sample); and `live_eligible` is **routing, not broker execution**. The `or 100000` fallback is **inert** (stored net_liq genuinely $100k) → removing it is a SEPARATE fail-closed code item (does not repair historical comparability). **Operator decision (this is the first operator decision):** preserve the legacy $100k epoch as non-live-tier evidence; at a clean boundary (no open shadow positions/orders) launch versioned live-tier observe-only cohorts on one shared broker-grounded capital snapshot, persisting `capital_basis`/source/as-of/epoch; freeze cross-epoch promotion until a fresh minimum sample exists. **Never rewrite historical fills/P&L as if they occurred at $2k.** *A6-3 (HIGH, EXTENDS-E12/⑤):* three incoherent probability bases (credit EV≡$0 [basis=raw, unit=position-total]; debit breakeven-delta; condor raw `|delta|`+fixed severity [basis=raw, unit=probability]) all write `suggestion["ev"]` and are jointly sorted by one structure-agnostic ranker (`canonical_ranker.py:63,240`) — a condor's cross-structure rank flips on a severity constant *before* any $-gate. Live mis-rank.
+**A6 VIABLE-SET.** *A6-1 (PASS):* two-track funnel is queryable without calling the raw clone "selected" (distinct tables/bases). ***A6-2 (HIGH — THE FIRST OPERATOR DECISION):*** all three policy-lab portfolios carry `net_liq=$100,000` (incl. the live-eligible champion, cash $106,883.75) vs the ~$2,067.86 live book at the dated observation (**~48×**; basis=n/a dated capital snapshot, unit=account-equity USD; ratio dimensionless). Narrowed consequence: raw-dollar **P&L, capacity, feasibility, sizing, and selected samples** are not live-tier comparable; **promotion is partially normalized** where `promotion_normalization` (0.31 discount) is enabled; thesis hit/miss labels are not arithmetically notional-scaled, but capital changes *which* trades receive those labels; and `live_eligible` is **routing, not broker execution**. The `or 100000` fallback is **inert** (stored net_liq genuinely $100k) → removing it is a SEPARATE fail-closed code item (does not repair historical comparability). **Operator decision:** preserve the legacy $100k epoch as non-live-tier evidence; at a clean boundary launch versioned live-tier observe-only cohorts on one shared broker-grounded capital snapshot, persisting `capital_basis`/source/as-of/epoch; freeze cross-epoch promotion until a fresh minimum sample exists. **Never rewrite or rescale historical fills/P&L.** *A6-3 (HIGH, EXTENDS-E12/⑤):* three incoherent dollar-EV constructions (credit EV≡$0 [basis=raw, unit=per-structure-contract USD]; debit EV from breakeven-delta interpolation [basis=raw, unit=per-structure-contract USD]; condor EV from delta-tail probabilities + fixed severity [basis=raw heuristic, unit=per-structure-contract USD]) all write `suggestion["ev"]` and are jointly sorted by one structure-agnostic ranker (`canonical_ranker.py:63,240`) — a condor's cross-structure rank flips on a severity constant *before* any $-gate. Live mis-rank.
 
 **A7 DORMANT PHASE-3 (Pass 1; Pass 2/3 DEFERRED-DORMANT).** *A7-1 (HIGH):* **8 post-epoch broker-live closes (9 all-time including the pre-epoch close)**, last 2026-07-08, 0 in the 7 days to pin (book flat; entries throttled by streak-breaker + #1101 + 1-shot/day) → the ~10–15-fill Phase-3 gate ETA is **INDETERMINATE/PAUSED, entry-rate-bound**, not close-instrumentation-bound. Phase-3 eligible/instrumented is a SEPARATE count: **~3 of 10–15** fills instrumented (2 with a computable `gap_fraction`) — see §1a; it is not equated with close history. *A7-2 (MED, EXTENDS-Phase-3):* exit-basis stamp is durable (`order_json`, not logs) but only **2 of 6** close orders have a computable `gap_fraction`; **all 3 most recent closes are fill-only** (cross/mid NULL — resting-GTC/sweep bypasses stage corroboration). Measurement quality improvable; sample size cannot be manufactured. Phase-3 stop doctrine preserved.
 
-**A8 NEGATIVE-DECISION.** *A8-1 (MED, EXTENDS-F-A9-5):* `_log_cohort_decisions:1536-1546` compares dollar `ev` [basis=raw, unit=position-total] to the 0–100 `min_score_threshold` [unit=score-points] while routing uses `score` → `ev_below_min` is a lie; **56 `policy_decisions` rows carry it** (materialized). `rank_at_decision` is on raev not score (secondary lie). *A8-2 (PASS):* scanner cost-rejection (`suggestion_rejections`) vs ranker edge-floor (`trade_suggestions.blocked_reason`) are distinct tables/vocabularies — separable. *A8-3 (PASS):* #1200 verdicts + champion rejection preserve distinct scopes/bases (SOFI sentinel fired correctly).
+**A8 NEGATIVE-DECISION.** *A8-1 (MED, EXTENDS-F-A9-5):* `_log_cohort_decisions:1536-1546` compares stored/served dollar `ev` [basis=unknown across the 56-row historical population; at the attested successful-calibration runtime `ev` is calibrated and `ev_raw` is separate; unit=per-structure-contract USD] to the 0–100 `min_score_threshold` [basis=n/a, unit=score-points] while routing uses `score` → `ev_below_min` is a lie; **56 `policy_decisions` rows carry it** (materialized). `rank_at_decision` is the ordinal from `enumerate(..., start=1)` over a query ordered by `risk_adjusted_ev`, then `ev`; the decision row does not persist that ordering basis [basis=unknown, unit=ordinal-rank]. *A8-2 (PASS):* scanner cost-rejection (`suggestion_rejections`) vs ranker edge-floor (`trade_suggestions.blocked_reason`) are distinct tables/vocabularies — separable. *A8-3 (PASS):* #1200 verdicts + champion rejection preserve distinct scopes/bases (SOFI sentinel fired correctly).
 
 **A9 ALERT & SIGNAL INTEGRITY.** *A9-1 (MED, NEW — F-A9-6, 5th typed-column-lie):* `model_version` is set from `os.getenv("APP_VERSION")` (a deploy string) but documented/consumed as model identity — a `GROUP BY model_version` in calibration/analytics would one-bucket every row; `fork.py:1094` already had to stamp `calibration_provenance_status='not_persisted_on_source'` to work around it. *A9-2 (MED, = GIT-SHA):* `decision_runs.git_sha` + `trade_suggestions.code_sha` = 'unknown' (12/12), Railway SHA unwired. *A9-3 (MED, NEW — F-A9-8):* `fork.py:498` sets `status='partial'` on `fork_errors`, but the **champion/legacy path never populates `fork_errors`** (tag failures `except: pass`; clone-insert failures fire a fire-and-forget critical alert only) → a champion clone/tag failure returns green (`champion_status='legacy_unmeasured'`). *A9-4:* "absence-of-INFO before #1198" RESOLVED (#1198); "pooled/routing labeled live before #1201" RESOLVED (#1201); residual LOW — `scheduler.py` never calls `setup_logging` (APScheduler INFO still dropped) and the freshness alert has no no-activity guard for `learning_feedback_loops`/`suggestion_rejections`/`calibration_adjustments` → a quiet learning-mode stretch fires `output_stale=error` (EXTENDS-§8 OUTPUT_FRESHNESS).
 
@@ -164,7 +167,7 @@ Correctness hunt across execution/close/monitor/brake/streak/ingest/scope/heartb
 | A9-3 / F-A9-8 champion job-truth | `fork_errors` populated on champion path | champion clone/tag failure visibility | EXTENDS A4 job-truth | `fork.py:498`, `fork_errors` | with A4 work | silent green today | populate `fork_errors` on champion/legacy path |
 | A8-1 ev_below_min basis lie | score-vs-ev basis fix | negative-decision honesty | EXTENDS F-A9-5 | `_log_cohort_decisions:1536-1546`, `policy_decisions` | with taxonomy PR | 56 materialized rows carry the lie | compare score-to-score; re-label existing rows in a doc note |
 | A10-1 holiday-blind | `get_calendar` on the alert path | quiet ops before 09-07 | EXTENDS area10 | `is_us_market_hours:46-69` | **hard trigger < 2026-09-07** | false HIGHs on Labor Day | add holiday check to weekday math |
-| observe-window durability (W2/W3/W4/W5) | a DB sink for shadow arm decisions | arm decisions | — | `risk_basis_shadow`, `bucket_control`, `calibration_apply_ordering` | before any arm | arming without durable evidence is blind | persist arm-flip counts before enabling |
+| observe-window durability (W1/W2/W3/W5 incomplete; W4 semi-durable) | durable, versioned per-decision evidence | arm decisions | **EXTENDS-F-WINDOW-1a/1b** | `risk_basis_shadow`, `bucket_control`, `calibration_apply_ordering` | before any arm | arming without complete evidence is blind | persist W1/W2 decisions, complete W3 beyond its alarm-only subset, preserve W4's existing count, and leave W5 UNSTARTED until designed |
 
 ## 12. Ranked Top 3 + packet/code disagreements + design score
 
@@ -173,15 +176,15 @@ Correctness hunt across execution/close/monitor/brake/streak/ingest/scope/heartb
 | Rank | What | Evidence | Value | Effort (single-dev evenings) | Risk | Dependencies / collisions | Backlog interaction | Doctrine check | Falsifier |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | **F-MIDDAY-POSITION-READ-FAILOPEN fail-closed (2 sites)** | §9 VERIFIED-CODE (2 sites); source-only "test" today | live-entry safety (highest) | ~0.5 | LOW — healthy & legitimate-empty behavior unchanged; **an unavailable authoritative read intentionally changes the FAILURE path to abort/typed partial before staging** (this tightens failure semantics; it does not loosen a threshold, gate, stop, or healthy-path control) | own lane; sibling of #1195/F-E8-3 | new P1-safety item (escalates P0-before-next-entry per §9) | H9/loud-error — **tightening**, never loosening | read-exception route test stages no entry; genuine empty still stages healthy |
-| 2 | **A6-2 versioned live-tier cohort epoch** | §6 A6-2 ATTESTED-RUNTIME ($100k all 3, 48×) | unblocks honest cross-cohort comparability the viable-set/promotion logic depends on | operator design decision (not a dev task) + a later normalization pass | MED — a botched migration could corrupt the pool | first operator decision; F-POLICY-CAPITAL-FALLBACK is a separate code item | freeze cross-epoch promotion until fresh min sample | never rewrite historical rows (measurement integrity) | a **newly versioned** observe-only cohort with an explicit `capital_basis` + clean-boundary proof (NOT mutation of old `net_liq` rows) |
+| 2 | **A6-2 versioned live-tier cohort epoch** | §6 A6-2 ATTESTED-RUNTIME ($100k all 3, ~48× capital ratio) | starts prospective live-tier-comparable evidence; it does not rehabilitate the legacy $100k epoch | operator design decision + versioned provenance/epoch implementation (new rows only; never a history rewrite) | MED — a botched epoch boundary could corrupt the pool | first operator decision; F-POLICY-CAPITAL-FALLBACK is a separate code item | freeze cross-epoch promotion until fresh min sample | never rewrite or rescale historical rows (measurement integrity) | a **newly versioned** observe-only cohort with explicit `capital_basis` + clean-boundary proof (NOT mutation of old `net_liq` rows) |
 | 3 | **A4-1/A9-2 git_sha one-liner** | §3 + §8 ATTESTED-RUNTIME (12/12 'unknown') | restores decision-tape attribution; unblocks any replay determinism claim (A1/A4-2) | ~0.25 | LOW (additive read) | RC-2 confirms one-liner vs build-arg | with A4/A9 taxonomy | additive provenance, no control change | `decision_runs.git_sha` shows a real SHA after the fallback lands |
 
 ### 12b. Packet/code disagreements (high-value)
 shadow-capital packet understated (champion is $100k too, 48×); condor code-default (strict) ≠ deployed env (tail); "needs_manual_review as routed success" inverted vs code=critical; git_sha provenance available but unwired.
 
-### 12c. Design-maturity score (C9 — reproducible scalar on the 85/90/95/100 ladder)
+### 12c. Design-maturity score (C9 — arithmetically reproducible, judgment-assigned `INFERRED` scalar)
 
-**`INFERRED design-maturity score` — not profitability, not measured reliability, not measured efficiency.** Computed from a weighted scorecard; weights sum to 100 and earned points sum to the displayed scalar. The ladder's rungs are 85 / 90 / 95 / 100; **the score cannot exceed the first UNMET rung.**
+The arithmetic is reproducible: weights sum to 100 and earned points sum to the displayed scalar. The earned points are reviewer judgments tied to cited evidence; the method is not empirically calibrated: no mapping from “strong/weak” to points has been validated. Therefore 60/100 is an `INFERRED` design-maturity judgment with MODERATE confidence—not measured reliability, profitability, or efficiency.
 
 | Dimension | Weight | State | Earned | Evidence |
 |---|---|---|---|---|
@@ -189,11 +192,11 @@ shadow-capital packet understated (champion is $100k too, 48×); condor code-def
 | Exclusion-integrity (E1-E20) | 15 | strong w/ 4 conditionals | 13 | §4 (16 PASS, 4 CONDITIONAL) |
 | Live-entry safety | 20 | **weak** | 7 | 2 fail-open reads (§9), source-only test |
 | Capital/EV/cost coherence | 20 | **weak** | 8 | A6-2 parity (48×) + A6-3 mis-rank + missing canonical-risk |
-| Evidence durability (observe windows) | 15 | **weak** | 6 | four windows lack complete durable evidence; only W4 semi-durable, W3 partial (§5) |
+| Evidence durability (observe windows) | 15 | **weak** | 6 | W1/W2/W3/W5 incomplete; W4 semi-durable (§5) |
 | Calendar/clock | 10 | good w/ 1 gap | 8 | A10-1 holiday-blind |
 | **Total** | **100** | — | **60** | earned sum: 18+13+7+8+6+8 = **60** |
 
-**INFERRED design-maturity score = 60 / 100.** **First unmet maturity-ladder rung = 85** — the design does not reach the lowest (85) rung, so the score is **capped below 85** (no written exception is claimed). The specific cappers: the known live-entry fail-open on the entry path (§9), incoherent EV/cost/risk bases (A6-3, A8-1), the missing replay-hash reader (A4-2), incomplete observe-window durability (§5), and the **5 `RUNTIME CHECK — NOT RUN` in §7**. Confidence: MODERATE — the strong dimensions (35 wt) are code+runtime verified; the weak dimensions (55 wt) carry the open risk; the missing proof that could move the score is exactly the §7 runtime checks. This is a design-maturity judgement, **not** a live-money score, and `87/100` is **not** reproduced (the computation independently yields 60).
+**INFERRED design-maturity score = 60 / 100.** **First unmet maturity-ladder rung = 85** — the design does not reach the lowest (85) rung, so the score is **capped below 85**. The specific cappers are the live-entry fail-open (§9), incoherent EV/cost/risk bases (A6-3, A8-1), missing replay-hash reader (A4-2), incomplete observe-window durability (§5), and the **6 `RUNTIME CHECK — NOT RUN` rows in §7**. Confidence: MODERATE. The missing proof that could move this judgment is exactly the six §7 runtime checks plus A10-2's unresolved warm-up semantics. This is not a live-money score, and `87/100` is not reproduced.
 
 ## 13. Charter-completeness matrix (C10 — each requirement linked to a parseable section)
 
@@ -209,14 +212,14 @@ Every v1.5 charter requirement links to a specific parseable section below, or c
 | W1–W5 complete (boundary/emitter/sink/sample/reset/bypass/runtime-check/PASS/FAIL/verdict) | §5 | populated (13-column table, one row per window) |
 | A1–A10 Pass 1/2/3 prose | §6 | populated; **A7 Pass 2/3 = DEFERRED-DORMANT** |
 | A1–A10 Pass 1/2/3 canonical matrix | §14 | populated (one row per area, 3 Pass cells each) |
-| Keyed 12-field finding register | §15 | populated (one block per retained finding, 12 fields each) |
+| Keyed 12-field finding register | §15 | populated (22 blocks at this pin; exact retained/conditional crosswalk; 12 fields each) |
 | Runtime-check list (read/source/PASS/FAIL/rationale/status) | §7 | populated; all `RUNTIME CHECK — NOT RUN` |
 | Instrument-integrity list (natural-proof + exact runtime check) | §8 | populated |
 | Free look | §10 | populated (dead-capability cluster; else none) |
 | Dependency/collision matrix (8 fields) | §11 | populated |
 | Ranked Top 3 (evidence/effort/risk/dep/backlog/doctrine/falsifier) | §12a | populated |
 | Packet/code disagreements | §12b | populated |
-| Design score (reproducible scalar, weights+earned sum) | §12c | populated (`INFERRED` 60/100, capped <85) |
+| Design score (arithmetically reproducible, judgment-assigned `INFERRED` scalar) | §12c | populated (`INFERRED` 60/100, method uncalibrated, capped <85) |
 | EV/PoP/cost/P&L basis+unit on every economic number | §16 + inline tags (§2, §6 A6-3, §8, A8-1) | populated |
 | Rejected/duplicate/superseded exclusion memory | §12b + ledger | internal-fill sign = REJECTED; SETTLED/PASS list in the ledger |
 | Credential disposition | §1b | `OPERATOR-ATTESTED` class-only |
@@ -226,24 +229,24 @@ Every v1.5 charter requirement links to a specific parseable section below, or c
 
 ## 14. A1–A10 Pass 1/2/3 canonical matrix (C1)
 
-Exactly one row per area. Each Pass cell is explicitly populated; `DEFERRED-DORMANT` is a valid Pass state where the charter permits it.
+Exactly one row per area. Each Pass cell is explicitly populated; `DEFERRED-DORMANT` is a valid Pass state where the charter permits it. The “Retained finding IDs” column is the retained crosswalk into §15; pass/note/rejected observations are not smuggled into that set.
 
-| Area | Pass 1 (state / exclusion verdict) | Pass 2 (seam / test / instrument verdict) | Pass 3 (dependency / decision-value verdict) | Finding IDs | Retained gap | Rejected gap | Priority | Backlog target |
+| Area | Pass 1 (state / exclusion verdict) | Pass 2 (seam / test / instrument verdict) | Pass 3 (dependency / decision-value verdict) | Retained finding IDs | Retained gap | Rejected / settled observation | Priority | Backlog target |
 |---|---|---|---|---|---|---|---|---|
-| A1 | replay runner NOT buildable today (capture-starved) | `ReplayTruthLayer.from_decision_id` zero production callers | top A1 extension, gated on A1-1 capture + A5-2 origin | A1-1, A1-2 | capital/OBP/tier/ev_raw not captured | ⑤ make/fetch input-starved (rejected: chain IS captured) | MED | replay-capture + runner (after capture) |
-| A2 | watchdog cancel-vs-fill un-idempotent; max_loss scalar-safe | `alpaca_order_handler.py:846-876` unconditional stamp; ghost-sweep loud | double-entry before book holds 2+ live | A2-1, A2-2 | double-entry on cancel-race | assignment/partial-close (DEFERRED-DORMANT, 0 open credit) | MED | cancel-ack idempotency; canonical-position (P1) |
-| A3 | shared fetch PASS; premature-stop signal readable | `learning_trade_outcomes_v3` lacks close_reason/thesis_outcome col | un-consumed by any multiplier; DTE double-count trap latent | A3-1, A3-2, A3-3 | premature-stop signal unconsumed | prequential apply (rejected: study tool, zero callers) | LOW | learning-column add (guarded) |
-| A4 | classification wired; dead-man fail-safe; bytea symmetric | git_sha constant; replay-hash no reader | git_sha one-liner; hash reader after A1-1 | A4-1, A4-2, A4-3 | git_sha unwired; replay-hash silent | other non-JSON type crossing (rejected: none but #1199) | MED | git_sha fallback; hash reader |
-| A5 | FORECAST_V4 gates zero compute; no origin column | `decision_runs` origin/trigger absent | gates A1 replay runner | A5-1, A5-2, A5-3 | no origin/trigger column | tape TTL (rejected: ~11 KB/day, near-zero) | LOW | decision_runs origin column |
-| A6 | funnel two-track queryable; all 3 portfolios $100k | ranker structure-agnostic sort of incoherent bases | first operator decision (epoch); condor land with ⑤ | A6-1, A6-2, A6-3 | capital comparability; condor cross-structure mis-rank | thesis LABELS not notional-scaled (rejected as a defect) | HIGH | versioned epoch (operator); EV-basis coherence |
-| A7 | 8 post-epoch (9 all-time) closes; 0 in pin week | exit-basis durable; 2/6 gap_fraction computable | Phase-3 gate entry-rate-bound, INDETERMINATE/PAUSED | A7-1, A7-2 | Phase-3 sample entry-rate-bound; exit-basis coverage | DEFERRED-DORMANT Pass 2/3 (no new live fills) | HIGH (dormant) | entry-rate; exit-basis coverage |
-| A8 | ev_below_min compares $ ev to score threshold | `_log_cohort_decisions:1536-1546`; 56 materialized rows | negative-decision honesty with taxonomy PR | A8-1, A8-2, A8-3 | ev_below_min basis lie (56 rows) | scanner vs ranker vocab (rejected: separable) | MED | taxonomy PR (score-to-score) |
-| A9 | 5th typed-column-lie; git_sha 12/12 unknown; champion job-truth gap | `model_version=APP_VERSION`; `fork_errors` unpopulated on champion path | with taxonomy + A4 work | A9-1/F-A9-6, A9-2, A9-3/F-A9-8, A9-4 | model_version identity lie; champion silent-green | INFO-absence + pooled-live (rejected: RESOLVED #1198/#1201) | MED | taxonomy PR; champion fork_errors |
-| A10 | DST-correct but holiday-blind; 5 clock domains distinguished | `is_us_market_hours:46-69` weekday math, no get_calendar | hard trigger before 2026-09-07 | A10-1, A10-2, A10-3, A10-4 | holiday-blind alert path | Fri→Mon scoring lag (rejected: accept ≤72h) | MED | holiday check (< 09-07); A10-2 NOT_PROVEN |
+| A1 | replay runner NOT buildable today (capture-starved) | `ReplayTruthLayer.from_decision_id` zero production callers | top A1 extension, gated on A1-1 capture + A5-2 origin | A1-1 | capital/OBP/tier/ev_raw not captured | A1-2 ⑤ make/fetch input-starved = rejected (chain is captured) | MED | replay-capture + runner (after capture) |
+| A2 | watchdog cancel-vs-fill un-idempotent; max_loss scalar quantity-coherent but not canonical | `alpaca_order_handler.py:846-876` unconditional stamp; ghost-sweep loud | double-entry before book holds 2+ live; canonical-position semantics remain | A2-1, A2-2 | cancel-race double-entry; missing leg/payoff semantics behind scalar | assignment/partial-close DEFERRED-DORMANT (0 open credit) | MED | cancel-ack idempotency; canonical-position (P1) |
+| A3 | shared fetch PASS; premature-stop signal readable | learning view lacks close_reason/thesis_outcome; DTE absent; apply-time sample admission absent | signal unconsumed; DTE trap/sample admission latent | A3-1, A3-2, A3-3 | three learning/calibration provenance gaps | prequential apply = study tool, zero callers | LOW | guarded learning column; segment-n/schema |
+| A4 | classification wired; dead-man fail-safe; bytea symmetric | git_sha constant; replay-hash no reader | git_sha one-liner; hash reader after A1-1 | A4-1, A4-2 | git_sha unwired; replay-hash silent | A4-3 other non-JSON crossing = PASS/none found | MED | git_sha fallback; hash reader |
+| A5 | FORECAST_V4 gates zero compute; no origin column | `decision_runs` origin/trigger absent | gates A1 replay runner | A5-2 | no origin/trigger column | A5-1 dead capability note; A5-3 tape TTL rejected (~11 KB/day) | LOW | EXTENDS untraced-extra-runs + replay origin |
+| A6 | funnel two-track queryable; all 3 portfolios $100k | ranker structure-agnostic sort of incoherent bases | first operator decision (epoch); condor land with ⑤ | A6-2, A6-3 | capital comparability; condor cross-structure mis-rank | A6-1 funnel queryability = PASS | HIGH | versioned epoch (operator); EV-basis coherence |
+| A7 | 8 post-epoch closes (9 all-time); 0 in pin week; gate remains ~3/10–15 | **DEFERRED-DORMANT — live-fill gate has not opened; exit-basis facts are Pass-1 measurement-readiness evidence only** | **DEFERRED-DORMANT — no exit-policy recommendation until the evidence gate opens; measurement-quality work remains Phase-3 backlog only** | A7-1, A7-2 | Phase-3 sample entry-rate-bound; exit-basis coverage incomplete | none; unavailable passes are intentionally deferred, not rejected | HIGH (dormant) | preserve stop doctrine; improve measurement coverage only |
+| A8 | ev_below_min compares served $ ev to score threshold | `_log_cohort_decisions:1536-1546`; 56 materialized rows | negative-decision honesty with taxonomy PR | A8-1 | ev_below_min basis lie (56 rows) | A8-2/A8-3 = PASS | MED | taxonomy PR (score-to-score) |
+| A9 | model-version lie; git_sha unknown; champion job-truth gap; freshness no-activity gap | `model_version=APP_VERSION`; champion `fork_errors` absent; freshness has no input denominator | taxonomy + A4 + output-freshness work | A9-1/F-A9-6, A9-2, A9-3/F-A9-8, A9-4 | four alert/provenance gaps | INFO absence and pooled-live labels = RESOLVED #1198/#1201 | MED | taxonomy; champion truth; OUTPUT_FRESHNESS |
+| A10 | DST-correct but holiday-blind | `is_us_market_hours:46-69` weekday math, no `get_calendar` | hard trigger before 2026-09-07 | A10-1 | holiday-blind alert path | A10-2 NOT_PROVEN; A10-3 lag accepted; A10-4 clock domains PASS | MED | holiday check (<09-07) |
 
 ## 15. Keyed 12-field finding register (C2)
 
-One block per retained finding. Every block carries all 12 charter fields and a unique ID. Producer → transformation/failure → consumer is stated in field 4 (no line-number-only findings).
+One block per retained or explicitly conditional finding in the §14/backlog crosswalk. The coverage set also includes cross-cutting `F-MIDDAY-POSITION-READ-FAILOPEN`, `E2-QTY-FIX-LIVE-INERT`, `OBSERVE-WINDOW-DURABILITY`, and `FREE-LOOK`; `F-WINDOW-1b` is already retained separately. At this pin the exact register contains **22 blocks**. Every block carries all 12 charter fields and a unique ID; there may be no missing retained ID, duplicate ID, or orphan block.
 
 ### FR-01 · F-MIDDAY-POSITION-READ-FAILOPEN
 - **1. ID / area / severity:** F-MIDDAY-POSITION-READ-FAILOPEN · A2/A8 (live-entry) · HIGH (P1-safety, escalates P0)
@@ -266,7 +269,7 @@ One block per retained finding. Every block carries all 12 charter fields and a 
 - **4. Production seam & dataflow (producer→transformation→consumer):** `init_lab` seeds `net_liq=$100k` → policy-lab P&L/sizing/selection compute on $100k basis → `promotion_normalization` (0.31 discount when enabled) → champion promotion consumes cross-cohort ledgers.
 - **5. Existing test + reaches seam?:** `test_docs_consistency` pins the honest scope (doc-level); no code test asserts capital parity (by design — it is an operator epoch decision).
 - **6. Instrument path + durable sink:** `policy_lab_cohorts.net_liq` (durable); `promotion_normalization` discount.
-- **7. Impact:** raw-dollar P&L/capacity/feasibility/sizing/selected samples not live-tier comparable; thesis LABELS unaffected.
+- **7. Impact:** raw-dollar P&L/capacity/feasibility/sizing/selected samples are not live-tier comparable; thesis hit/miss labels are not arithmetically notional-scaled, but capital changes the sample membership receiving those labels.
 - **8. Backlog interaction:** first operator decision; F-POLICY-CAPITAL-FALLBACK is a SEPARATE fail-closed code item (literal inert).
 - **9. Doctrine check / loosens control? / proven error:** measurement integrity; no control loosened; NOT a proven live-money error (comparability, not a loss).
 - **10. Smallest operator decision / remediation:** preserve legacy $100k epoch; launch a versioned live-tier observe-only cohort at a clean boundary on one shared capital snapshot; persist `capital_basis`/source/as-of/epoch; freeze cross-epoch promotion.
@@ -277,7 +280,7 @@ One block per retained finding. Every block carries all 12 charter fields and a 
 - **1. ID / area / severity:** A6-3 · A6 · HIGH (EXTENDS E12/⑤)
 - **2. Claim tested:** credit/debit/condor candidates are ranked on incoherent EV/probability bases by one structure-agnostic ranker.
 - **3. Proof label:** VERIFIED-CODE.
-- **4. Production seam & dataflow (producer→transformation→consumer):** `ev_calculator` writes `suggestion["ev"]` from 3 incoherent bases (credit ≡$0; debit breakeven-delta; condor raw `|delta|`+fixed severity) → `canonical_ranker.py:63,240` sorts structure-agnostically → viable-set ordering before any $-gate.
+- **4. Production seam & dataflow (producer→transformation→consumer):** `ev_calculator` writes per-structure-contract dollar `suggestion["ev"]` from 3 incoherent constructions (credit ≡$0; debit breakeven-delta; condor delta-tail probabilities + fixed severity) → `canonical_ranker.py:63,240` sorts structure-agnostically → viable-set ordering before any $-gate.
 - **5. Existing test + reaches seam?:** EV drift-guard `test_ev_raw_coalesce_drift_guard.py:32` reaches COALESCE, NOT cross-structure coherence.
 - **6. Instrument path + durable sink:** `trade_suggestions.ev` / rank (durable); no cross-structure coherence check.
 - **7. Impact:** a condor's cross-structure rank flips on a severity constant → live mis-rank.
@@ -389,7 +392,7 @@ One block per retained finding. Every block carries all 12 charter fields and a 
 - **1. ID / area / severity:** A8-1 · A8 · MED (EXTENDS-F-A9-5)
 - **2. Claim tested:** `ev_below_min` reflects the real routing gate.
 - **3. Proof label:** VERIFIED-CODE + ATTESTED-RUNTIME (56 materialized rows).
-- **4. Production seam & dataflow (producer→failure→consumer):** `_log_cohort_decisions:1536-1546` compares dollar `ev` [basis=raw, unit=position-total] to the 0–100 `min_score_threshold` [unit=score-points] while routing uses `score` → `policy_decisions.blocked_reason='ev_below_min'` is a lie (56 rows); `rank_at_decision` on raev not score (secondary lie).
+- **4. Production seam & dataflow (producer→failure→consumer):** `_log_cohort_decisions:1536-1546` compares stored/served dollar `ev` [basis=unknown across the 56-row history; current successful calibration stores calibrated `ev` and separate `ev_raw`; unit=per-structure-contract USD] to the 0–100 `min_score_threshold` [basis=n/a, unit=score-points] while routing uses `score` → `policy_decisions.blocked_reason='ev_below_min'` is a lie (56 rows); `rank_at_decision` is an ordinal over a query ordered by RAeV then EV, and that ordering basis is not persisted.
 - **5. Existing test + reaches seam?:** negative-decision tests exist; basis mismatch not asserted.
 - **6. Instrument path + durable sink:** `policy_decisions` (durable; 56 rows carry the lie).
 - **7. Impact:** negative-decision provenance mislabeled.
@@ -483,23 +486,97 @@ One block per retained finding. Every block carries all 12 charter fields and a 
 - **11. Falsifier:** a production importer of either module appears.
 - **12. Runtime check required + status:** grep production imports — VERIFIED-CODE (zero); env echo NOT RUN.
 
+
+### FR-18 · E2-QTY-FIX-LIVE-INERT
+- **1. ID / area / severity:** E2-QTY-FIX-LIVE-INERT · E2/W1 · MED (CONDITIONAL)
+- **2. Claim tested:** the corrected per-contract roundtrip gate governs broker-live quantity decisions.
+- **3. Proof label:** VERIFIED-CODE.
+- **4. Production seam & dataflow (producer→failure→consumer):** `paper_endpoints._is_shadow_routing` resolves `shadow_only` correctly → `_apply_entry_roundtrip_gate:1343-1352` applies the corrected basis to shadows, but broker-live remains on the legacy decision while `GATE_QTY_FIX_LIVE_ENABLED=OFF` → live staging consumes the old basis; the observe line emits at `paper_endpoints.py:1370`.
+- **5. Existing test + reaches seam?:** `test_shadow_routing_fix.py` reaches routing and gate decisions; it proves live remains unchanged with the flag OFF, not that arming is safe.
+- **6. Instrument path + durable sink:** W1 WARNING flip line → Railway logs only; no durable per-decision sink.
+- **7. Impact:** the fix is shipped for shadow observation but live behavior is intentionally unchanged; E2 is conditional, not fully closed.
+- **8. Backlog interaction:** EXTENDS-W1 / quantity-fix arm decision; trigger-owned, not a free flag flip.
+- **9. Doctrine check / loosens control? / proven error:** arming changes a live cost gate; no arm is authorized without W1 evidence. Proven historical error is the quantity-scaled cost-basis mismatch.
+- **10. Smallest operator decision / remediation:** keep OFF; persist/query live would-flip evidence, then make an explicit operator arm decision.
+- **11. Falsifier:** a qty>1 broker-live fixture where corrected and legacy bases differ and the armed path produces the intended gate decision without weakening qty=1.
+- **12. Runtime check required + status:** recover/query W1 qty>1 flip evidence over an absolute window — RUNTIME CHECK — NOT RUN.
+
+### FR-19 · A2-2 canonical-position semantic gap
+- **1. ID / area / severity:** A2-2 · A2 · LOW (EXTENDS canonical-position P1)
+- **2. Claim tested:** `max_loss_total` is sufficient canonical risk truth for every defined-risk structure consumer.
+- **3. Proof label:** VERIFIED-CODE.
+- **4. Production seam & dataflow (producer→transformation→consumer):** `policy_lab/fork._clone_suggestion_for_cohort:594-704` divides source `max_loss_total` by source contracts and rescales it to clone contracts → typed top-level and JSON totals agree → downstream consumers receive a quantity-coherent scalar, but signed leg ratios, multipliers, Greeks, and exact payoff shape are absent.
+- **5. Existing test + reaches seam?:** clone-normalization tests reach scalar rescaling; they do not prove exact vertical/IC payoff semantics or broker reconciliation.
+- **6. Instrument path + durable sink:** `trade_suggestions.max_loss_total` plus `sizing_metadata.max_loss_total` are durable; canonical leg/payoff provenance is absent.
+- **7. Impact:** no current scalar ×quantity defect is proven, but the scalar cannot support exact payoff-capped stress or canonical position reconciliation.
+- **8. Backlog interaction:** EXTENDS canonical position representation; does not reopen E14.
+- **9. Doctrine check / loosens control? / proven error:** additive risk truth; no control loosening. Proven gap = missing structure semantics behind a coherent scalar.
+- **10. Smallest operator decision / remediation:** migrate consumers only after the typed model proves exact vertical/IC max loss and broker parity.
+- **11. Falsifier:** vertical and IC fixtures whose canonical payoff max loss equals the persisted scalar at every quantity and reconciles to broker legs.
+- **12. Runtime check required + status:** broker-position reconciliation is RUNTIME CHECK — NOT RUN; scalar code semantics are VERIFIED-CODE.
+
+### FR-20 · A3-2/A3-3 calibration admission gaps
+- **1. ID / area / severity:** A3-2, A3-3 · A3 · LOW (EXTENDS segment-n/calibration schema)
+- **2. Claim tested:** calibration learns real DTE segments and revalidates sample admission when serving a multiplier.
+- **3. Proof label:** VERIFIED-CODE.
+- **4. Production seam & dataflow (producer→failure→consumer):** `fetch_eligible_outcomes:360-397` SELECTs no DTE field → grouping resolves `unknown`; separately `_group_and_compute:490-503` admits at n≥3 → `apply_calibration:628-704` selects a multiplier without rechecking sample size → live EV/PoP consumes inert-DTE or undersized segment semantics.
+- **5. Existing test + reaches seam?:** grouping/fallback tests exist; no production-fetch test proves real DTE reaches grouping, and no route test rejects an undersized selected segment at apply time.
+- **6. Instrument path + durable sink:** `calibration_adjustments.adjustments` stores buckets/sample sizes; no apply-time admission verdict is persisted.
+- **7. Impact:** no DTE-specific learning occurs, and a small-n segment can apply unshrunk; adding DTE naively can double-count `_all`.
+- **8. Backlog interaction:** EXTENDS minimum-segment-n, calibration schema, and F-A1-3 ordering.
+- **9. Doctrine check / loosens control? / proven error:** measurement/evidence admission only; no live threshold or gate loosening.
+- **10. Smallest operator decision / remediation:** persist a close-time DTE source, define mutually exclusive aggregation, and enforce a versioned minimum at serve/apply time.
+- **11. Falsifier:** production-shaped outcomes create real DTE buckets without duplicate `_all`, and an undersized selected segment cannot alter EV/PoP.
+- **12. Runtime check required + status:** inspect served segment identities/sample sizes after schema exists — RUNTIME CHECK — NOT RUN.
+
+### FR-21 · A9-4 output-freshness no-activity gap
+- **1. ID / area / severity:** A9-4 · A9 · LOW (EXTENDS OUTPUT_FRESHNESS)
+- **2. Claim tested:** an aged output row always proves its writer is unhealthy.
+- **3. Proof label:** VERIFIED-CODE.
+- **4. Production seam & dataflow (producer→failure→consumer):** `OUTPUT_FRESHNESS:143-183` registers `calibration_adjustments`, `learning_feedback_loops`, and `suggestion_rejections` → `get_output_freshness:531-590` compares newest timestamps to fixed TTLs without an input/activity denominator for those tables → legitimate no-input learning-mode periods become stale/error → `risk_alerts`.
+- **5. Existing test + reaches seam?:** the flat-book guard reaches `paper_positions`; no equivalent no-activity fixture covers the other three tables.
+- **6. Instrument path + durable sink:** newest-row query → output-freshness result → durable `risk_alerts`.
+- **7. Impact:** quiet periods can produce false operational alarms and erode alert trust.
+- **8. Backlog interaction:** EXTENDS OUTPUT_FRESHNESS; does not weaken dead-man or writer-health checks.
+- **9. Doctrine check / loosens control? / proven error:** measurement integrity; retain fail-safe behavior on unreadable activity. Proven error = output age interpreted without whether output was expected.
+- **10. Smallest operator decision / remediation:** add an activity-aware expected-output predicate per table; suppress only proven no-input windows.
+- **11. Falsifier:** a no-input window remains healthy while the same-aged row with qualifying inputs fires stale.
+- **12. Runtime check required + status:** compare stale alerts with qualifying input counts over the same absolute window — RUNTIME CHECK — NOT RUN.
+
+### FR-22 · OBSERVE-WINDOW-DURABILITY
+- **1. ID / area / severity:** OBSERVE-WINDOW-DURABILITY · W1–W5/A4 · MED (EXTENDS arm-evidence)
+- **2. Claim tested:** every arm decision has durable, queryable per-decision evidence.
+- **3. Proof label:** VERIFIED-CODE + NOT_PROVEN runtime sample.
+- **4. Production seam & dataflow (producer→boundary→consumer):** W1/W2 emit only WARNING/INFO to Railway logs; W3 emits INFO plus only a cap-breach subset to `risk_alerts`; W4 persists a count to `job_runs.result`; W5 has no emitter → the operator cannot query a complete would-flip population for W1/W2/W3/W5.
+- **5. Existing test + reaches seam?:** helper/logging tests prove emission capability, not durable per-decision conservation or natural-sample sufficiency.
+- **6. Instrument path + durable sink:** exact taxonomy: W1/W2 logs-only; W3 partially durable; W4 semi-durable; W5 absent.
+- **7. Impact:** arming from these windows would rely on incomplete or retention-bounded evidence.
+- **8. Backlog interaction:** EXTENDS-F-WINDOW-1a/1b; this is not a new finding identifier.
+- **9. Doctrine check / loosens control? / proven error:** no arm is authorized; proven measurement gap = missing durable per-decision evidence.
+- **10. Smallest operator decision / remediation:** persist versioned would-flip decisions keyed to a shared cycle identity before any arm decision.
+- **11. Falsifier:** a conservation-complete query returns every eligible decision, basis, would-flip result, and enforcement-site identity across retries.
+- **12. Runtime check required + status:** RC-3 plus per-window durable-count queries — RUNTIME CHECK — NOT RUN.
+
+
 ## 16. EV / RAeV / score / edge / P&L basis + unit register (C6)
 
-Every economic comparison that drives a finding or ranking carries an explicit basis (`raw | calibrated | realized | unknown`) and unit (`per-contract | position-total | score-points | probability | unknown`). An unknown basis/unit is itself a finding — none are silently chosen here.
+Every economic comparison that drives a finding or ranking carries an explicit basis and unit. `unknown` and `mixed/unknown` are honest findings; none are silently chosen.
 
 | Economic claim | Where | Value | Basis | Unit |
 |---|---|---|---|---|
-| Realized broker-live P&L | §1a, §2 | 1W/7L ≈ −$178 | realized | position-total |
-| Calibration multipliers (floor) | §1 falsifier, A3-3 | ev×0.5 / pop×0.5 | calibrated | ev-multiplier (position-total) / probability |
-| Credit-spread EV | A6-3, E12/⑤ | ≡ $0 | raw | position-total |
-| Debit-spread EV | A6-3 | breakeven-delta interpolation | raw | position-total |
-| Condor EV rank input | A6-3 | raw abs(delta) + fixed severity | raw | probability |
-| `ev_below_min` comparison (LHS) | A8-1 | dollar `ev` | raw | position-total |
-| `min_score_threshold` (RHS) | A8-1 | 0–100 threshold | n/a | score-points |
-| `rank_at_decision` | A8-1 | on raev (secondary lie) | raw | position-total |
-| Shadow-vs-live capital ratio | §2, A6-2 | $100k vs $2,067.86 (~48×) | realized | position-total |
-| Promotion normalization discount | A6-2 | 0.31 | calibrated | ratio (position-total) |
-| Phase-3 exit gap_fraction | A7-2 | 2 of 6 computable | realized | ratio (per-contract normalized) |
-| MIN_EDGE_AFTER_COSTS gate | §6 (ranker) | edge floor | raw | position-total |
+| Realized broker-live P&L | §1a, §2 | 1W/7L ≈ −$178 | realized | position-total USD |
+| EV calibration multiplier | §1 falsifier, A3-3 | ×0.5 | calibrated | dimensionless multiplier |
+| PoP calibration multiplier | §1 falsifier, A3-3 | ×0.5 | calibrated | dimensionless probability multiplier |
+| Credit-spread EV | A6-3, E12/⑤ | ≡ $0 | raw | per-structure-contract USD |
+| Debit-spread EV | A6-3 | breakeven-delta interpolation | raw | per-structure-contract USD |
+| Condor EV rank input | A6-3 | delta-tail/fixed-severity dollar EV | raw heuristic | per-structure-contract USD |
+| `ev_below_min` LHS | A8-1 | stored/served `ev` | unknown across 56-row history; calibrated at attested successful-calibration runtime, raw if disabled | per-structure-contract USD |
+| `min_score_threshold` RHS | A8-1 | 0–100 | n/a | score-points |
+| `rank_at_decision` | A8-1 | query ordinal | unknown (ordering basis not persisted on `policy_decisions`) | ordinal-rank |
+| Canonical RAeV | ranker | expected P&L ÷ marginal risk/concentration | served EV basis; exact historical basis unknown | dimensionless ratio |
+| Shadow/live capital snapshot | §2, A6-2 | $100k vs $2,067.86 | n/a — dated account snapshot | account-equity USD; ratio dimensionless |
+| Promotion-normalization factor | A6-2 | 0.31 | n/a — configured factor | dimensionless ratio |
+| Phase-3 `gap_fraction` | A7-2 | 2 of 6 computable | realized | dimensionless ratio |
+| `MIN_EDGE_AFTER_COSTS` calculation | ranker | per-contract EV combined with quantity-scaled costs | calibrated at attested runtime; historical basis unknown | **mixed/unknown dollars — known per-contract-EV vs position-total-cost defect** |
 
 **STOP.** Read-only report. No production code/config/DB/broker change; nothing merged or deployed.

@@ -75,7 +75,9 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
   the replay runner. · v1.5 A5-2.
 - **Observe-window durable sink (P2, before any arm):** route each shadow arm-decision (W2/W3/W4) to a DB sink
   (shadow_observations / job_runs.result) instead of `logger.info`; add RISK_BASIS + BUCKET heartbeats; centralize
-  the W3 bucket seam (the `:636` + endpoint stage paths bypass it). Today 4/5 windows' arm evidence is ephemeral. · v1.5 W.
+  the W3 bucket seam (the `:636` + endpoint stage paths bypass it). Four of five windows lack complete durable
+  decision evidence (W1, W2, W3, W5); only W1/W2 are strictly logs-only, W3 is partially durable (cap-breach alarm
+  subset → `risk_alerts`), W4 is semi-durable (count → `job_runs.result`), and W5 is absent/unstarted. · v1.5 W.
 - **A10-1 Labor Day holiday-blind (EXTENDS-area10, HARD TRIGGER < 2026-09-07):** `is_us_market_hours:46-69` gates on
   weekday math with no `get_calendar` → 09-07 (Mon) reads market-open → false `data_stale`/`job_late` HIGHs. Fix:
   gate the alert path on `get_calendar` before 09-07. · v1.5 A10.

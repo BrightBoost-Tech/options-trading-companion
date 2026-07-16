@@ -10,8 +10,11 @@ Executed the v1.5 BRIEF (`docs/review/external-full-audit-v1.5-current.md`) — 
 v1.5 results existed). Full completed report: **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**.
 Audited production code at the immutable baseline **`bef2cdd`** (main moved 623044d→d18dd52 during the run =
 **docs-only** #1207+#1208, zero code). E1–E20 + W1–W5 + A1–A10 (Pass 1/2/3) + instrument-integrity + free look
-all completed; runtime adjudicated read-only. **Audit-maturity = INFERRED qualitative (weighted scorecard in
-the results §12); NOT a verified profitability/reliability/efficiency measurement — no single scalar asserted.**
+all completed; runtime adjudicated read-only. **Audit-maturity = `INFERRED design-maturity score 60/100`
+(reproducible weighted scorecard in results §12c, weights sum 100 & earned points sum 60; capped below the 85
+maturity-ladder rung by the open live-entry fail-open, incoherent EV/cost bases, missing replay reader, incomplete
+observe-window durability, and 5 unrun runtime checks); NOT a verified profitability/reliability/efficiency
+measurement, and NOT the earlier unsupported 87/100 (the computation independently yields 60).**
 
 **RETAINED findings (exclusion memory — do not re-derive; build queue in the backlog v1.5 section):**
 - **F-MIDDAY-POSITION-READ-FAILOPEN — CONFIRMED, 2 sites, live-entry safety (HIGH).** `except → return []`:
@@ -48,8 +51,9 @@ the results §12); NOT a verified profitability/reliability/efficiency measureme
   typed-column-lie F-A9-6:** `model_version` = `APP_VERSION` deploy string presented as model identity (NEW) ·
   **A9-3 F-A9-8:** champion/legacy fork path never populates `fork_errors` → champion clone/tag failure returns
   job-green (NEW) · A10-1 `is_us_market_hours` holiday-blind → Labor Day 2026-09-07 false HIGHs (EXTENDS-area10,
-  hard trigger < 09-07) · E2 roundtrip qty-fix LIVE-INERT (default OFF) · observe-window durability: W2/W3/W4
-  arm-evidence INFO/logs-only, ephemeral (only W4 semi-durable, W3 cap-breach alarm durable).
+  hard trigger < 09-07) · E2 roundtrip qty-fix LIVE-INERT (default OFF) · observe-window durability: four of five
+  windows (W1/W2/W3/W5) lack complete durable evidence — W1/W2 strictly logs-only, W3 partially durable (cap-breach
+  alarm subset → risk_alerts), W4 semi-durable (count → job_runs.result), W5 absent/unstarted.
 - **LOW/NOTE:** A1-1 replay runner input-blocked (capital/OBP/book/ev_raw uncaptured; EXTENDS-E19-2B) · A5-2 no
   decision_runs origin column (NEW, gates replay) · A3-1 stop-vs-thesis signal readable but unconsumed (NEW) ·
   A3-2 DTE bucket inert · A3-3 no apply-time sample re-check · A9-4 freshness alert lacks no-activity guard for

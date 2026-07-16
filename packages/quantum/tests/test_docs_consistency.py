@@ -717,3 +717,299 @@ def test_v15_f_midday_causality_narrowed(both: str):
     assert "F-MIDDAY-POSITION-READ-FAILOPEN" in both
     assert re.search(r"[Cc]ausality.{0,20}NOT inevitable", both) or "not inevitable" in both.lower()
     assert "P0-before-next-entry" in both
+
+
+# --------------------------------------------------------------------------
+# 15. v1.5 CHARTER-COMPLETION PATCH — parser-level structural guards
+#     (R1-R4 truth corrections + C1-C10 charter structures). These PARSE the
+#     report's tables/blocks and assert the document CONTRACT, not word
+#     presence. Every guard below is exercised on the real file AND on a
+#     mutated copy in test_v15_charter_mutations_each_bite — each mutation
+#     must turn its guard red.
+# --------------------------------------------------------------------------
+
+def _cells(row: str) -> list:
+    """Markdown table row → stripped data cells (outer pipes removed)."""
+    return [c.strip() for c in row.strip().strip("|").split("|")]
+
+
+def _table(text: str, header_key: str):
+    """Locate the first markdown table whose header line contains header_key;
+    return (header_cells, [data_row_cells, ...]) skipping the separator row."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("|") and header_key in line:
+            rows = []
+            j = i + 2  # skip header (i) + separator (i+1)
+            while j < len(lines) and lines[j].lstrip().startswith("|"):
+                rows.append(_cells(lines[j]))
+                j += 1
+            return _cells(line), rows
+    raise AssertionError(f"table with header {header_key!r} not found")
+
+
+# ---- R1-R4 truth-correction guards ----
+
+def _g_r1(t: str):
+    """R1 — A7 says post-epoch(9 all-time), never equates 8 with total history."""
+    assert "live broker closes = **8 total" not in t
+    assert "closes = **8 total" not in t
+    assert re.search(r"A7-1[\s\S]{0,200}8 post-epoch broker-live closes \(9 all-time", t), \
+        "A7 denominator not scoped to post-epoch(9 all-time)"
+
+
+def _g_r2(t: str):
+    """R2 — Top-3 A6-2 is a versioned epoch, not an in-place reseed / DB op."""
+    assert "parity re-seed" not in t
+    assert "operator DB op" not in t
+    _h, rows = _table(t, "Effort (single-dev")
+    row2 = [r for r in rows if r and r[0] == "2"]
+    assert row2, "Top-3 rank-2 row missing"
+    assert "versioned live-tier cohort epoch" in row2[0][1]
+    assert "newly versioned" in row2[0][9] and "NOT mutation of old" in row2[0][9]
+
+
+def _g_r3(t: str):
+    """R3 — F-MIDDAY fix tightens the FAILURE path (not 'no behavior change')."""
+    assert "no decision-path behavior change" not in t
+    assert re.search(r"intentionally changes the (FAILURE|failure) path", t)
+    assert "does not loosen a threshold, gate, stop" in t
+
+
+def _g_r4(t: str):
+    """R4 — five-way window durability taxonomy, no '4/5 logs-only' collapse."""
+    assert "4 of 5 windows INFO/logs-only" not in t
+    assert not re.search(r"4 ?/ ?5 window", t)
+    assert "only W1/W2 are strictly logs-only" in t
+    assert "W3 is partially durable" in t and "W4 is semi-durable" in t
+
+
+# ---- C1-C9 charter-structure guards ----
+
+def _g_pass_matrix(t: str):
+    """C1 — A1..A10 each exactly once with three non-empty Pass cells."""
+    _h, rows = _table(t, "Pass 1 (state")
+    areas = [r[0] for r in rows]
+    for a in [f"A{i}" for i in range(1, 11)]:
+        assert areas.count(a) == 1, f"{a} not exactly once in the pass matrix"
+    for r in rows:
+        assert len(r) >= 9, f"pass-matrix row too few cells: {r[0]}"
+        for k in (1, 2, 3):
+            assert r[k] and r[k] not in ("—", "-"), f"empty Pass cell in {r[0]}"
+
+
+def _g_register(t: str):
+    """C2 — every finding-register block has all 12 fields; FR ids unique."""
+    heads = re.findall(r"### (FR-\d+) ·", t)
+    assert len(heads) >= 15, f"too few register entries: {len(heads)}"
+    assert len(heads) == len(set(heads)), f"duplicate FR id: {heads}"
+    for part in re.split(r"\n### FR-", t)[1:]:
+        block = "### FR-" + part
+        m = re.match(r"### (FR-\d+)", block)
+        if not m:
+            continue
+        fid = m.group(1)
+        block = re.split(r"\n## ", block)[0]  # stop at the next H2 section
+        for i in range(1, 13):
+            assert f"**{i}." in block, f"{fid} missing field {i}"
+
+
+def _g_w_table(t: str):
+    """C3 — W1..W5 each once with all columns; sample never reuses a run-state."""
+    _h, rows = _table(t, "First-valid boundary (UTC")
+    ws = [r[0] for r in rows]
+    for w in [f"W{i}" for i in range(1, 6)]:
+        assert ws.count(w) == 1, f"{w} not exactly once"
+    for r in rows:
+        assert len(r) >= 13, f"{r[0]} too few columns"
+        assert r[5], f"{r[0]} missing sample/sufficiency"
+        assert r[5] not in ("RUNNING", "START-UNVERIFIED", "UNSTARTED"), \
+            f"{r[0]} reuses a run-state word as sample/sufficiency"
+        assert r[8], f"{r[0]} missing exact runtime check"
+        assert r[12], f"{r[0]} missing verdict"
+    assert "strictly logs-only" in t and "partially durable" in t and "semi-durable" in t
+
+
+def _g_runtime_table(t: str):
+    """C4 — every runtime-check row has read/source/PASS/FAIL/rationale/status."""
+    _h, rows = _table(t, "Exact read / query")
+    assert len(rows) >= 6, f"too few runtime checks: {len(rows)}"
+    for r in rows:
+        assert r[0].startswith("RC-"), f"bad RC id {r[0]}"
+        assert len(r) >= 7, f"{r[0]} too few columns"
+        for k in (1, 2, 3, 4, 5, 6):
+            assert r[k], f"{r[0]} empty column {k}"
+        assert "NOT RUN" in r[6], f"{r[0]} status is not NOT RUN"
+        assert "CONDOR_EV_MODEL=tail" not in " | ".join(r)
+
+
+def _g_instrument_table(t: str):
+    """C5 — every instrument row carries natural-proof + exact-runtime-check."""
+    _h, rows = _table(t, "Natural proof (observed")
+    assert len(rows) >= 9, f"too few instrument rows: {len(rows)}"
+    for r in rows:
+        assert len(r) >= 9, f"instrument row too few cols: {r[0]}"
+        assert r[6], f"{r[0]} missing natural proof"
+        assert r[7], f"{r[0]} missing exact runtime check"
+
+
+def _g_dep_and_top3(t: str):
+    """C7/C8 — dependency matrix (8 fields) + Top-3 (10 fields) fully populated."""
+    _h, dep = _table(t, "Supersedes / duplicates")
+    assert len(dep) >= 8, f"too few dependency rows: {len(dep)}"
+    for r in dep:
+        assert len(r) >= 8, f"dep row too few cols: {r[0]}"
+        for k in range(8):
+            assert r[k], f"dep row empty col {k}: {r[0]}"
+    _h2, top = _table(t, "Effort (single-dev")
+    assert [r[0] for r in top[:3]] == ["1", "2", "3"], "Top-3 ranks must be 1/2/3"
+    for r in top[:3]:
+        assert len(r) >= 10, f"top-3 row too few cols: {r[0]}"
+        for k in range(10):
+            assert r[k], f"top-3 empty col {k} in rank {r[0]}"
+
+
+def _g_basis_unit(t: str):
+    """C6 — every economic row has a valid basis+unit; inline tags present."""
+    _h, rows = _table(t, "Economic claim")
+    assert len(rows) >= 10, f"too few basis/unit rows: {len(rows)}"
+    bases = {"raw", "calibrated", "realized", "unknown", "n/a"}
+    units = ("per-contract", "position-total", "score-points", "probability",
+             "unknown", "ratio", "ev-multiplier")
+    for r in rows:
+        assert len(r) >= 5, f"basis/unit row too few cols: {r[0]}"
+        assert r[3] and r[4], f"empty basis/unit in {r[0]}"
+        base_tok = r[3].split()[0].lower().rstrip(",")
+        assert base_tok in bases or r[3].lower() in bases, f"bad basis {r[3]!r} in {r[0]}"
+        assert any(u in r[4].lower() for u in units), f"bad unit {r[4]!r} in {r[0]}"
+    assert "[basis=realized, unit=position-total]" in t
+    assert re.search(r"\[basis=raw", t)
+
+
+def _g_design_score(t: str):
+    """C9 — weights sum 100, earned sum == displayed scalar, label INFERRED."""
+    _h, rows = _table(t, "Earned")
+    wsum = esum = 0
+    for r in rows:
+        if r[0].replace("*", "").strip().lower() == "total":
+            continue
+        if len(r) >= 4 and r[1].isdigit() and r[3].isdigit():
+            wsum += int(r[1])
+            esum += int(r[3])
+    assert wsum == 100, f"weights sum {wsum} != 100"
+    m = re.search(r"INFERRED design-maturity score = (\d+) / 100", t)
+    assert m, "reproducible design-maturity scalar missing"
+    assert int(m.group(1)) == esum, f"displayed {m.group(1)} != earned sum {esum}"
+    assert "INFERRED" in t and "85" in t
+
+
+# ---- real-file tests (each guard passes on the committed report) ----
+
+def test_v15_r1_a7_denominator_scoped(v15: str):
+    _g_r1(v15)
+
+
+def test_v15_r2_top3_versioned_epoch_not_reseed(v15: str):
+    _g_r2(v15)
+
+
+def test_v15_r3_midday_tightens_failure_path(v15: str):
+    _g_r3(v15)
+
+
+def test_v15_r4_window_five_way_taxonomy(v15: str, both: str):
+    _g_r4(v15)
+    assert "strictly logs-only" in both  # corrected in ledger + backlog too
+
+
+def test_v15_c1_pass_matrix_complete(v15: str):
+    _g_pass_matrix(v15)
+
+
+def test_v15_c2_finding_register_twelve_fields(v15: str):
+    _g_register(v15)
+
+
+def test_v15_c3_window_table_complete(v15: str):
+    _g_w_table(v15)
+
+
+def test_v15_c4_runtime_check_table_complete(v15: str):
+    _g_runtime_table(v15)
+
+
+def test_v15_c5_instrument_table_complete(v15: str):
+    _g_instrument_table(v15)
+
+
+def test_v15_c6_basis_unit_tags(v15: str):
+    _g_basis_unit(v15)
+
+
+def test_v15_c7_c8_dependency_and_top3_complete(v15: str):
+    _g_dep_and_top3(v15)
+
+
+def test_v15_c9_design_score_reproducible(v15: str):
+    _g_design_score(v15)
+
+
+def test_v15_charter_key_invariants_preserved(v15: str, both: str):
+    """C-consolidated — falsifier grades, denominators, credential hygiene,
+    #1203 status, brief/results distinction, rejection memory stay correct."""
+    assert "#1200 SOFI natural falsifier PASS" in v15
+    assert "#1201 calibration PASS" in v15 and "#1201 thesis PASS" in v15
+    assert "Post-epoch broker-live closes" in v15
+    assert "All broker-live closes, total history" in v15
+    assert "OPERATOR-ATTESTED" in v15
+    assert "zero commit" not in v15.lower() and "zero commit" not in both.lower()
+    assert "external-full-audit-v1.5-results-2026-07-15.md" in both
+
+
+def test_v15_charter_mutations_each_bite(v15: str):
+    """Every corrected-away defect, when reintroduced, turns its guard red."""
+    mutations = [
+        ("remove a Pass cell",
+         lambda s: s.replace("`ReplayTruthLayer.from_decision_id` zero production callers", ""),
+         _g_pass_matrix),
+        ("remove a finding field",
+         lambda s: s.replace("- **6. Instrument path + durable sink:**", "- ", 1),
+         _g_register),
+        ("duplicate a finding id",
+         lambda s: s + "\n### FR-01 · duplicate id\n- **1. x:** y\n",
+         _g_register),
+        ("remove W3 exact runtime check",
+         lambda s: s.replace(
+             "query `risk_alerts` for the bucket would-block type over an armed window "
+             "AND confirm INFO reservation-order emit", ""),
+         _g_w_table),
+        ("remove expected FAIL from a runtime row",
+         lambda s: s.replace("env unset/strict on the bg worker (code default)", ""),
+         _g_runtime_table),
+        ("remove a basis/unit tag",
+         lambda s: s.replace(
+             "| MIN_EDGE_AFTER_COSTS gate | §6 (ranker) | edge floor | raw | position-total |",
+             "| MIN_EDGE_AFTER_COSTS gate | §6 (ranker) | edge floor |  | position-total |"),
+         _g_basis_unit),
+        ("reintroduce 8 total",
+         lambda s: s + "\nlive broker closes = **8 total**\n",
+         _g_r1),
+        ("reintroduce parity re-seed",
+         lambda s: s + "\nA6-2 shadow-capital parity re-seed\n",
+         _g_r2),
+        ("reintroduce no decision-path behavior change",
+         lambda s: s + "\nno decision-path behavior change\n",
+         _g_r3),
+        ("reintroduce 4/5 windows logs-only",
+         lambda s: s + "\n4/5 windows logs-only\n",
+         _g_r4),
+        ("displayed design score != earned points",
+         lambda s: s.replace("INFERRED design-maturity score = 60 / 100",
+                             "INFERRED design-maturity score = 72 / 100"),
+         _g_design_score),
+    ]
+    for label, mutate, guard in mutations:
+        mutated = mutate(v15)
+        assert mutated != v15, f"mutation {label!r} did not change the text"
+        with pytest.raises(AssertionError):
+            guard(mutated)

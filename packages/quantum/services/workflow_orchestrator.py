@@ -2898,6 +2898,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
         if not candidates:
             print("No candidates selected for midday entries.")
+            _scanner_stats = rejection_stats.to_dict() if rejection_stats else {}
             # Log top rejection reasons for diagnostics
             if rejection_stats:
                 top_reasons = rejection_stats.top_reasons(5)
@@ -2926,9 +2927,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     # scanner_emitted=0 is measured (distinct from None).
                     # Downstream stages didn't run → None.
                     **_build_enriched_counts(
-                        universe_size=(
-                            len(scout_results) if scout_results else 0
-                        ),
+                        universe_size=None,
                         scanner_emitted=(
                             len(scout_results) if scout_results else 0
                         ),
@@ -2937,6 +2936,17 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                         edge_above_minimum=None,
                         executable=None,
                         staged=None,
+                        active_universe_count=_scanner_stats.get(
+                            "active_universe_count"
+                        ),
+                        selected_symbol_count=_scanner_stats.get(
+                            "selected_symbol_count"
+                        ),
+                        scanner_emitted_candidate_count=(
+                            len(scout_results) if scout_results else 0
+                        ),
+                        persisted_count=0,
+                        executable_count=None,
                     ),
                     "candidates": 0,
                     "created": 0,
@@ -3935,6 +3945,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         # failed downstream quality gates. The funnel measurements
         # are real — emit them, don't discard.
         _scanner_emitted_count = len(scout_results) if scout_results else 0
+        _scanner_stats = rejection_stats.to_dict() if rejection_stats else {}
         # PR \<this PR\> (2026-05-21): when active-mode H7 pre-check
         # filtered ALL candidates, surface a more-precise exit_reason
         # so the operator can distinguish "filtered by pre-check" from
@@ -3964,13 +3975,23 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             },
             "counts": {
                 **_build_enriched_counts(
-                    universe_size=_scanner_emitted_count,
+                    universe_size=None,
                     scanner_emitted=_scanner_emitted_count,
                     trade_suggestions_created=0,
                     h7_passed=0,
                     edge_above_minimum=0,
                     executable=0,
                     staged=0,
+                    active_universe_count=_scanner_stats.get(
+                        "active_universe_count"
+                    ),
+                    selected_symbol_count=_scanner_stats.get(
+                        "selected_symbol_count"
+                    ),
+                    scanner_emitted_candidate_count=_scanner_emitted_count,
+                    h7_passed_count=0,
+                    persisted_count=0,
+                    executable_count=0,
                 ),
                 "candidates": len(candidates),
                 "created": 0,
@@ -4294,9 +4315,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         # cycle_metadata captures regime / tier / open_position_count
         # / available_envelope at cycle start.
         _scanner_emitted = len(scout_results) if scout_results else 0
-        _rejection_counts = (
-            rejection_stats.to_dict().get("counts", {})
-            if rejection_stats else {}
+        _scanner_stats = rejection_stats.to_dict() if rejection_stats else {}
+        _rejection_counts = _scanner_stats.get("counts", {})
+        _persisted_count = len(inserted_suggestions)
+        _executable_count = sum(
+            1 for item in inserted_suggestions
+            if (item.get("original") or {}).get("status") == "pending"
         )
         _persist_failures = (
             rejection_stats.to_dict().get("persist_failures", 0)
@@ -4315,15 +4339,23 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             },
             "counts": {
                 **_build_enriched_counts(
-                    universe_size=_scanner_emitted,
+                    universe_size=None,
                     scanner_emitted=_scanner_emitted,
                     trade_suggestions_created=inserts_count,
-                    h7_passed=inserts_count,
-                    edge_above_minimum=inserts_count - _rejection_counts.get(
-                        "edge_below_minimum", 0
+                    h7_passed=len(candidates),
+                    edge_above_minimum=_executable_count,
+                    executable=_executable_count,
+                    staged=_executable_count,
+                    active_universe_count=_scanner_stats.get(
+                        "active_universe_count"
                     ),
-                    executable=inserts_count,
-                    staged=inserts_count,
+                    selected_symbol_count=_scanner_stats.get(
+                        "selected_symbol_count"
+                    ),
+                    scanner_emitted_candidate_count=_scanner_emitted,
+                    h7_passed_count=len(candidates),
+                    persisted_count=_persisted_count,
+                    executable_count=_executable_count,
                 ),
                 # Legacy / backward-compat:
                 "candidates": len(candidates),

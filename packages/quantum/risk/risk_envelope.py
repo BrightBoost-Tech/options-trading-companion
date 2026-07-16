@@ -20,6 +20,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from packages.quantum.risk.position_model import (
+    PositionNormalizationError,
+    RiskClassification,
+    analyze_payoff,
+    normalize_position,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,17 +198,41 @@ def _pos_field(pos: Dict, key: str, default: Any = 0.0) -> Any:
     return pos.get(key) or default
 
 
-def _pos_risk(pos: Dict) -> float:
-    """Estimate risk usage of a position in dollars."""
-    max_credit = float(_pos_field(pos, "max_credit", 0))
-    qty = abs(float(_pos_field(pos, "quantity", 1)))
-    entry = float(_pos_field(pos, "avg_entry_price", 0))
+class PositionRiskUnavailable(RuntimeError):
+    """Exact structure risk could not be established.
 
-    if max_credit > 0:
-        return max_credit * qty * 100  # Credit spreads: risk ≈ max_credit * 100 per contract
-    if entry > 0:
-        return entry * qty * 100
-    return 0.0
+    The envelope must never reinterpret missing/malformed structure state as
+    zero risk or fall back to premium received. Callers fail closed on this
+    typed outcome.
+    """
+
+
+def _pos_risk(pos: Dict) -> float:
+    """Return exact position-level max loss from the canonical payoff surface.
+
+    This is canonical-position consumer PR-2. max_loss_total is already
+    scaled by structure quantity and multiplier; it must never be multiplied
+    again. Malformed or unbounded structures raise a typed error instead of
+    fabricating a finite premium-based risk number.
+    """
+    position_id = _pos_field(pos, "id", "unknown")
+    try:
+        canonical = normalize_position(pos, source="risk_envelope")
+        profile = analyze_payoff(canonical)
+    except PositionNormalizationError as exc:
+        raise PositionRiskUnavailable(
+            f"position={position_id} normalization failed: {exc}"
+        ) from exc
+
+    if (
+        profile.classification is not RiskClassification.DEFINED_RISK
+        or profile.max_loss_total is None
+    ):
+        raise PositionRiskUnavailable(
+            f"position={position_id} is not defined-risk"
+        )
+
+    return float(profile.max_loss_total)
 
 
 # ---------------------------------------------------------------------------

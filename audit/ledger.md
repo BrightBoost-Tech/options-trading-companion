@@ -4,6 +4,28 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-16 — OVERNIGHT BACKLOG LANES · status:merged-foundation/draft
+
+Grounded GitHub main at `0e3e54f0821f2114b3d1b10074f15686f5e555c5`.
+
+- #1224 merged the post-merge standing and fleet doctrine.
+- #1225 merged the **dormant** `small_tier_v1` schema/pure contract. This is
+  not activation: migration unapplied; zero fleet/account/portfolio/policy
+  rows provisioned; no runtime caller; legacy-terminal boundary unproven.
+- #1226 merged test-only rolling calibration-floor stability.
+- #1227 merged read-only calibration-report fetch truth; multiplier behavior
+  is unchanged.
+- #1228 is DRAFT: persisted decision-tape aggregate hash/count reader plus a
+  signed operator-triggered job path. It reads zero live data and is
+  deliberately unscheduled. Full deterministic replay remains open.
+- #1229 is DRAFT: broker-clock holiday/half-day truth is threaded through
+  ops-health `data_stale` and RTH job-liveness gates. Detection-only; no
+  cadence/control change.
+
+Neither draft is shipped, runtime-proven, or authorized for merge by this
+documentation record. No migration, fleet activation, policy registration,
+schedule, flag, threshold, stop, gate, broker write, or DB write occurred.
+
 ## 2026-07-16 — POST-MERGE RECONCILIATION · status:shipped-code/runtime-pending
 
 Grounded repository truth through `main=b6496b60d46d137806a80577581d19a4b06eec8c`.
@@ -46,7 +68,8 @@ suggestion UUID as immutable `decision_event_id`; evidence n is distinct
 decision events, never account-row count. No live control, threshold, stop,
 gate, strategy, universe, or cadence change was authorized.
 
-Implementation status:
+Implementation status (historical at this entry; superseded by the overnight
+entry above):
 
 - #1225 **DRAFT / CI GREEN** — dormant schema and side-effect-free validation
   only. Migration unapplied; no fleet/account/portfolio/cohort rows created; no

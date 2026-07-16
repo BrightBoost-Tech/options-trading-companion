@@ -486,7 +486,8 @@ silence is by design. **Queue routing** (RQ, via
 `enqueue_job_run(queue_name=…)`): trading-day pipeline + per-cycle + IV-daily →
 `otc` (worker); the 6-job post-close learning chain (learning_ingest_eod ·
 paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_check
-· daily_progression_eval) + `iv_historical_backfill` → `background`
+· daily_progression_eval) + `iv_historical_backfill` + `thesis_tracker` + the
+unscheduled operator-triggered `replay_integrity_check` → `background`
 (worker-background) — long/secondary work off the trading queue (A5; the
 2026-05-15 starve class). Full map pinned by
 `test_learning_chain_queue_routing.py`.
@@ -782,6 +783,28 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
   lack of a qualifying event is **INCONCLUSIVE**, not failure or success.
 - Reconciliation/docs work never authorizes a flag, threshold, stop, gate,
   schedule, broker, DB, migration, or environment change.
+
+---
+
+## Current overnight standing (2026-07-16)
+
+- Main through #1227 contains the dormant small-tier fleet foundation, the
+  calendar-stable prequential fixtures, and truthful calibration-report fetch
+  semantics. The fleet migration is not applied and no fleet is active.
+- #1228 is a draft read-only persisted-tape hash/count verifier with an
+  operator-triggered job path. It is unscheduled and does not prove full
+  deterministic strategy replay.
+- #1229 is a draft detection-only broker-clock guard for ops-health holiday and
+  half-day truth. It changes no scheduler cadence or trading control.
+- Treat both drafts as **unshipped** until adversarial review, fresh CI, merge,
+  deployment attestation, and their named natural falsifiers. Do not report a
+  draft, green unit test, or merged schema as live behavior.
+- The next safe code work remains: fleet provisioning/activation mechanics
+  behind a broker+DB-proven legacy-terminal boundary; the independent terminal-
+  distribution probability source; multi-basis cost phase 2; canonical-position
+  greeks/stress/reconciliation; and funnel terminal dispositions. None of those
+  authorizes a live flag, gate, threshold, stop, universe, width, or cadence
+  change.
 
 ---
 

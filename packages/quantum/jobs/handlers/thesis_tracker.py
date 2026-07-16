@@ -15,7 +15,8 @@ scored raises counts.errors → the runner records the job PARTIAL, never
 green-on-vacuum.
 """
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, time
+from zoneinfo import ZoneInfo
 
 from packages.quantum.jobs.handlers.utils import get_admin_client
 from packages.quantum.analytics.thesis_scoring import score_thesis, classify_structure
@@ -100,6 +101,30 @@ def _summarize_population(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+_MARKET_TZ = ZoneInfo("America/New_York")
+_EXPIRY_TERMINAL_AFTER = time(16, 15)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _expiry_is_terminal_eligible(expiry: date, as_of: datetime) -> bool:
+    """Past expiries are ready; same-day expiry is ready only post-close.
+
+    The 16:15 ET guard prevents a manual pre-close run from grading an
+    incomplete same-day daily bar. It is deliberately later than regular
+    options close and still resolves early-close sessions that same day.
+    """
+    market_now = as_of.astimezone(_MARKET_TZ)
+    if expiry < market_now.date():
+        return True
+    return (
+        expiry == market_now.date()
+        and market_now.time().replace(tzinfo=None) >= _EXPIRY_TERMINAL_AFTER
+    )
+
+
 def _parse_date(v) -> Optional[date]:
     if not v:
         return None
@@ -146,7 +171,8 @@ def _underlying_at_expiry(truth, symbol: str, expiry: date):
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     print(f"[{JOB_NAME}] Starting thesis scoring.", flush=True)
     client = get_admin_client()
-    today = datetime.now(timezone.utc).date()
+    as_of = _utc_now()
+    today = as_of.astimezone(_MARKET_TZ).date()
 
     # 1. Tracked cohort closed positions (join for routing_mode).
     pos_rows = client.table("paper_positions") \
@@ -204,7 +230,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         if expiry is None:
             outcome, U, basis, price_basis = "unknown", None, "no original expiry on position", "no_expiry"
-        elif expiry > today:
+        elif not _expiry_is_terminal_eligible(expiry, as_of):
             outcome, U, basis, price_basis = "in_progress", None, f"expiry {expiry.isoformat()} not yet reached", "in_progress"
         else:
             if truth:

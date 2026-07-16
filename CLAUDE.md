@@ -785,6 +785,28 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
+## Current overnight standing (2026-07-16)
+
+- Main through #1227 contains the dormant small-tier fleet foundation, the
+  calendar-stable prequential fixtures, and truthful calibration-report fetch
+  semantics. The fleet migration is not applied and no fleet is active.
+- #1228 is a draft read-only persisted-tape hash/count verifier with an
+  operator-triggered job path. It is unscheduled and does not prove full
+  deterministic strategy replay.
+- #1229 is a draft detection-only broker-clock guard for ops-health holiday and
+  half-day truth. It changes no scheduler cadence or trading control.
+- Treat both drafts as **unshipped** until adversarial review, fresh CI, merge,
+  deployment attestation, and their named natural falsifiers. Do not report a
+  draft, green unit test, or merged schema as live behavior.
+- The next safe code work remains: fleet provisioning/activation mechanics
+  behind a broker+DB-proven legacy-terminal boundary; the independent terminal-
+  distribution probability source; multi-basis cost phase 2; canonical-position
+  greeks/stress/reconciliation; and funnel terminal dispositions. None of those
+  authorizes a live flag, gate, threshold, stop, universe, width, or cadence
+  change.
+
+---
+
 ## Working style
 
 Exact SQL, exact file:line, exact Railway commands — no placeholders. Show

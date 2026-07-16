@@ -12,7 +12,7 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
 
-This is the current action surface after PRs #1203–#1222. Older dated sections
+This is the current action surface after PRs #1203–#1227. Older dated sections
 remain as audit history, but their priority lists are not actionable where they
 conflict with this block. A merged code path is not runtime proof; runtime
 falsifiers remain in the ledger.
@@ -44,19 +44,25 @@ falsifiers remain in the ledger.
 - **Doctrinal reconciliation** — #1222 records the cost/funnel/expiry contracts.
 - **Legacy PoP test debt (#775)** — shipped in #1223; the previously skipped
   suite now pins the current credit/debit PoP contract.
+- **Small-tier fleet foundation** — #1225 merged the dormant schema and pure
+  validation contract. The migration remains unapplied and the fleet has no
+  provisioned accounts, policy bindings, runtime caller, or active epoch.
+- **Prequential rolling-floor fixture** — #1226 shipped tests only; no runtime
+  calibration behavior changed.
+- **Calibration-report fetch truth** — #1227 makes the read-only report type a
+  failed fetch separately from an empty cohort; the served multiplier path is
+  unchanged.
 
-### Tonight's independent draft lanes
+### Current independent draft lanes
 
-- **#1225 — small-tier fleet foundation:** CI green on the current head;
-  dormant schema + side-effect-free contract only. No migration applied.
-- **#1226 — prequential rolling-floor fixture:** CI green; tests-only removal
-  of the 120/365-day calendar time bomb.
-- **#1227 — calibration-report fetch truth:** draft; makes the read-only report
-  distinguish DB failure from a legitimate empty cohort. Live calibration
-  behavior is untouched.
-- These drafts are not shipped and do not change the next trading session until
-  independently reviewed and merged; #1225 additionally requires an
-  operator-applied migration and later activation transaction.
+- **#1228 — replay tape-hash reader:** DRAFT; recomputes persisted aggregate
+  hashes/counts through a signed operator-triggered, read-only job. It is
+  deliberately unscheduled and is not full deterministic strategy replay.
+- **#1229 — A10 broker-clock holiday guard:** DRAFT; threads one read-only
+  broker-clock result through `data_stale` and RTH `job_late` suppression.
+  Detection only; no schedule or trading behavior changes.
+- Both remain unshipped until adversarial review and fresh CI. Neither draft
+  authorizes a merge, deployment, trigger, broker write, or runtime PASS.
 
 ### Partial families — only these remainders are open
 
@@ -77,13 +83,17 @@ falsifiers remain in the ledger.
 
 ### Actual next priorities
 
-1. **F-SHADOW-CAPITAL-PARITY foundation — AUTHORIZED / DRAFT #1225.**
+1. **F-SHADOW-CAPITAL-PARITY operationalization — FOUNDATION MERGED #1225 /
+   ACTIVATION GATED.**
    Prospective `small_tier_v1` = 50 isolated $2,000 accounts; $100,000 is an
    administrative total only. Activate only uniquely pre-registered policies,
    preserve `legacy_100k`, require terminal legacy positions+orders and one
    explicit DB-time epoch boundary, and count distinct source decision events
    rather than account rows. #1225 is schema+pure-contract only: migration
-   unapplied, no rows created, no runtime caller, no flag changed.
+   unapplied, no rows created, no runtime caller, no policy registration, no
+   flag changed. Next code slice is a fail-closed provisioning/activation
+   transaction, but it cannot run until the legacy-terminal boundary is
+   broker+DB proven.
 2. **⑤ Independent terminal-distribution probability source.** One versioned
    terminal distribution feeding two integrations: vertical payoff and condor
    payoff. Observe/prequential first; baseline wins on Brier, EV-RMSE, and net
@@ -94,7 +104,9 @@ falsifiers remain in the ledger.
 5. **Funnel telemetry phase 2**, then **option-liquidity
    freshness/provenance** (migration-bearing), then the observe-first exact-leg
    **OI floor** extension.
-6. **A10 market-calendar correctness** before the 2026-09-07 Labor Day trigger.
+6. **A10 market-calendar correctness — DRAFT #1229.** Merge only after review
+   and green CI; runtime falsifier is a broker-closed weekday/holiday cycle
+   producing zero `data_stale`/RTH `job_late` alerts.
 
 ### Gated / runtime-only; not tonight build slots
 
@@ -102,9 +114,9 @@ falsifiers remain in the ledger.
   decision, first natural leg-aware ranking decision, first natural git-SHA
   tape row, and the next post-close thesis run are **NOT_PROVEN_RUNTIME** here.
 - **F-SHADOW-CAPITAL-PARITY** is authorized in design but not activated.
-  #1225 must pass review, its migration must follow the migration procedure,
-  the legacy terminal boundary must be runtime-proven, and policy assignments
-  must be separately pre-registered before any account row may become active.
+  #1225 is merged, but its migration must follow the migration procedure, the
+  legacy terminal boundary must be runtime-proven, and policy assignments must
+  be separately pre-registered before any account row may become active.
 - **E19-2B** remains gated on an activated, comparable fleet epoch; **Phase 3**
   remains evidence-gated;
   **prequential operationalization** remains an operator choice between a study

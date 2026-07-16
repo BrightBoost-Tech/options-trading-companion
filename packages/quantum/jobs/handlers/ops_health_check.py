@@ -308,7 +308,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # is market-hours-gated so the new risk_alerts channel doesn't
             # import nightly noise; the snapshot still records staleness).
             suppressed, last_sent = should_suppress_alert(client, fingerprint, cooldown_minutes)
-            if not is_us_market_hours(broker_is_open=broker_is_open):
+            # Keep the legacy wall-clock predicate as the explicit degraded
+            # fallback. A successful broker False is authoritative on exchange
+            # holidays; None means the broker read failed, not that it closed.
+            market_is_open = (
+                broker_is_open
+                if broker_is_open is not None
+                else is_us_market_hours()
+            )
+            if not market_is_open:
                 suppressed, last_sent = True, "outside_market_hours"
 
             if not suppressed:

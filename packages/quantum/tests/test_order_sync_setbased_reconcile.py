@@ -24,6 +24,7 @@ import unittest
 from unittest import mock
 
 from packages.quantum.tests.test_paper_shadow_reconcile_isolation import (
+    _FakeQuery,
     _FakeSupabase,
 )
 
@@ -122,7 +123,9 @@ class TestSetBasedReconcile(unittest.TestCase):
         self.assertEqual(closed, [])
         self.assertEqual(result.get("stuck_open_closed"), 0)
 
-    def test_poll_failure_reaches_runner_as_partial(self):
+    def test_refetch_failure_reaches_runner_as_partial_from_origin(self):
+        """Drive the real broker-refetch failure through poll, handler, and
+        runner classification.  No fabricated poll result is allowed."""
         from packages.quantum.jobs.handlers import alpaca_order_sync
         from packages.quantum.jobs.runner import _classify_handler_return
 
@@ -132,8 +135,11 @@ class TestSetBasedReconcile(unittest.TestCase):
             "portfolio_id": "port-live",
             "status": "working",
             "alpaca_order_id": "alp-pending",
+            "submitted_at": "2020-01-01T00:00:00Z",
+            "broker_status": "new",
             "filled_qty": 0,
             "position_id": None,
+            "side": "buy",
             "order_json": {},
         }
         supa = _FakeSupabase({
@@ -147,19 +153,16 @@ class TestSetBasedReconcile(unittest.TestCase):
             "paper_orders": [pending],
             "paper_positions": [],
         })
-        poll_result = {
-            "total_polled": 1,
-            "fills": 0,
-            "partials": 0,
-            "cancels": 0,
-            "unchanged": 0,
-            "errors": [
-                {
-                    "order_id": "ord-pending",
-                    "error": "watchdog broker refetch failed",
-                }
-            ],
-        }
+        broker = mock.MagicMock()
+        broker.get_order.side_effect = [
+            {"status": "new", "filled_qty": 0},
+            ValueError("origin broker payload failure"),
+        ]
+        committed_updates = []
+
+        def capture_update(_query, payload):
+            committed_updates.append(payload)
+            return _query
 
         with (
             mock.patch.object(
@@ -167,24 +170,33 @@ class TestSetBasedReconcile(unittest.TestCase):
             ),
             mock.patch(
                 "packages.quantum.brokers.alpaca_client.get_alpaca_client",
-                return_value=mock.MagicMock(),
+                return_value=broker,
             ),
-            mock.patch(
-                "packages.quantum.brokers.alpaca_order_handler.poll_pending_orders",
-                return_value=poll_result,
-            ) as poll,
+            mock.patch.object(
+                _FakeQuery, "update", new=capture_update, create=True
+            ),
             mock.patch.dict(
                 os.environ, {"RECONCILE_POSITIONS_ENABLED": "0"}, clear=False
             ),
         ):
             result = alpaca_order_sync.run({})
 
-        poll.assert_called_once()
+        broker.cancel_order.assert_called_once_with("alp-pending")
+        self.assertEqual(committed_updates, [])
+        self.assertEqual(pending["status"], "working")
         self.assertFalse(result["ok"])
         self.assertEqual(result["counts"]["errors"], 1)
         self.assertEqual(result["errors"], 1)
         self.assertEqual(len(result["error_details"]), 1)
+        self.assertEqual(
+            result["error_details"][0]["order_id"], "ord-pending"
+        )
+        self.assertIn(
+            "watchdog broker refetch failed: ValueError",
+            result["error_details"][0]["error"],
+        )
         self.assertEqual(_classify_handler_return(result), "partial")
+
 
 
 if __name__ == "__main__":

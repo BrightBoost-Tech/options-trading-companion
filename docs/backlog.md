@@ -10,6 +10,89 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
+## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
+
+This is the current action surface after PRs #1203–#1222. Older dated sections
+remain as audit history, but their priority lists are not actionable where they
+conflict with this block. A merged code path is not runtime proof; runtime
+falsifiers remain in the ledger.
+
+### Shipped / remove from build queue
+
+- **F-A9-5 truthful cohort reasons** — shipped in #1203.
+- **Canonical position, max-loss slice** — pure payoff model shipped in #1204;
+  the live risk-envelope consumer was wired to exact defined-risk max loss in
+  #1214. Missing, malformed, or unbounded structures fail closed.
+- **F-MIDDAY-POSITION-READ-FAILOPEN** — both known live-position reads now
+  distinguish a legitimate empty book from a failed read via
+  `LivePositionStateUnavailable`; the handler cannot remain green on failure.
+  Runtime exception-path injection remains a verification, not a build.
+- **F-POLICY-CAPITAL-FALLBACK + F-A9-8 job truth** — nominal `or 100000`
+  fallbacks and green-on-fork-failure behavior closed in #1215.
+- **F-A9-6 provenance identity** — model identity and deploy identity split in
+  #1216.
+- **Decision-tape git SHA writer contract** — `resolve_git_sha` accepts the
+  explicit SHA, `GIT_SHA`, or a valid `RAILWAY_GIT_COMMIT_SHA`; code/tests
+  are closed. First naturally written production row is still runtime proof.
+- **Ranking commission leg count (cost phase 1)** — #1218 charges legs ×
+  quantity × entry/exit in canonical ranking. This closes the $1.30-for-every-
+  structure defect, not the full multi-basis-cost family.
+- **Funnel denominator truth (telemetry phase 1)** — #1219 separates scanned,
+  passed, selected, persisted, executable, and rejected counts.
+- **F-A10-4 expiry-day thesis lag** — #1220 scores only after the regular-session
+  close; no entry/exit rule changed.
+- **Doctrinal reconciliation** — #1222 records the cost/funnel/expiry contracts.
+- **Legacy PoP test debt (#775)** — draft #1223 restores the skipped suite;
+  tests-only and not shipped until merged.
+
+### Partial families — only these remainders are open
+
+- **Canonical position remainder:** signed per-leg ratios across all consumers,
+  multiplier-aware dollar greeks, payoff-capped stress, stage-time greek
+  population, and broker-position reconciliation. Do not rebuild the max-loss
+  slice already shipped.
+- **Multi-basis cost phase 2:** unify executable spread/slippage/fee/quantity
+  bases across scanner, ranker, gate, and realized comparisons. #1218 changed
+  ranking commission only.
+- **Funnel telemetry phase 2:** persist one terminal disposition for every
+  selected symbol/candidate so selected→persisted loss is attributable. #1219
+  fixed denominators only.
+- **Phase-3 exit-basis measurement:** instrumentation/paired broker-live
+  evidence only. No stop loosening; the 10–15 live-close gate still controls.
+- **F-WINDOW residual:** heartbeat coverage plus a durable cross-job identity.
+  The logging handler is shipped; cross-job joinability is not.
+
+### Actual next priorities
+
+1. **Operator decision — F-SHADOW-CAPITAL-PARITY.** Start a prospective,
+   versioned shadow-capital epoch comparable to the ~$2k live tier, or retain
+   the $100k historical cohort with an explicit non-comparability label. Do not
+   rewrite historical rows. E19-2B remains gated on this decision.
+2. **⑤ Independent terminal-distribution probability source.** One versioned
+   terminal distribution feeding two integrations: vertical payoff and condor
+   payoff. Observe/prequential first; baseline wins on Brier, EV-RMSE, and net
+   outcome unless the challenger proves better.
+3. **Multi-basis cost phase 2** (above), designed in parallel with ⑤ but merged
+   independently.
+4. **Canonical-position remainder** (above), split by one consumer per PR.
+5. **Funnel telemetry phase 2**, then **option-liquidity
+   freshness/provenance** (migration-bearing), then the observe-first exact-leg
+   **OI floor** extension.
+6. **A10 market-calendar correctness** before the 2026-09-07 Labor Day trigger.
+
+### Gated / runtime-only; not tonight build slots
+
+- #1214–#1222 deployment identity, H8 health, first natural exact-max-loss
+  decision, first natural leg-aware ranking decision, first natural git-SHA
+  tape row, and the next post-close thesis run are **NOT_PROVEN_RUNTIME** here.
+- **F-SHADOW-CAPITAL-PARITY** is an operator/data-epoch choice, not permission
+  for an unreviewed production write.
+- **E19-2B** is gated on capital parity; **Phase 3** remains evidence-gated;
+  **prequential operationalization** remains an operator choice between a study
+  tool and a scheduled observe-only job.
+- No live threshold, stop, gate, structure width, universe membership, or
+  cadence change follows from this reconciliation.
+
 ---
 
 ## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION

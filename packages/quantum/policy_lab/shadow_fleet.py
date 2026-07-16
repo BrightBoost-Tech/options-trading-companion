@@ -89,8 +89,18 @@ class SmallTierFleetPlan:
         ]
         if len(registrations) != len(set(registrations)):
             raise FleetContractError("policy_registration_must_be_unique")
-        if self.legacy_open_positions < 0 or self.legacy_working_orders < 0:
-            raise FleetContractError("legacy_counts_must_be_nonnegative")
+        for value in (
+            self.legacy_open_positions,
+            self.legacy_working_orders,
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise FleetContractError(
+                    "legacy_counts_must_be_nonnegative_integers"
+                )
         if self.epoch_name != FLEET_EPOCH:
             raise FleetContractError("invalid_fleet_epoch")
         if self.legacy_epoch_name != LEGACY_EPOCH:
@@ -137,9 +147,11 @@ class SmallTierFleetPlan:
         unregistered slot.
         """
 
+        if self.effective_at is not None:
+            raise FleetContractError("fleet_epoch_already_active")
         if not self.clean_legacy_boundary:
             raise FleetContractError("legacy_positions_or_orders_not_terminal")
-        if effective_at.tzinfo is None:
+        if effective_at.tzinfo is None or effective_at.utcoffset() is None:
             raise FleetContractError("effective_at_must_be_timezone_aware")
         if not self.assigned_accounts:
             raise FleetContractError("no_preregistered_policies")

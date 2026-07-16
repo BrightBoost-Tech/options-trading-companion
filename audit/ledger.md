@@ -11,10 +11,11 @@ v1.5 results existed). Full completed report: **`docs/review/external-full-audit
 Audited production code at the immutable baseline **`bef2cdd`** (main moved 623044d→d18dd52 during the run =
 **docs-only** #1207+#1208, zero code). E1–E20 + W1–W5 + A1–A10 (Pass 1/2/3) + instrument-integrity + free look
 all completed; runtime adjudicated read-only. **Audit-maturity = `INFERRED design-maturity score 60/100`
-(reproducible weighted scorecard in results §12c, weights sum 100 & earned points sum 60; capped below the 85
-maturity-ladder rung by the open live-entry fail-open, incoherent EV/cost bases, missing replay reader, incomplete
-observe-window durability, and 5 unrun runtime checks); NOT a verified profitability/reliability/efficiency
-measurement, and NOT the earlier unsupported 87/100 (the computation independently yields 60).**
+(arithmetic-reproducible reviewer-weighted scorecard in results §12c: weights sum 100 and earned points sum 60;
+the judgment-to-points method is not empirically calibrated; capped below the 85 maturity-ladder rung by the open
+live-entry fail-open, incoherent EV/cost bases, missing replay reader, incomplete observe-window durability, and
+6 unrun runtime checks); NOT a verified profitability/reliability/efficiency measurement, and NOT the earlier
+unsupported 87/100 (the arithmetic independently yields 60).**
 
 **RETAINED findings (exclusion memory — do not re-derive; build queue in the backlog v1.5 section):**
 - **F-MIDDAY-POSITION-READ-FAILOPEN — CONFIRMED, 2 sites, live-entry safety (HIGH).** `except → return []`:
@@ -28,7 +29,8 @@ measurement, and NOT the earlier unsupported 87/100 (the computation independent
   tests proving zero `submit_and_track` for BOTH a portfolio-ID and a position-query exception; a legitimate empty
   stays healthy.
 - **A6-2 shadow-capital parity — HIGH, THE FIRST OPERATOR DECISION.** All three policy-lab portfolios `net_liq=$100,000`
-  (incl. the live-eligible champion) vs the ~$2,067.86 live book (**~48×**, dated observation). Raw-dollar
+  (incl. the live-eligible champion) vs the ~$2,067.86 live book (**~48× capital ratio**, basis=n/a dated account
+  snapshots, unit=account-equity USD; ratio dimensionless). Raw-dollar
   P&L/capacity/feasibility/sizing/selected-samples are NOT live-tier comparable; promotion is *partially* normalized
   where enabled; **thesis hit/miss LABELS are NOT notional-scaled** (capital changes *which* trades enter the sample);
   `live_eligible`=routing ≠ broker execution. The `or 100000` literal is INERT (stored net_liq IS $100k) — removing
@@ -37,9 +39,10 @@ measurement, and NOT the earlier unsupported 87/100 (the computation independent
   one shared broker-grounded capital snapshot (persist capital_basis/source/as-of/epoch); freeze cross-epoch promotion
   until a fresh min sample; NEVER rewrite historical rows as if at $2k.** VERIFIED-CODE + ATTESTED-RUNTIME. Strengthens
   F-SHADOW-CAPITAL-PARITY.
-- **A6-3 condor-EV mis-rank — HIGH, live.** Three incoherent PoP bases (credit≡$0 / debit breakeven-delta /
-  condor raw |delta|+fixed severity) all write `suggestion["ev"]`, jointly sorted by one structure-agnostic
-  ranker; cross-structure rank flips on a severity constant before any $-gate. EXTENDS-E12/⑤.
+- **A6-3 condor-EV mis-rank — HIGH, live.** Three incoherent per-structure-contract dollar-EV constructions
+  (credit≡$0 raw / debit breakeven-delta raw / condor delta-tail probability plus fixed-severity raw heuristic)
+  all write `suggestion["ev"]`, jointly sorted by one structure-agnostic ranker; cross-structure rank flips on a
+  severity constant before any $-gate. EXTENDS-E12/⑤.
 - **A7-1 Phase-3 live-close accrual STALLED — HIGH.** 8 POST-EPOCH live closes (9 all-time incl. the pre-epoch
   NFLX 06-08), last 2026-07-08, 0 in the 7 days to pin; the ~10–15-fill gate is entry-rate-bound
   (INDETERMINATE/PAUSED), not close-instrumentation-bound. (Denominators kept separate — see results §1a.)
@@ -47,18 +50,27 @@ measurement, and NOT the earlier unsupported 87/100 (the computation independent
   EXTENDS-P0-A) · A4-1/A9-2 git_sha reads `GIT_SHA` not `RAILWAY_GIT_COMMIT_SHA`, 12/12 'unknown' (= GIT-SHA-
   DECISION-PROVENANCE, one-liner) · A4-2 replay input/features hashes have a durable sink but ZERO reader (NEW) ·
   A7-2 exit-basis stamp lands on only 2/6 closes, all 3 recent fill-only (resting-GTC bypass; EXTENDS-Phase-3) ·
-  A8-1 F-A9-5 confirmed, 56 `policy_decisions` rows carry the `ev_below_min` lie (EXTENDS-F-A9-5) · **A9-1 5th
+  A8-1 F-A9-5 confirmed: 56 `policy_decisions` rows carry a dollar-`ev` vs score-threshold lie; stored `ev` is
+  the served value (historical basis unknown; calibrated at the attested successful-calibration runtime, with
+  `ev_raw` separate), and `rank_at_decision` is an ordinal (EXTENDS-F-A9-5) · **A9-1 5th
   typed-column-lie F-A9-6:** `model_version` = `APP_VERSION` deploy string presented as model identity (NEW) ·
   **A9-3 F-A9-8:** champion/legacy fork path never populates `fork_errors` → champion clone/tag failure returns
   job-green (NEW) · A10-1 `is_us_market_hours` holiday-blind → Labor Day 2026-09-07 false HIGHs (EXTENDS-area10,
   hard trigger < 09-07) · E2 roundtrip qty-fix LIVE-INERT (default OFF) · observe-window durability: four of five
   windows (W1/W2/W3/W5) lack complete durable evidence — W1/W2 strictly logs-only, W3 partially durable (cap-breach
-  alarm subset → risk_alerts), W4 semi-durable (count → job_runs.result), W5 absent/unstarted.
+  alarm subset → risk_alerts), W4 semi-durable (count → job_runs.result), W5 absent/unstarted. Backlog interaction:
+  **EXTENDS F-WINDOW-1a/1b; not a new finding identifier.**
 - **LOW/NOTE:** A1-1 replay runner input-blocked (capital/OBP/book/ev_raw uncaptured; EXTENDS-E19-2B) · A5-2 no
-  decision_runs origin column (NEW, gates replay) · A3-1 stop-vs-thesis signal readable but unconsumed (NEW) ·
+  decision_runs origin column (**EXTENDS the existing `suggestions_open untraced extra runs` item and replay runner;
+  not a new standalone filing**) · A3-1 stop-vs-thesis signal readable but unconsumed (NEW) ·
   A3-2 DTE bucket inert · A3-3 no apply-time sample re-check · A9-4 freshness alert lacks no-activity guard for
   learning/rejection/calibration tables · OPTIMIZER_V4/ALLOCATION_V4 dead-capability cluster (free look; EXTENDS
-  FORECAST_V4 #1126 inventory) · A2-2 max_loss_total scalar-safe, canonical-position gap remains.
+  FORECAST_V4 #1126 inventory) · A2-2 max_loss_total is quantity-coherent, while signed-leg/payoff/multiplier
+  semantics remain a retained **EXTENDS-canonical-position-P1** gap.
+
+**Register governance:** results §15 is the version of record for retained/conditional finding detail. Every retained
+finding in this ledger/backlog matrix maps to one 12-field register block, or carries an explicit settled, rejected,
+runtime-only, or dormant disposition. The current pin contains 22 unique register blocks.
 
 **REJECTED (do NOT rediscover):**
 - **Internal-fill close-price sign — NOT PROVEN as a defect.** `paper_exit_evaluator._select_internal_fill_price`

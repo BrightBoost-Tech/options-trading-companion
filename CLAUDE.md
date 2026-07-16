@@ -486,7 +486,8 @@ silence is by design. **Queue routing** (RQ, via
 `enqueue_job_run(queue_name=…)`): trading-day pipeline + per-cycle + IV-daily →
 `otc` (worker); the 6-job post-close learning chain (learning_ingest_eod ·
 paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_check
-· daily_progression_eval) + `iv_historical_backfill` → `background`
+· daily_progression_eval) + `iv_historical_backfill` + `thesis_tracker` + the
+unscheduled operator-triggered `replay_integrity_check` → `background`
 (worker-background) — long/secondary work off the trading queue (A5; the
 2026-05-15 starve class). Full map pinned by
 `test_learning_chain_queue_routing.py`.

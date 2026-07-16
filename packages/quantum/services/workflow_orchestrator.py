@@ -2125,20 +2125,45 @@ def _build_enriched_counts(
     edge_above_minimum: Optional[int],
     executable: Optional[int],
     staged: Optional[int],
+    active_universe_count: Optional[int] = None,
+    selected_symbol_count: Optional[int] = None,
+    scanner_emitted_candidate_count: Optional[int] = None,
+    h7_passed_count: Optional[int] = None,
+    persisted_count: Optional[int] = None,
+    executable_count: Optional[int] = None,
 ) -> dict:
-    """Build the v959 enriched counts payload.
+    """Build typed, denominator-honest funnel counts.
 
-    All fields Optional. Pre-scanner exits emit None for all
-    funnel-stage counts. Post-scanner early-exits emit what was
-    measured before the exit.
+    The legacy keys remain for compatibility, but universe_size now resolves
+    to the active-universe measurement whenever that measurement exists; it is
+    never populated from scanner emissions on the new path. None means not
+    measured, while zero means measured-empty.
     """
+    emitted = (
+        scanner_emitted_candidate_count
+        if scanner_emitted_candidate_count is not None
+        else scanner_emitted
+    )
+    h7_count = h7_passed_count if h7_passed_count is not None else h7_passed
+    exec_count = executable_count if executable_count is not None else executable
     return {
-        "universe_size": universe_size,
-        "scanner_emitted": scanner_emitted,
+        "active_universe_count": active_universe_count,
+        "selected_symbol_count": selected_symbol_count,
+        "scanner_emitted_candidate_count": emitted,
+        "h7_passed_count": h7_count,
+        "persisted_count": persisted_count,
+        "executable_count": exec_count,
+        # Compatibility aliases. Do not use universe_size for emissions.
+        "universe_size": (
+            active_universe_count
+            if active_universe_count is not None
+            else universe_size
+        ),
+        "scanner_emitted": emitted,
         "trade_suggestions_created": trade_suggestions_created,
-        "h7_passed": h7_passed,
+        "h7_passed": h7_count,
         "edge_above_minimum": edge_above_minimum,
-        "executable": executable,
+        "executable": exec_count,
         "staged": staged,
     }
 

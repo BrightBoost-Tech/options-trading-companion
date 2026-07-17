@@ -1,6 +1,8 @@
 # packages/quantum/analytics/strategy_selector.py
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional, Union, List
 
 from .regime_engine_v3 import RegimeState
@@ -247,12 +249,22 @@ class StrategySelector:
         days_to_expiry: int = 45,
         effective_regime: Optional[Union[RegimeState, str]] = None,
         banned_strategies: Optional[List[str]] = None,
+        phase_exclusions_out: Optional[List[dict]] = None,
     ) -> List[dict]:
         """
         Return ordered list of candidate strategies to evaluate.
 
         Regime informs the candidate POOL, not the winner.
         EV after costs picks the winner downstream.
+
+        phase_exclusions_out: optional caller-owned list (funnel phase-2
+        observability seam). When the PHASE GATE removes a strategy from
+        the pool, one ``{"strategy": <name>, "phase": <phase>}`` dict per
+        DISTINCT excluded strategy is appended. Report-only: the returned
+        candidate list is identical whether or not the list is passed,
+        and an empty pool with no exclusions stays an honest HOLD verdict
+        at the caller. SHOCK's early empty return happens BEFORE the
+        phase gate and reports nothing (not a phase exclusion).
 
         Returns list of dicts, each with:
           strategy, legs, rationale (same shape as determine_strategy output)
@@ -370,8 +382,6 @@ class StrategySelector:
                 ))
 
         # Phase-aware strategy exclusion
-        import os
-        import logging
         _phase = os.environ.get("CURRENT_PROGRESSION_PHASE", "alpaca_paper")
         _phase_excluded = set()
         if _phase == "alpaca_paper":
@@ -379,11 +389,25 @@ class StrategySelector:
 
         # Filter by policy, phase, and cap at 3
         candidates = []
+        _reported_exclusions = set()
         for strat, rationale, legs in pool:
             if strat in _phase_excluded:
                 logging.getLogger(__name__).info(
                     f"[SCANNER_MULTI] {strat} excluded (phase={_phase})"
                 )
+                # Funnel phase-2: report the exclusion to the caller so
+                # the scanner can record a TYPED strategy_phase_excluded
+                # rejection with strategy attribution (distinct from the
+                # generic strategy_hold_no_candidates bucket). Report-only
+                # — never changes the candidate pool built below.
+                if (
+                    phase_exclusions_out is not None
+                    and strat not in _reported_exclusions
+                ):
+                    _reported_exclusions.add(strat)
+                    phase_exclusions_out.append(
+                        {"strategy": strat, "phase": _phase}
+                    )
                 continue
             if policy.is_allowed(strat) and len(candidates) < 3:
                 candidates.append({

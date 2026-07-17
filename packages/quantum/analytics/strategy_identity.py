@@ -3,13 +3,13 @@
 
 Single source of truth mapping every StrategySelector-emitted strategy
 identifier to:
-  (a) its LossMinimizer classification (``StrategyType``),
-  (b) its payoff-structure class (``StructureClass``), and
-  (c) the ``RiskBudgetEngine.calculate_strategy_cap`` family key.
+  (a) its LossMinimizer classification (``StrategyType``), and
+  (b) its payoff-structure class (``StructureClass``) with defined-risk /
+      max-loss-basis payoff semantics.
 
-Root cause this module fixes: each consumer re-derived identity from the
-raw strategy string with its own substring heuristics, and both production
-consumers misread the selector IDs:
+Root cause this module fixes: consumers re-derived identity from the raw
+strategy string with their own substring heuristics and misread the
+selector IDs:
 
 - ``LossMinimizer.get_strategy_type``: "LONG_CALL_DEBIT_SPREAD" matched the
   '"long" and "call"' heuristic -> ``StrategyType.LONG_CALL`` (a
@@ -17,19 +17,12 @@ consumers misread the selector IDs:
   a debit vertical's loss is capped at the net debit and its upside is
   capped at width minus debit; a naked long has uncapped upside and
   single-leg close semantics).
-- ``RiskBudgetEngine.calculate_strategy_cap``: the persisted selector IDs
-  never contain the family keys as substrings ("long_call_debit_spread"
-  contains "call_debit", not the family key "debit_call";
-  "short_put_credit_spread" contains "put_credit", not "credit_put") so
-  every selector-emitted vertical fell to the 0.05 base cap instead of the
-  regime table's intended family cap.
 
 Contract:
 - Exact-NORMALIZED match only (lower/strip; spaces and hyphens ->
   underscores). Unknown identifiers resolve to ``None`` and callers MUST
   preserve their existing conservative fallback (LossMinimizer -> legacy
-  heuristics / UNKNOWN; calculate_strategy_cap -> legacy substring
-  fallback then base cap). This module never guesses.
+  heuristics / UNKNOWN). This module never guesses.
 - Drift lock: ``test_strategy_identity_crosswalk.py`` route-drives
   ``StrategySelector.get_candidates`` across sentiment x IV x regime and
   FAILS if the selector ever emits an ID absent from this table — the
@@ -68,7 +61,6 @@ class StrategyIdentity:
     canonical_id: str
     strategy_type: StrategyType
     structure: StructureClass
-    risk_cap_family: Optional[str]  # calculate_strategy_cap family key
     is_spread: bool
     defined_risk: bool
     max_loss_basis: Optional[str]
@@ -93,7 +85,6 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="long_call_debit_spread",
             strategy_type=StrategyType.LONG_CALL_DEBIT_SPREAD,
             structure=StructureClass.DEBIT_SPREAD,
-            risk_cap_family="debit_call",
             is_spread=True,
             defined_risk=True,
             max_loss_basis="net_debit",
@@ -102,7 +93,6 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="long_put_debit_spread",
             strategy_type=StrategyType.LONG_PUT_DEBIT_SPREAD,
             structure=StructureClass.DEBIT_SPREAD,
-            risk_cap_family="debit_put",
             is_spread=True,
             defined_risk=True,
             max_loss_basis="net_debit",
@@ -111,7 +101,6 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="short_put_credit_spread",
             strategy_type=StrategyType.SHORT_PUT_CREDIT_SPREAD,
             structure=StructureClass.CREDIT_SPREAD,
-            risk_cap_family="credit_put",
             is_spread=True,
             defined_risk=True,
             max_loss_basis="width_minus_credit",
@@ -120,7 +109,6 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="short_call_credit_spread",
             strategy_type=StrategyType.SHORT_CALL_CREDIT_SPREAD,
             structure=StructureClass.CREDIT_SPREAD,
-            risk_cap_family="credit_call",
             is_spread=True,
             defined_risk=True,
             max_loss_basis="width_minus_credit",
@@ -129,20 +117,17 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="iron_condor",
             strategy_type=StrategyType.IRON_CONDOR,
             structure=StructureClass.IRON_CONDOR,
-            risk_cap_family="iron_condor",
             is_spread=True,
             defined_risk=True,
             max_loss_basis="width_minus_credit",
         ),
         # No-trade verdicts (determine_strategy only). StrategyType.UNKNOWN
         # preserves LossMinimizer's existing conservative handling — there
-        # is no position to classify; risk_cap_family None keeps
-        # calculate_strategy_cap on its legacy base-cap path.
+        # is no position to classify.
         StrategyIdentity(
             canonical_id="hold",
             strategy_type=StrategyType.UNKNOWN,
             structure=StructureClass.NO_TRADE,
-            risk_cap_family=None,
             is_spread=False,
             defined_risk=True,
             max_loss_basis=None,
@@ -151,7 +136,6 @@ _CROSSWALK: Dict[str, StrategyIdentity] = {
             canonical_id="cash",
             strategy_type=StrategyType.UNKNOWN,
             structure=StructureClass.NO_TRADE,
-            risk_cap_family=None,
             is_spread=False,
             defined_risk=True,
             max_loss_basis=None,

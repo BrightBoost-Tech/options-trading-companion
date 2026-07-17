@@ -561,30 +561,13 @@ async def execute_rebalance(
     raw_positions = pos_res.data or []
 
     # 2. Group into Spreads
-    spreads_dicts = group_spread_positions(raw_positions)
-    current_spreads = [Spread(**s) for s in spreads_dicts]
-
-    # Convert to SpreadPosition for engine compatibility
-    # Assuming Spread and SpreadPosition are similar enough or we adapt
-    spread_positions = []
-    for s in current_spreads:
-        # map fields
-        sp = SpreadPosition(
-            id=s.id,
-            user_id=user_id,
-            spread_type=s.spread_type,
-            underlying=s.underlying,
-            ticker=s.ticker,
-            legs=[l.dict() for l in s.legs],
-            net_cost=s.net_cost,
-            current_value=s.current_value,
-            delta=s.delta or 0.0,
-            gamma=s.gamma or 0.0,
-            vega=s.vega or 0.0,
-            theta=s.theta or 0.0,
-            quantity=s.quantity
-        )
-        spread_positions.append(sp)
+    # F-REBAL-COMPUTE: group_spread_positions returns SpreadPosition objects
+    # (models.py), not dicts. The old `Spread(**s)` re-parse assumed dicts and
+    # raised TypeError on any non-empty book (pydantic models are not
+    # mappings). Use the objects directly — SpreadPosition is also the type
+    # the optimizer's investable_assets parameter declares.
+    current_spreads = group_spread_positions(raw_positions)
+    spread_positions = current_spreads
 
     # Calculate Cash
     cash = 0.0
@@ -596,10 +579,11 @@ async def execute_rebalance(
                  val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
              cash += val
 
-    # Instantiate RiskBudgetEngine
+    # Instantiate RiskBudgetEngine. compute() is called below, once the regime
+    # snapshot exists — its real contract needs the regime input
+    # (F-REBAL-COMPUTE).
     risk_budget_engine = RiskBudgetEngine(supabase)
     total_equity = sum(s.current_value for s in spread_positions) + cash
-    risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest
@@ -627,6 +611,24 @@ async def execute_rebalance(
         pass
 
     global_snap = regime_engine.compute_global_snapshot(now, universe_symbols)
+
+    # Risk budget — corrected call contract (F-REBAL-COMPUTE). Real signature:
+    # compute(user_id, deployable_capital, regime_input, positions, ...) — the
+    # midday route's pattern (workflow_orchestrator.run_midday_cycle). In the
+    # rebalance context deployable capital is the portfolio cash basis — the
+    # same `cash` generate_trades receives as deployable_capital below.
+    # Failure truth: explicit typed 500, never a traceback (H9).
+    try:
+        risk_summary = risk_budget_engine.compute(
+            user_id,
+            cash,
+            global_snap.state.value,
+            spread_positions,
+        )
+    except Exception as e:
+        print(f"Rebalance risk budget error: {sanitize_exception(e)}")
+        # SECURITY: Do not leak exception details
+        raise HTTPException(status_code=500, detail="Risk budget computation failed")
 
     # #62a-D3: regime_snapshots persistence removed 2026-05-10 — table never
     # existed in production, all 3 writers were wrapped in silent try/except,
@@ -752,9 +754,12 @@ async def execute_rebalance(
 
              coskew = np.zeros((n, n, n))
 
+             # F-REBAL-COMPUTE: `external_risk_scaler` is not a parameter of
+             # _compute_portfolio_weights (TypeError). The regime risk scaler
+             # is already applied to sigma above (sigma_multiplier), exactly
+             # like the preview route — do not pass a second scaling path.
              target_weights, _, _, trace_id, _, _, _, _ = _compute_portfolio_weights(
-                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash,
-                 external_risk_scaler=global_snap.risk_scaler
+                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
              )
 
              red_flags = []
@@ -840,7 +845,10 @@ async def execute_rebalance(
 
         db_rows = []
         for t in trades:
-            sym = t["ticker"] # Use ticker from trade dict
+            # F-REBAL-COMPUTE: generate_trades' output contract is
+            # {"symbol", "action", ...} (pinned by
+            # test_rebalance_engine_generate_trades) — t["ticker"] KeyError'd.
+            sym = t["symbol"]
             strategy = t.get("type", "custom") # rebalance_buy etc
 
             # Create Trace Context
@@ -928,30 +936,11 @@ async def preview_rebalance(
     raw_positions = pos_res.data or []
 
     # 2. Group into Spreads
-    # group_spread_positions now returns SpreadPosition objects directly (No, it returns dicts, need convert)
-    spreads_dicts = group_spread_positions(raw_positions)
-    current_spreads = [Spread(**s) for s in spreads_dicts]
-
-    # Convert to SpreadPosition for engine compatibility
-    spread_positions = []
-    for s in current_spreads:
-        # map fields
-        sp = SpreadPosition(
-            id=s.id,
-            user_id=user_id,
-            spread_type=s.spread_type,
-            underlying=s.underlying,
-            ticker=s.ticker,
-            legs=[l.dict() for l in s.legs],
-            net_cost=s.net_cost,
-            current_value=s.current_value,
-            delta=s.delta or 0.0,
-            gamma=s.gamma or 0.0,
-            vega=s.vega or 0.0,
-            theta=s.theta or 0.0,
-            quantity=s.quantity
-        )
-        spread_positions.append(sp)
+    # F-REBAL-COMPUTE: group_spread_positions returns SpreadPosition objects
+    # (models.py), not dicts — same fix as /rebalance/execute; the old
+    # `Spread(**s)` re-parse raised TypeError on any non-empty book.
+    current_spreads = group_spread_positions(raw_positions)
+    spread_positions = current_spreads
 
     # Calculate Cash
     cash = 0.0
@@ -963,10 +952,11 @@ async def preview_rebalance(
                  val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
              cash += val
 
-    # Instantiate RiskBudgetEngine
+    # Instantiate RiskBudgetEngine. compute() is called below, once the regime
+    # snapshot exists — its real contract needs the regime input
+    # (F-REBAL-COMPUTE).
     risk_budget_engine = RiskBudgetEngine(supabase)
     total_equity = sum(s.current_value for s in spread_positions) + cash
-    risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest
@@ -987,6 +977,21 @@ async def preview_rebalance(
 
     now = datetime.now()
     global_snap = regime_engine.compute_global_snapshot(now) # Skip symbol snapshot for preview speed
+
+    # Risk budget — corrected call contract (F-REBAL-COMPUTE), mirroring
+    # /rebalance/execute. Failure truth: explicit typed error payload
+    # (preview's existing convention), never a traceback (H9).
+    try:
+        risk_summary = risk_budget_engine.compute(
+            user_id,
+            cash,
+            global_snap.state.value,
+            spread_positions,
+        )
+    except Exception as e:
+        print(f"Rebalance risk budget error: {sanitize_exception(e)}")
+        detail = str(e) if not is_production_env() else "Risk budget computation failed"
+        return {"status": "error", "message": detail, "trades": []}
 
     # Build positions for conviction service
 
@@ -1162,7 +1167,8 @@ async def preview_rebalance(
     ui_trades = []
     for t in trades:
         ui_trades.append({
-            "ticker": t["ticker"],
+            # F-REBAL-COMPUTE: generate_trades emits "symbol", not "ticker".
+            "ticker": t["symbol"],
             "strategy": t.get("type", "custom"),
             "direction": t.get("action", "Hold").title(),
             "order_json": t,

@@ -24,8 +24,9 @@ All trading-day calculations use Chicago timezone.
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import Client
 
@@ -187,7 +188,88 @@ def get_strategy_eligibility(
     }
 
 
-def load_strategy_lifecycle_states(supabase) -> Dict[str, str]:
+# Recognized lifecycle states — mirrors the DB CHECK constraint on
+# strategy_lifecycle_states.current_state (migration 20260507000000).
+# Single source of truth for the scanner entry gate and the sizing
+# engine's defense-in-depth guard.
+RECOGNIZED_LIFECYCLE_STATES = frozenset(
+    {"designed", "experimental", "live_full", "deprecated"}
+)
+
+# Sentinel stored in LifecycleReadResult.states for a row whose
+# strategy_name parsed but whose current_state was NULL / non-string.
+# Deliberately never a member of RECOGNIZED_LIFECYCLE_STATES so the
+# entry gate classifies it as invalid-state (fail closed) with correct
+# strategy attribution, instead of reporting the strategy missing.
+MALFORMED_STATE_SENTINEL = "__malformed__"
+
+
+@dataclass(frozen=True)
+class LifecycleReadResult:
+    """Typed result of a strategy_lifecycle_states read (fail-closed
+    tightening, 2026-07-16).
+
+    The pre-typed loader returned a bare ``{}`` for BOTH a query failure
+    and an empty table, and the scanner defaulted every strategy to
+    ``live_full`` — a DB blip during a cycle could silently authorize a
+    full-size entry. The typed result lets the consumer distinguish:
+
+      - ``status='ok'``     rows read; ``states`` maps strategy -> state.
+      - ``status='empty'``  the read succeeded but the table has zero
+                            rows. The seed migration (20260507000000)
+                            guarantees 5 rows, so empty means a broken /
+                            missing seed — indistinguishable from a
+                            wrong-database read; the entry gate fails
+                            CLOSED on it.
+      - ``status='failed'`` the query raised; ``error`` carries str(exc).
+
+    ``malformed_rows`` counts structurally-bad rows (non-dict / missing
+    or non-string strategy_name / non-string state). A row whose
+    strategy_name is unusable is dropped — that strategy is then absent
+    from ``states`` and fails closed as missing; a row whose state is
+    unusable keeps its strategy under MALFORMED_STATE_SENTINEL and fails
+    closed as invalid-state.
+    """
+
+    states: Dict[str, str]
+    status: str  # 'ok' | 'empty' | 'failed'
+    error: Optional[str] = None
+    malformed_rows: int = 0
+
+    def classify_for_entry(
+        self, strategy_name: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Classify a strategy for the scanner's ENTRY gate.
+
+        Returns ``(state, rejection_reason)`` — exactly one is non-None.
+        Typed rejection reasons (durable via suggestion_rejections):
+
+          - ``strategy_lifecycle_unavailable``    the read failed
+          - ``strategy_lifecycle_empty``          table empty (broken seed)
+          - ``strategy_lifecycle_missing``        no row for this strategy
+                                                  (the seed covers all
+                                                  shipped strategies, so
+                                                  absence = unregistered)
+          - ``strategy_lifecycle_invalid_state``  state outside the 4
+                                                  recognized values
+
+        EXITS never consult lifecycle state — closes are
+        lifecycle-independent by design (a deprecated strategy's open
+        position must still be closeable).
+        """
+        if self.status == "failed":
+            return None, "strategy_lifecycle_unavailable"
+        if self.status == "empty":
+            return None, "strategy_lifecycle_empty"
+        state = self.states.get(strategy_name)
+        if state is None:
+            return None, "strategy_lifecycle_missing"
+        if state not in RECOGNIZED_LIFECYCLE_STATES:
+            return None, "strategy_lifecycle_invalid_state"
+        return state, None
+
+
+def load_strategy_lifecycle_states(supabase) -> LifecycleReadResult:
     """#110 PR-3: read every row of strategy_lifecycle_states once per
     scanner cycle.
 
@@ -196,11 +278,12 @@ def load_strategy_lifecycle_states(supabase) -> Dict[str, str]:
     Caller is expected to cache the return value for the cycle's
     duration and tag each emitted candidate with its strategy's state.
 
-    Returns:
-        Mapping of ``strategy_name`` -> ``current_state``. Empty dict
-        on read failure or empty table — caller defaults missing
-        strategies to ``live_full`` to preserve pre-#110 behavior
-        (don't break the scanner if seed is missing or DB blip).
+    Fail-closed tightening (2026-07-16): returns a typed
+    ``LifecycleReadResult`` instead of a bare dict, so a query failure,
+    an empty table, and a clean read are no longer conflated. The
+    loader itself never raises; classification happens at the caller
+    via ``LifecycleReadResult.classify_for_entry`` — the scanner's
+    entry gate fails CLOSED on anything but a clean, recognized row.
     """
     try:
         res = (
@@ -211,17 +294,61 @@ def load_strategy_lifecycle_states(supabase) -> Dict[str, str]:
     except Exception as e:
         logger.warning(
             f"[STRATEGY_LIFECYCLE] load_strategy_lifecycle_states "
-            f"failed: {e} — caller defaults missing strategies to live_full"
+            f"failed: {e} — entries fail CLOSED this cycle "
+            f"(strategy_lifecycle_unavailable)"
         )
-        return {}
-    rows = res.data or []
+        return LifecycleReadResult(states={}, status="failed", error=str(e))
+    rows = getattr(res, "data", None) or []
+    if not isinstance(rows, (list, tuple)):
+        # A non-list payload is a malformed READ, not an empty table —
+        # classify as failed (typed) instead of raising into the caller.
+        logger.warning(
+            "[STRATEGY_LIFECYCLE] strategy_lifecycle_states returned "
+            "non-list data (%s) — entries fail CLOSED this cycle "
+            "(strategy_lifecycle_unavailable)",
+            type(rows).__name__,
+        )
+        return LifecycleReadResult(
+            states={},
+            status="failed",
+            error=f"non-list rows payload: {type(rows).__name__}",
+        )
     if not rows:
         logger.warning(
-            "[STRATEGY_LIFECYCLE] strategy_lifecycle_states is empty "
-            "— caller defaults missing strategies to live_full"
+            "[STRATEGY_LIFECYCLE] strategy_lifecycle_states is empty — "
+            "seed missing/broken; entries fail CLOSED this cycle "
+            "(strategy_lifecycle_empty)"
         )
-        return {}
-    return {r["strategy_name"]: r["current_state"] for r in rows}
+        return LifecycleReadResult(states={}, status="empty")
+    states: Dict[str, str] = {}
+    malformed = 0
+    for r in rows:
+        if not isinstance(r, dict):
+            malformed += 1
+            continue
+        name = r.get("strategy_name")
+        if not isinstance(name, str) or not name:
+            malformed += 1
+            continue
+        state = r.get("current_state")
+        if not isinstance(state, str) or not state:
+            # Attributable row with an unusable state: keep the strategy
+            # under a never-recognized sentinel so the gate rejects it as
+            # invalid-state rather than reporting it missing.
+            malformed += 1
+            states[name] = MALFORMED_STATE_SENTINEL
+            continue
+        states[name] = state
+    if malformed:
+        logger.warning(
+            "[STRATEGY_LIFECYCLE] %d malformed row(s) in "
+            "strategy_lifecycle_states — affected strategies fail CLOSED "
+            "for entries",
+            malformed,
+        )
+    return LifecycleReadResult(
+        states=states, status="ok", malformed_rows=malformed
+    )
 
 
 # As of #109 PR-2 (2026-05-07), the seed migration places all 5

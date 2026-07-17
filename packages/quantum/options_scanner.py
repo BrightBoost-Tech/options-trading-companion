@@ -2851,14 +2851,27 @@ def scan_for_opportunities(
     # emitted candidate is tagged with `lifecycle_state` so the
     # downstream sizing engine can apply the EXPERIMENTAL cap without
     # a per-candidate DB round-trip.
-    lifecycle_states_map: Dict[str, str] = {}
+    #
+    # Fail-closed tightening (2026-07-16): the read is TYPED
+    # (LifecycleReadResult). ``lifecycle_read is None`` means NO READ WAS
+    # ATTEMPTED (no supabase client — test/dry-run context; production
+    # always passes one), which keeps the legacy live_full default. Any
+    # ATTEMPTED read that is not a clean recognized row fails CLOSED
+    # per-strategy at the lifecycle gate in process_symbol — a DB blip,
+    # broken seed, missing row, or unrecognized state can never silently
+    # authorize a full-size entry.
+    lifecycle_read = None
     if supabase_client is not None:
         try:
             from packages.quantum.services.progression_service import (
                 load_strategy_lifecycle_states,
             )
-            lifecycle_states_map = load_strategy_lifecycle_states(supabase_client)
+            lifecycle_read = load_strategy_lifecycle_states(supabase_client)
         except Exception as e:
+            # The loader is designed not to raise; if this path fires
+            # anyway (import failure / unexpected raise), lifecycle_read
+            # stays None WITH a client set — the gate below treats that
+            # combination as unavailable and fails CLOSED.
             logger.warning(f"[Scanner] lifecycle states fetch failed: {e}")
 
     # #115 PR-A: loud-error surface for upstream iv pipeline failure.
@@ -3906,24 +3919,49 @@ def scan_for_opportunities(
                 except Exception as e:
                     print(f"[Scanner] Earnings date parse error for {symbol}: {e}")
 
-            # #110 PR-3: lifecycle gate. Filter strategies that aren't
-            # ready for emission. ``live_full`` and ``experimental``
-            # proceed (the latter sized down by sizing_engine via the
-            # `lifecycle_state` tag below). ``designed`` /
-            # ``deprecated`` rows are filtered here — code exists
-            # (someone wrote it) but lifecycle says don't trade it.
-            # Default to ``live_full`` for unknown strategies to
-            # preserve pre-#110 behavior on table-read failure or
-            # seed gap.
-            candidate_lifecycle_state = lifecycle_states_map.get(
-                suggestion["strategy"], "live_full"
-            )
-            if candidate_lifecycle_state in ("designed", "deprecated"):
-                rej_stats.record(
-                    f"strategy_{candidate_lifecycle_state}",
-                    strategy=suggestion["strategy"],
+            # #110 PR-3: lifecycle gate — fail-closed for ENTRIES
+            # (2026-07-16). ``live_full`` and ``experimental`` proceed
+            # (the latter sized down by sizing_engine via the
+            # `lifecycle_state` tag below). Everything else REJECTS with
+            # a typed reason instead of defaulting to live_full: a failed
+            # read (strategy_lifecycle_unavailable), an empty table /
+            # broken seed (strategy_lifecycle_empty), a strategy with no
+            # row (strategy_lifecycle_missing), or an unrecognized state
+            # value (strategy_lifecycle_invalid_state). H9: a value we
+            # cannot verify must reject, never default-permit. EXITS are
+            # lifecycle-independent by design and never consult this.
+            if lifecycle_read is None:
+                if supabase_client is not None:
+                    # A client existed but the read path itself raised —
+                    # same fail-closed class as a failed query.
+                    rej_stats.record(
+                        "strategy_lifecycle_unavailable",
+                        strategy=suggestion["strategy"],
+                    )
+                    return None
+                # No client -> no read attempted (test/dry-run context;
+                # production always passes supabase_client, and without
+                # one the scan output cannot be staged). Legacy default
+                # preserved so no-DB scans behave exactly as before.
+                candidate_lifecycle_state = "live_full"
+            else:
+                candidate_lifecycle_state, _lifecycle_reject = (
+                    lifecycle_read.classify_for_entry(suggestion["strategy"])
                 )
-                return None
+                if _lifecycle_reject is not None:
+                    rej_stats.record(
+                        _lifecycle_reject, strategy=suggestion["strategy"]
+                    )
+                    return None
+                # ``designed`` / ``deprecated`` rows are filtered here —
+                # code exists (someone wrote it) but lifecycle says don't
+                # trade it. Same typed reasons as pre-tightening.
+                if candidate_lifecycle_state in ("designed", "deprecated"):
+                    rej_stats.record(
+                        f"strategy_{candidate_lifecycle_state}",
+                        strategy=suggestion["strategy"],
+                    )
+                    return None
 
             candidate_dict = {
                 "symbol": symbol,

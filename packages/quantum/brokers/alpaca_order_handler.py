@@ -58,6 +58,18 @@ _TERMINAL_REJECT_MARKERS = (
     "sign-incoherent",                       # our own pre-submit coherence guards
     "insufficient",                          # buying power / qty available
     "extra_forbidden",                       # request-shape rejection
+    # Options-permission bucket (2026-07-16, options-level preflight lane):
+    # a broker-side options-level / permission rejection can never succeed
+    # by retrying — the account's level does not change between attempts.
+    # Matching is case-insensitive by construction (submit_and_track lowers
+    # the error string before the `in` test), so markers stay lowercase.
+    # Conservative substrings of Alpaca's documented permission rejects
+    # ("... is not permitted based on your options trading level",
+    # "account is not approved for options trading", 403 permission bodies).
+    "not permitted",
+    "options trading level",
+    "options level",
+    "not approved for",
 )
 # Subset that means "a prior submission already filled/closed this position":
 # the fill reconciler owns the row — marking needs_manual_review here RACES

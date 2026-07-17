@@ -2,6 +2,10 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
+from packages.quantum.services.progression_service import (
+    RECOGNIZED_LIFECYCLE_STATES,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,6 +237,30 @@ def calculate_sizing(
         contracts = 1
         experimental_capped = True
 
+    # 5c. Defense-in-depth (2026-07-16): an UNRECOGNIZED lifecycle state
+    # must never full-size. The scanner's entry gate rejects unknown
+    # states before emission (strategy_lifecycle_invalid_state); if one
+    # reaches sizing anyway (drifted caller, stale candidate), cap to 0
+    # contracts — contracts=0 vetoes the entry upstream. ``None`` is the
+    # legacy no-tag call and keeps current behavior byte-identical;
+    # designed/deprecated are RECOGNIZED states whose gating belongs to
+    # the scanner (unchanged defensive stance in 5b's comment).
+    lifecycle_unrecognized = False
+    if (
+        lifecycle_state is not None
+        and lifecycle_state not in RECOGNIZED_LIFECYCLE_STATES
+    ):
+        logger.warning(
+            "lifecycle_state_unrecognized_zero_sized",
+            extra={
+                "strategy": strategy,
+                "lifecycle_state": lifecycle_state,
+                "normal_contracts": contracts,
+            },
+        )
+        contracts = 0
+        lifecycle_unrecognized = True
+
     # 6. Computed Totals
     capital_required = contracts * collateral_required_per_contract
     max_loss_total = contracts * max_loss_per_contract
@@ -268,7 +296,16 @@ def calculate_sizing(
     if experimental_capped:
         reason += " (capped by experimental lifecycle)"
 
-    return {
+    if lifecycle_unrecognized:
+        # Typed reason wins over the BP/risk explanations above: the
+        # zero-size is a lifecycle veto, not a capital constraint.
+        reason = (
+            f"lifecycle_state_unrecognized: {lifecycle_state!r} not in "
+            f"{sorted(RECOGNIZED_LIFECYCLE_STATES)} — sized to 0 "
+            f"(fail closed)"
+        )
+
+    result = {
         "contracts": contracts,
         "reason": reason,
         "capital_required": capital_required,
@@ -288,3 +325,8 @@ def calculate_sizing(
         "experimental_capped": experimental_capped,
         "lifecycle_state": lifecycle_state,
     }
+    if lifecycle_unrecognized:
+        # Key added ONLY when the veto fired so every healthy-path
+        # result dict stays byte-identical to pre-tightening output.
+        result["lifecycle_unrecognized"] = True
+    return result

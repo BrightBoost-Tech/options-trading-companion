@@ -129,6 +129,29 @@ accepted seam: /scout/weekly scans clientless → legacy lifecycle default
 (advisory-only). No broker/DB/deploy/control change this sprint; all PRs
 draft.
 
+**07-17 INTEGRATION PASS (main still `b95d3a3`; all drafts):** #1234 split →
+identity-core-only at `824bdca` (35 tests) + NEW stacked owner-gated #1237
+`fix/strategy-risk-cap-routing` at `39d9bc1` (67 tests; **caller trace: cap
+reroute is REPORTING-ONLY today** — `strategy_allocation`→`budget_snapshot`
+zero readers, optimizer Literal-immune; matrix = potential deltas). #1235
+merged-onto identity core, base retargeted, duplicate normalization removed,
+60s-TTL account-read cache. #1231 finalized: schema/history/receipt AGREEMENT
+(no drift block; `vrp_ranking` also covered by tracked `20260624002451`), 87
+tests, never-reapply stated. #1236 verified independent (37 tests). UI lane
+BLOCKED_UI_FILE_OWNERSHIP (41 open Palette/Jules PRs own the surfaces). F-BAN
+packet: `docs/review/f-ban-integrity-decision-packet-2026-07-16.md` (rec:
+Option B) — operator decision open. **Local-ledger reconciliation resolved
+without a provenance block**: local tree = f34d5cd base + the 07-15 nightly
+entry (loop provenance clear); that section + `audit/reports/2026-07-15.md`
+swept INTO this PR — carrying ⚠ **F-CREDIT-SIGN (HIGH, status:reported at
+`f34d5cd`; adjudicate at current SHA before building — newer SHAs unread by
+the nightly)**; local 07-14 report copy is byte-identical to the committed
+one (redundant; left untouched). NEW pre-existing flag: `/rebalance/execute`
++ `/rebalance/preview` → `compute()` stale signature = guaranteed TypeError,
+dead on main. Recommended merge order (report-only): #1231 → #1236 → #1234 →
+#1235 (retarget to main post-#1234) → owner-gated #1237 → #1233 last. No
+merge, no deploy, no DB/broker write, no control change in this pass.
+
 ## 2026-07-16 — OVERNIGHT BACKLOG LANES · status:merged-foundation/draft
 
 Grounded GitHub main at `0e3e54f0821f2114b3d1b10074f15686f5e555c5`.
@@ -358,6 +381,111 @@ Preserved as a SEPARATE VERIFIED fact: the engine executed **0** today — QQQ I
 (`net −$5.03`, #1101) and SOFI persisted `edge_below_minimum` — real and independent of the EV
 mislabel. XSP: broker-listed/tradable (European, cash-settled) but the feed returns null OI/close →
 data-sparse, and not in the scanner universe.
+
+## 2026-07-15 (Wed 00:00 CT) — NIGHTLY AUDIT (v5.5, scheduled) — report audit/reports/2026-07-15.md · **1 NEW FINDING (HIGH)**
+
+STEP-0: DB `now()` 05:00:28Z = Wed 00:00:28 CT (dow=3) = broker 01:00:27 ET, agree to the second,
+market CLOSED. Wednesday ⇒ NIGHTLY. **Run NOT broker-blind** (interactive; 3 broker calls).
+**⚠ H8 pin — MOVED:** run-END running SHA = **`bef2cdd`** (SUCCESS 07-14 23:05:33Z), NOT `f34d5cd`.
+Two Tuesday post-close merges (`967071…` 22:28Z REMOVED/superseded; `bef2cdd` 23:05Z live). Local
+checkout = `f34d5cd`, no fetch possible (no Bash tool). **The audited RTH window ran entirely under
+`f34d5cd` = the SHA read → diagnosis correctly pinned. `bef2cdd` content UNREAD — verify whether it
+already touches the F-CREDIT-SIGN seam BEFORE building.** Budget: ~17 SQL (over ≤12, declared) · 3
+broker · 1 Railway · 0 subagents.
+
+### 🔴 NEW — status:reported — **[F-CREDIT-SIGN, A2, HIGH] Internal-fill credit-close realized-P&L sign REGRESSION (#1056 re-opened via #1017)**
+
+**WHAT.** Internal-fill closes of CREDIT structures double-negate the signed executable mark →
+`realized_pl` wrong in sign AND magnitude. Deterministic error = **2 × |close mark| × qty × 100**.
+**This is a REGRESSION of a ledgered `status:shipped` fix** (#1056, 06-11 — see the 06-11 incident-arc
+section below, which records the identical mechanism and signature).
+
+**WHERE (verified at `f34d5cd`, the SHA that produced the evidence):**
+- `paper_exit_evaluator.py:2384` — `_select_internal_fill_price(...)` **overwrites** exit_price with
+  the SIGNED `achievable_close`; `:717` returns `float(ach)` with **no `abs()`**.
+- `paper_exit_evaluator.py:334` — `_close_limit_and_direction` DOES return `abs(exit_price)` (#1056's
+  fix) but governs the **broker limit only**; the internal-fill path never calls it. **#1017 (06-12)
+  re-introduced the signed value ONE DAY after #1056 (06-11) removed it.** The `:2378-2380` comment
+  ("Sign convention unchanged — achievable_close comes from the same finalize_mark stack as
+  current_mark") is the reasoning error: correct for a *mark*, wrong for a *fill price*.
+- Signed value flows to FOUR consumers: `:2443` avg_fill_price · `:2453-2454` cash_delta · `:2470`
+  ledger emit_fill · `:2506-2511` synth leg → `close_math.compute_realized_pl:204-212`, whose contract
+  derives direction from the **leg action sign** and requires a **positive** `filled_avg_price`.
+
+**IMPACT (reproduces to the cent).** QQQ `c1c9ad04` (6-lot IRON_CONDOR, shadow `c8a3a3b0`, 07-14
+16:30:22Z, stop_loss_hit): truth = credit 795.96 − buyback 1,020.00 = **−$224.04** (= persisted
+`unrealized_pl_corroborated` = the force_close alert payload). Booked **+$1,815.96**. Overstatement
+**$2,040.00 = 2×1.70×600** ✓. Cash ledger hit identically → **$2,040 shadow cash_balance error**
+(same signature as 06-11's "credited +1302 instead of debiting 1302"). Historical: AMD `75204e83`
+(04-10) realized +1,202.00 vs unrealized −242.00 (err 2×1.805×400=1,444 ✓); the 03-13→03-18
+pre-cohort condor batch shows the same signature (META `2f316f4a` Δ=753=2×0.41833×900 ✓).
+**CONTAMINATION INGESTED:** `learning_trade_outcomes_v3` holds QQQ `pnl_realized=1815.96` vs
+`pnl_predicted=46.394` → fictional **+$1,769.57 alpha** on QQQ/IRON_CONDOR. **06-11's twin was
+corrected BEFORE the ingest ("zero contamination"); unattended, 07-14 was not caught.**
+
+**RISK.** **Shadow-only today — by the guard, not by luck.** All 3 Tuesday positions shadow; broker
+flat ($2,067.86, positions `[]`); `is_paper=true` holds the #1076 live-calibration wall; live brake is
+live-scoped. **E6/P0-A (`:2331-2375`, shipped 07-10) structurally forbids a live close from filling
+internally — it is the ONLY thing between this bug and a live phantom realized.** Live blast radius
+= zero today; shadow/learning/policy-lab-promotion radius = real (`c8a3a3b0` carries the fiction).
+
+**HOW.** `abs()` the `_select_internal_fill_price` return (`:717`), or route the internal fill through
+`_close_limit_and_direction` so ONE function owns unsigned-magnitude + structural-direction for both
+limit and fill. **Regression test must DRIVE `_close_position` end-to-end** on a credit structure with
+a signed corroborated mark and assert `realized_pl == −224.04` — inject at the deepest callee, assert
+at the top. Data correction (operator-gated, 06-11 precedent): `c1c9ad04.realized_pl` +1815.96 →
+−224.04 · `ed31cc5f` cash_balance −$2,040 · **and re-derive the ingested learning row** (unlike 06-11,
+the ingest already ran). **Post-20:00Z only** (touches the live close path); no rush-fix case (P0-A).
+
+**⚠ TEST-COSTUME (doctrine's own named class, caught live).** `tests/test_csx_close_sign_convention.py:103-111`
+pins #1056 via `self.src.find("def _close_limit_and_direction")` + `assertIn` **source-string**
+assertions — green for 34 days while the active internal-fill route walks past the function. Exactly
+the #1126-costume-in-test-form CLAUDE.md warns about: it verified a *string*, not a *behavior*.
+
+**CONFIDENCE: HIGH** — arithmetic reproduces on 2 independent rows 3 months apart + a 6-row historical
+batch; path read end-to-end; ledger records the identical prior incident; DB/alert/broker all agree.
+
+### Adjudications & STATE movers (NOT findings — cite, don't re-find)
+
+- **[A8 SETTLED TRIGGER FIRED → adjudicated DESIGNED, not a bug]** SOFI cleared the roundtrip gate and
+  executed 07-14 — **in shadow only**. Cause = **D② shadow-raw-EV (2026-07-12)**, `fork.py:243-251`
+  `_is_shadow_raw_ev_enabled()`: shadow clones score on RAW `source.ev_raw`; `SHADOW_RAW_EV_ENABLED`
+  default-ON, explicit-falsy = revert lever. Evidence: live `933e20b4` ev_raw 48.5171 → ev 24.2586 →
+  **BLOCKED** `ev_below_roundtrip_cost`; forks `c4555db6`/`0134876f` (+4s) ev 48.5171 / ev_raw NULL →
+  **executed**. **The live NO was correct; the gate held on live.** (My initial read of NULL `ev_raw`
+  as a fork calibration-bypass bug was OVERTURNED by reading `fork.py` — recorded per verify-before-
+  asserting.) **D② is the mover that ends the "zero-entry" regime for shadows.**
+- **⚠ CONFLICT (carry this):** D②'s written rationale (`fork.py:246-249`) is *"the honest cross-cohort
+  comparison lives at OUTCOMES … which are basis-independent."* **F-CREDIT-SIGN falsifies that premise
+  asymmetrically** — it corrupts credit + internal-fill closes only, i.e. **only the shadow cohorts**
+  (live outcomes come from the broker reconciler). The cohorts D② lets trade freely are exactly the
+  ones whose outcome ledger is unreliable. Only Gate-2 volume-freeze (MIN_TRADE_COUNT=10/7d) makes this
+  theoretical. **Additive to gap-3b — a DIFFERENT mechanism (arithmetic, not fill-realism).**
+- **E6/P0-A broker-ack-close invariant = SHIPPED** (`paper_exit_evaluator.py:2331-2375`, marker
+  2026-07-10; fail-CLOSED on unknown routing `:2345`). **Move KNOWN-PENDING → shipped in v5.6 STATE.**
+- **P0-B book-scaling readiness = SHIPPED.** `paper_positions.cost_basis_total` + `max_loss_total` now
+  EXIST and are POPULATED (all 3 Tuesday rows; NULL on every pre-07-14 row). `risk_basis_shadow.py`,
+  `bucket_control.py`, `portfolio_allocator.py:132-157` present. **STATE's "paper_positions has no
+  cost_basis/max_loss columns → book-blind" is FACTUALLY STALE.**
+- Breaker: `entries_paused=false`, fingerprint intact (3 ids, 07-08 21:20Z). **2 losing closes landed
+  and did NOT trip it — CORRECT** (both shadow; breaker counts LIVE round-trips only).
+- Pool **8/8 (1W/7L) UNCHANGED**; close-fill-gap **3/10–15 UNCHANGED** (Tuesday's closes were shadow).
+- Broker flat 3rd night: equity=cash=OBP=$2,067.86; `balance_asof` advanced 07-10 → **07-13**.
+- SOFI `7b39c908` **remains OPEN** (17 lots, corroborated UPL −$364.99) — only open position anywhere.
+- A10 flag inventory: `SHADOW_RAW_EV_ENABLED` (`fork.py:252`) is read **per-call**, not module-scope →
+  **no recycle needed**; correctly EXCLUDED from the import-time inventory (noted so it isn't re-litigated).
+- A11 nightly: proposes a **Regression-Sentinel lens** (re-assert each `status:shipped` ledger
+  invariant against live data) — ranked ABOVE the queued Security lens; tonight's finding surfaced only
+  by accident (a force_close alert), which no charter guarantees. Owner-gated.
+- **Retirement counters:** A2 → **0 (reset, HIGH finding)**; A8 → **0 (reset, trigger fired)**. A1/A3/
+  A6/A10 at 7. **The 07-14 "quiet-regime artifact" read is now CONFIRMED**: the moment the book moved,
+  A2 produced a HIGH finding in one window. **No retirement proposal warranted.**
+
+PENDING VERIFICATIONS carried into 07-15: (1) **read `bef2cdd` + `967071…` — do they touch the
+F-CREDIT-SIGN seam?** (2) F-REPLAY-FK first exercise — did 07-14 13:00Z produce `data_blobs>0` +
+`tape_integrity='complete'`? (NOT checked this run — budget spent on the HIGH finding; carry forward.)
+(3) #1198 first RTH info-line proof. (4) native `[CLOSE_FILL_GAP]` + post-#1137 `last_marked_at` on a
+LIVE close — still gated (0 live closes). (5) first thesis fill with populated `price_basis`.
 
 ## 2026-07-14 (Tue ~19:2x CT, post-close) — POST-MERGE RECONCILIATION: ④ #1201 + ③ #1200 SHIPPED · QUEUE ①–④ CLOSED · ★ #1199 FALSIFIER PASSED · ★ NEW GIT-SHA-DECISION-PROVENANCE · status:shipped
 

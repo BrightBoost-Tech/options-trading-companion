@@ -306,6 +306,39 @@ the standing safety lane and ①–⑦.
 - Lane 4 UI honesty: **BLOCKED_UI_FILE_OWNERSHIP** (open Palette PR #1093 owns
   `compose/page.tsx`; ~12 open Palette PRs contest `TradeInbox.tsx`).
 
+#### 07-17 integration pass (all PRs remain DRAFT; merge order at bottom)
+
+- **#1234 SPLIT (head `824bdca`)**: now identity/test repair ONLY (no RBE
+  delta vs main; `risk_cap_family` removed; 35 tests). **#1237 NEW stacked
+  owner-gated PR** (`fix/strategy-risk-cap-routing`, base = #1234 branch, head
+  `39d9bc1`): the cap-routing hunk + 5×6 impact matrix + caller trace.
+  **Caller-trace finding: the reroute is REPORTING-ONLY on today's live route**
+  (`strategy_allocation`→`budget_snapshot` has zero readers; optimizer path is
+  Literal-immune, bit-identical) — still owner-gated as a control change; the
+  matrix describes potential, not currently-gating, deltas. 67 tests.
+- **#1235** rebased-by-merge onto the identity core (base retargeted to the
+  #1234 branch); duplicate normalization removed — permission map keyed by
+  canonical IDs with a drift-lock; 60s-TTL narrow account-read cache
+  (equity_state pattern; never caches failure). Healthy-path wording corrected:
+  L3 decisions EQUIVALENT, not byte-identical (adds one lazy account read on
+  already-submitting paths).
+- **#1231 finalized**: live-schema reconciliation AGREEMENT (repo file ==
+  tracked `20260716155023` == live DDL; `vrp_ranking` independently covered by
+  tracked `20260624002451`); 87-test battery green; body states never-reapply.
+- **#1236 verified independent** (5 files, zero overlap; 37 tests; malformed
+  rows collapse by design into missing/invalid_state with counter visibility).
+- **Nightly 07-15 swept into this PR** (report + ledger section):
+  ⚠ **F-CREDIT-SIGN (HIGH, status:reported, verified at `f34d5cd`)** —
+  internal-fill credit-close realized-P&L sign regression (#1056 re-opened via
+  #1017) — **pending operator adjudication at current SHA** (nightly's own
+  caveat: newer SHAs unread; adjudicate before building).
+- New ledger-flag (pre-existing, untouched): `/rebalance/execute` +
+  `/rebalance/preview` call `compute()` with a stale signature — dead/broken
+  on main (guaranteed TypeError).
+- **Recommended merge order (report-only, none executed)**: #1231 → #1236 →
+  #1234 → #1235 (after #1234 merges, retarget to main) → owner decision on
+  #1237 → #1233 last.
+
 ## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION
 
 Executed the v1.5 audit brief; completed report = **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**

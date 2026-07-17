@@ -106,6 +106,29 @@ Session worked in an isolated pinned worktree; the operator tree's uncommitted
 ledger rewrite (+104/−455 vs origin/main) was preserved untouched — reconcile
 at merge (results §13.1).
 
+## 2026-07-16 — POST-CLOSE SPRINT (same-day addendum) · status:reported/drafts-pending
+
+Sprint at `b95d3a3` (== deployed). Draft PRs #1234 (strategy-identity crosswalk;
+NOTE: cap-key miss verified 4-WIDE incl. both credit verticals;
+`get_strategy_type` verified ZERO production callers — latent-orphan, so the
+live delta is cap routing only) · #1235 (options-level preflight) · #1236
+(lifecycle typed degrade) · #1231 gained the Row-B fix (cohort-clone writer
+omitted ranking_costs/code_sha on live-executable rows; fixed + route-tested;
+rebalance writer documented inapplicable; #1231 CI green attempt 2; its
+migration 20260716155023 APPLIED ~15:51Z — never reapply). CLOSED pending
+verification: deployed CONDOR_EV_MODEL=tail / 0.35 / 0.6 on both workers —
+the ⑤ charter text was correct, code defaults are the divergent side.
+Runtime-PROVEN naturally 07-16: decision_runs.git_sha full-SHA ×3 matching
+deployed; first leg-aware ranking_costs row 16:00:32Z. #1228/#1229 = MERGED
+code; pending falsifiers: signed tape reader never run (by design) ·
+broker-closed weekday (2026-09-07). F-MIDDAY = shipped-code/runtime-pending
+(no natural failed read yet). Lane 4 UI honesty BLOCKED_UI_FILE_OWNERSHIP
+(Palette #1093 owns compose; ~12 PRs contest TradeInbox). F-BAN-INTEGRITY
+packet delivered (rec: Option B remove) — operator decision open. Small
+accepted seam: /scout/weekly scans clientless → legacy lifecycle default
+(advisory-only). No broker/DB/deploy/control change this sprint; all PRs
+draft.
+
 ## 2026-07-16 — OVERNIGHT BACKLOG LANES · status:merged-foundation/draft
 
 Grounded GitHub main at `0e3e54f0821f2114b3d1b10074f15686f5e555c5`.

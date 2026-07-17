@@ -262,6 +262,50 @@ the standing safety lane and ①–⑦.
   (names-only hygiene), then correct whichever side is stale. · origin
   Fable-5 H5.
 
+### 2026-07-16 POST-CLOSE SPRINT ADDENDUM (same-day; draft PRs = build-pending, NOT shipped)
+
+- **CONDOR_EV_MODEL pending-verification CLOSED**: deployed env read back on BOTH
+  workers (names+these values only): `tail` / severity `0.35` / prob-mult `0.6` —
+  the ⑤ charter text was CORRECT; the code defaults (`strict`/0.50/1.00) are the
+  divergent side. VERIFIED-DEPLOYMENT 2026-07-16 ~23:45Z.
+- **Blast-radius correction to F-STRAT-ID-CONSUMERS** (build found > audit): the
+  cap-key miss is **4-wide** (both credit verticals also fell to 0.05 —
+  `put_credit`/`call_credit` token order); and `LossMinimizer.get_strategy_type`
+  has **zero production callers** at `b95d3a3` (orchestrator calls
+  `analyze_position`/`generate_guardrail_policy`, both strategy-agnostic) — the
+  misclassification was latent-orphan, not live-wired; the live delta of the fix
+  is cap ROUTING only (values untouched; looser NORMAL debit 0.05→0.15, tighter
+  SHOCK credit 0.05→0.02).
+- **Same-cycle provenance finding (Row B) — root-caused + fixed in PR #1231's
+  branch**: second writer = policy-lab cohort clone (`_clone_suggestion_for_cohort`)
+  omitted `ranking_costs`/`code_sha` on live-executable pending rows; fix inherits
+  ranking_costs, stamps fresh code_sha, NULL-inherits legacy (never fabricates);
+  route-tested against the real fork. W4 rebalance writer documented inapplicable
+  (`cohort_name` NULL → never fetched by the per-cohort executor). A successful
+  under-stamped clone was invisible to every truth gate — now pinned by test.
+- **PR #1231 migration**: `20260716155023` was APPLIED to production ~15:51Z
+  2026-07-16 (operator override after the live 14:49Z insert failure;
+  `migration_apply` receipt in risk_alerts). **Never reapply**; the PR lands the
+  file for history reconciliation + schema-contract test. CI green at attempt 2
+  (coverage-artifact upload transient).
+- **Draft PRs opened (build-pending)**: #1234 strategy-identity crosswalk +
+  selector route tests (F-STRAT-ID-CONSUMERS + F-SELECTOR-ROUTE-TESTS) · #1235
+  options-level preflight (F-OPTIONS-LEVEL-PREFLIGHT) · #1236 lifecycle typed
+  degrade (F-LIFECYCLE-TYPED-DEGRADE; its hard trigger is now satisfied-by-build,
+  merge-gated). All draft; none deployed; runtime falsifiers attach at merge.
+- **Provenance runtime proofs (2026-07-16, natural)**: `decision_runs.git_sha` =
+  full `b95d3a3f…` on all 3 runs (matches deployed SHA) — GIT-SHA writer
+  runtime-PROVEN; first natural leg-aware `ranking_costs` suggestion row landed
+  16:00:32Z. #1228/#1229 are MERGED code (not drafts); pending falsifiers: tape
+  reader never yet run (unscheduled by design) · broker-closed-weekday zero
+  false-stale (next natural 2026-09-07).
+- **New small ledger note**: advisory `/scout/weekly` calls the scanner with no
+  client → retains legacy lifecycle default (stages nothing; accepted).
+- **F-BAN-INTEGRITY decision packet delivered** (Option A build vs Option B
+  remove; recommendation B) — operator choice still open; no implementation.
+- Lane 4 UI honesty: **BLOCKED_UI_FILE_OWNERSHIP** (open Palette PR #1093 owns
+  `compose/page.tsx`; ~12 open Palette PRs contest `TradeInbox.tsx`).
+
 ## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION
 
 Executed the v1.5 audit brief; completed report = **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**

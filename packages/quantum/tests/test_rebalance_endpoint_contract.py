@@ -88,6 +88,39 @@ limiter.enabled = False
 
 client = TestClient(app)
 
+def _route_auth_targets():
+    """Resolve the ACTUAL dependency callables bound into the rebalance
+    routes at request time. CI proved the module-level `from security
+    import get_current_user` can bind a transient mock leaked by an
+    earlier module's collection-time patch (route id != imported id,
+    overrides keyed on the stale symbol never match). Route-resolved
+    keys are immune to reload/patch timing by construction."""
+    targets = set()
+    for r in app.routes:
+        if getattr(r, "path", "") in ("/rebalance/execute", "/rebalance/preview"):
+            for d in r.dependant.dependencies:
+                if d.call.__qualname__ in ("get_current_user",
+                                           "get_supabase_user_client"):
+                    targets.add(d.call)
+    return targets
+
+
+def _apply_auth_overrides(fake_sb):
+    async def _fake_user():
+        return USER_ID
+
+    for call in _route_auth_targets():
+        if call.__qualname__ == "get_current_user":
+            app.dependency_overrides[call] = _fake_user
+        else:
+            app.dependency_overrides[call] = lambda: fake_sb
+    # Belt-and-braces: also key the module-imported symbols (harmless
+    # duplicates when identical; covers a hypothetical future where the
+    # routes themselves are re-registered from fresh symbols).
+    app.dependency_overrides[get_current_user] = _fake_user
+    app.dependency_overrides[get_supabase_user_client] = lambda: fake_sb
+
+
 def _diag(resp):
     """CI-truth diagnostic: why did the request not take the override path?"""
     import packages.quantum.api as _api
@@ -260,11 +293,7 @@ def _book_rows():
 # ---------------------------------------------------------------------------
 @contextlib.contextmanager
 def _wired(fake_sb, weights=None, opt_exc=None, compute_explodes=False):
-    async def _fake_user():
-        return USER_ID
-
-    app.dependency_overrides[get_current_user] = _fake_user
-    app.dependency_overrides[get_supabase_user_client] = lambda: fake_sb
+    _apply_auth_overrides(fake_sb)
 
     def _weights_side_effect(*a, **k):
         if opt_exc is not None:
@@ -314,9 +343,13 @@ def _wired(fake_sb, weights=None, opt_exc=None, compute_explodes=False):
                 stack.enter_context(
                     mock.patch("packages.quantum.api.RiskBudgetEngine",
                                _ExplodingRiskBudgetEngine))
+            _apply_auth_overrides(fake_sb)  # re-apply post-patch-entry
             yield handles
     finally:
-        app.dependency_overrides = {}
+        for k in list(app.dependency_overrides):
+            if getattr(k, "__qualname__", "") in (
+                "get_current_user", "get_supabase_user_client"):
+                del app.dependency_overrides[k]
 
 
 def _tables_touched(fake_sb):

@@ -59,8 +59,11 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
 - **Strategic order UNCHANGED:** 1 F-SHADOW-CAPITAL-PARITY operationalization ·
   2 ⑤ terminal distribution · 3 multi-basis cost phase 2 · 4 canonical-position
   remainder · 5 funnel telemetry → liquidity provenance → OI floor · 6 E19-2B.
-- Merge state 07-17 early-AM: #1241 + #1242 MERGED (operator-directed);
-  remaining order: #1240 → #1238 → #1239 → this docs PR merged last.
+- Merge state 07-17 early-AM: **ALL SIX recovery PRs MERGED** (#1238-#1240
+  operator-merged 04:50-04:56Z; #1241/#1242 05:0x; docs #1243 05:3x). Open
+  follow-ups: operator-gated F-CREDIT-SIGN data correction (plan in #1240) ·
+  fleet ACTIVATION gate (legacy-terminal attestation, 6 stale 04-09 rows) ·
+  runtime falsifiers per ledger.
 
 ## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
 

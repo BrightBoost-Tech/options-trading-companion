@@ -2935,6 +2935,16 @@ def scan_for_opportunities(
         # No-op when persistence isn't configured.
         rej_stats.set_symbol(symbol)
         rej_stats.increment_processed()
+        # Funnel phase-2 (strategy attribution): the strategy this attempt
+        # is FOR, once KNOWN. Stays None until selection so a failure
+        # before the selector persists an honestly-unattributed rejection
+        # (strategy_key NULL — never fabricated). A fallback retry
+        # (strategy_override) knows its strategy from entry. Consumed only
+        # by the processing_error handler at the bottom; every explicit
+        # rejection site reads suggestion["strategy"] directly.
+        attempted_strategy: Optional[str] = (
+            strategy_override.get("strategy") if strategy_override else None
+        )
         try:
             # A. Enrich Data
             # Use batched quote from map
@@ -3117,6 +3127,11 @@ def scan_for_opportunities(
                 suggestion = strategy_override
                 candidates = [suggestion]
             elif MULTI_STRATEGY_EVAL:
+                # Funnel phase-2: caller-owned exclusion report. The
+                # selector appends one entry per strategy its PHASE GATE
+                # removed from the pool; the emitted candidate list is
+                # unchanged by passing this.
+                _phase_exclusions: List[Dict[str, Any]] = []
                 candidates = strategy_selector.get_candidates(
                     ticker=symbol,
                     sentiment=trend,
@@ -3124,8 +3139,24 @@ def scan_for_opportunities(
                     iv_rank=iv_rank,
                     effective_regime=effective_regime_state.value,
                     banned_strategies=banned_strategies,
+                    phase_exclusions_out=_phase_exclusions,
                 )
+                for _excl in _phase_exclusions:
+                    # Typed + attributed: the phase gate KNOWS which
+                    # strategy it excluded, so the rejection row carries
+                    # strategy_key. Observability only — the candidate
+                    # set and HOLD semantics are untouched.
+                    rej_stats.record(
+                        "strategy_phase_excluded",
+                        strategy=_excl.get("strategy"),
+                    )
                 if not candidates:
+                    if _phase_exclusions:
+                        # Pool emptied (at least in part) by the phase
+                        # gate — the typed rows above are the honest
+                        # explanation; do NOT also mislabel this as a
+                        # scored HOLD verdict.
+                        return None
                     # #105: split rejection. Selector evaluated all
                     # strategies and none scored above threshold. Distinct
                     # from the explicit HOLD/CASH verdict below.
@@ -3143,6 +3174,9 @@ def scan_for_opportunities(
                     banned_strategies=banned_strategies,
                 )
                 candidates = [suggestion]
+
+            # Selection happened — the attempt is now attributable.
+            attempted_strategy = suggestion["strategy"]
 
             # --- V3 Strategy Design Agent Override ---
             design_agents = build_agent_pipeline(phase="scanner")
@@ -3166,6 +3200,9 @@ def scan_for_opportunities(
                 except Exception as e:
                     print(f"[Scanner] StrategyDesignAgent error for {symbol}: {e}")
             # -----------------------------------------
+            # Re-sync after the agent override (it may have replaced
+            # suggestion["strategy"] in place).
+            attempted_strategy = suggestion["strategy"]
 
             if suggestion["strategy"] == "HOLD" or suggestion["strategy"] == "CASH":
                 # #105: split rejection. Selector explicitly verdicted
@@ -3228,7 +3265,7 @@ def scan_for_opportunities(
 
             if not chain:
                 rej_stats.increment_chains_empty()
-                rej_stats.record("no_chain")
+                rej_stats.record("no_chain", strategy=suggestion["strategy"])
                 return None
 
             # Normalize Strategy Key early (needed before expiry selection for condor path)
@@ -3243,7 +3280,9 @@ def scan_for_opportunities(
                     chain, target_dte=35, k=CONDOR_EXPIRY_CANDIDATES, today_date=today_date
                 )
                 if not expiry_candidates:
-                    rej_stats.record("dte_out_of_range")
+                    rej_stats.record(
+                        "dte_out_of_range", strategy=suggestion["strategy"]
+                    )
                     return None
                 # Will iterate over expiries in condor branch below
                 expiry_selected = None  # Set later when we find best
@@ -3252,7 +3291,9 @@ def scan_for_opportunities(
                 # Non-condor: use single best expiry
                 expiry_selected, chain_subset = _select_best_expiry_chain(chain, target_dte=35, today_date=today_date)
                 if not expiry_selected or not chain_subset:
-                    rej_stats.record("dte_out_of_range")
+                    rej_stats.record(
+                        "dte_out_of_range", strategy=suggestion["strategy"]
+                    )
                     return None
                 expiry_candidates = None  # Not used for non-condors
 
@@ -3313,24 +3354,35 @@ def scan_for_opportunities(
                     surface_v4_summary = {"error": str(e)}
                     # If surface_policy is skip, reject on build failure
                     if surface_policy == "skip":
-                        rej_stats.record("surface_build_failed")
+                        rej_stats.record(
+                            "surface_build_failed",
+                            strategy=suggestion["strategy"],
+                        )
                         return None
 
                 # Policy enforcement (outside try/except so it always runs)
                 if surface_policy == "skip" and surface_result is not None:
                     # Reject if surface is invalid
                     if not surface_result.is_valid:
-                        rej_stats.record("surface_invalid")
+                        rej_stats.record(
+                            "surface_invalid", strategy=suggestion["strategy"]
+                        )
                         return None
                     # Reject if calendar arb detected post-repair
                     if surface_result.surface and surface_result.surface.calendar_arb_detected_post:
-                        rej_stats.record("surface_calendar_arb")
+                        rej_stats.record(
+                            "surface_calendar_arb",
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     # Reject if any butterfly arb remains post-repair
                     if surface_result.surface and any(
                         sm.butterfly_arb_detected_post for sm in surface_result.surface.smiles
                     ):
-                        rej_stats.record("surface_butterfly_arb")
+                        rej_stats.record(
+                            "surface_butterfly_arb",
+                            strategy=suggestion["strategy"],
+                        )
                         return None
             # ================================================
 
@@ -3458,24 +3510,42 @@ def scan_for_opportunities(
                     # Check if all expiries had empty/no delta chains
                     reasons = [d.get("reason") for d in expiry_diagnostics]
                     if all(r == "empty_chain" for r in reasons):
-                        rej_stats.record("condor_empty_chain")
+                        rej_stats.record(
+                            "condor_empty_chain",
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     elif all(r == "no_deltas_in_chain" for r in reasons):
-                        rej_stats.record("condor_no_deltas")
+                        rej_stats.record(
+                            "condor_no_deltas",
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     elif total_valid_nbbo == 0:
-                        rej_stats.record_with_sample("condor_no_viable", base_sample)
+                        rej_stats.record_with_sample(
+                            "condor_no_viable", base_sample,
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     elif total_ev_computed == 0:
-                        rej_stats.record_with_sample("condor_ev_not_computed", base_sample)
+                        rej_stats.record_with_sample(
+                            "condor_ev_not_computed", base_sample,
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     elif all(r == "no_positive_ev" for r in reasons if r):
                         # All had EV computed but none positive
-                        rej_stats.record_with_sample("ev_non_positive", base_sample)
+                        rej_stats.record_with_sample(
+                            "ev_non_positive", base_sample,
+                            strategy=suggestion["strategy"],
+                        )
                         return None
                     else:
                         # Mixed reasons - report as no_viable with diagnostics
-                        rej_stats.record_with_sample("condor_no_viable", base_sample)
+                        rej_stats.record_with_sample(
+                            "condor_no_viable", base_sample,
+                            strategy=suggestion["strategy"],
+                        )
                         return None
             else:
                 # Non-condor path: use single expiry
@@ -3509,13 +3579,17 @@ def scan_for_opportunities(
                         )
                     except Exception:
                         logger.exception("chain_greeks_absent_alert_failed")
-                    rej_stats.record("no_deltas_in_chain")
+                    rej_stats.record(
+                        "no_deltas_in_chain", strategy=suggestion["strategy"]
+                    )
                     return None
 
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
             if not legs:
-                rej_stats.record("legs_not_found")
+                rej_stats.record(
+                    "legs_not_found", strategy=suggestion["strategy"]
+                )
                 return None
 
             # Determine data quality based on hydration source
@@ -3574,7 +3648,10 @@ def scan_for_opportunities(
                 leg = legs[0]
                 st_type = _map_single_leg_strategy(leg)
                 if not st_type:
-                    rej_stats.record("single_leg_strategy_unmapped")
+                    rej_stats.record(
+                        "single_leg_strategy_unmapped",
+                        strategy=suggestion["strategy"],
+                    )
                     return None
 
                 ev_obj = calculate_ev(
@@ -3746,9 +3823,14 @@ def scan_for_opportunities(
                             "strategy_key": strategy_key,
                             "spread_debug": debug_spread,
                         }
-                        rej_stats.record_with_sample(reject_reason, sample)
+                        rej_stats.record_with_sample(
+                            reject_reason, sample,
+                            strategy=suggestion["strategy"],
+                        )
                     else:
-                        rej_stats.record(reject_reason)
+                        rej_stats.record(
+                            reject_reason, strategy=suggestion["strategy"]
+                        )
                     return None
 
             # H. Unified Scoring
@@ -3835,7 +3917,10 @@ def scan_for_opportunities(
                         "proxy_cost": round(cost_details.get("proxy_cost_contract", 0), 4),
                     }
                 }
-                rej_stats.record_with_sample("execution_cost_exceeds_ev", exec_sample)
+                rej_stats.record_with_sample(
+                    "execution_cost_exceeds_ev", exec_sample,
+                    strategy=suggestion["strategy"],
+                )
 
                 if EXECUTION_COST_HARD_REJECT and not _regime_forces_soft:
                     # Hard reject in NORMAL/CHOP/SUPPRESSED (default)
@@ -3903,7 +3988,10 @@ def scan_for_opportunities(
                         if days_to_earnings <= 2:
                             is_short_premium = ("credit" in safe_strategy_key) or ("condor" in safe_strategy_key) or ("short" in safe_strategy_key)
                             if is_short_premium:
-                                rej_stats.record("earnings_short_premium")
+                                rej_stats.record(
+                                    "earnings_short_premium",
+                                    strategy=suggestion["strategy"],
+                                )
                                 return None
 
                         # 2. Score Penalty: Within 7 days
@@ -4092,7 +4180,9 @@ def scan_for_opportunities(
                     # Apply Constraints & Veto
                     candidate_dict = _apply_agent_constraints(candidate_dict, portfolio_cash=portfolio_cash)
                     if candidate_dict is None:
-                        rej_stats.record("agent_veto")
+                        rej_stats.record(
+                            "agent_veto", strategy=suggestion["strategy"]
+                        )
                         return None
 
                 except Exception as e:
@@ -4117,7 +4207,10 @@ def scan_for_opportunities(
 
         except Exception as e:
             print(f"[Scanner] Error processing {symbol}: {e}")
-            rej_stats.record("processing_error")
+            # Attributed only when the failure happened AFTER strategy
+            # selection (attempted_strategy set); a pre-selection crash
+            # stays honestly NULL — never fabricate attribution.
+            rej_stats.record("processing_error", strategy=attempted_strategy)
             return None
 
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
@@ -4159,6 +4252,10 @@ def scan_for_opportunities(
             # Both indicate "multi-strategy mechanism added no value for this
             # symbol on this cycle." Distinct from all_strategies_rejected,
             # which means fallbacks WERE tried and all failed.
+            # Funnel phase-2: deliberately UNATTRIBUTED (strategy_key NULL)
+            # — this is a mechanism-level counter, not a strategy attempt;
+            # the primary's own rejection was already recorded upstream
+            # WITH attribution inside process_symbol.
             rej_stats.record("no_fallback_strategies_available")
             return None  # No fallbacks available
 
@@ -4194,6 +4291,11 @@ def scan_for_opportunities(
             f"{[c['strategy'] for c in cands]}",
             flush=True,
         )
+        # Funnel phase-2: deliberately UNATTRIBUTED (strategy_key NULL) —
+        # this summary row spans MULTIPLE attempts; each attempt's own
+        # rejection was already recorded with its strategy identity inside
+        # process_symbol. Attributing the summary to any single strategy
+        # would fabricate attribution.
         rej_stats.record("all_strategies_rejected")
         return None
 

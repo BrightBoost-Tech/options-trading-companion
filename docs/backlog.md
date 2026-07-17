@@ -10,6 +10,58 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
+## 2026-07-17 — POST-MERGE RECOVERY STANDING (authoritative; supersedes older queue text)
+
+Main `b3cf45b` (deployed, all services). **MERGED to main:** #1231 (ranking
+provenance/schema/job truth; its migration `20260716155023` APPLIED 07-16 —
+never reapply) · #1236 (lifecycle typed degrade — build slice CLOSED; natural
+runtime falsifier retained) · #1234 (strategy-identity core + selector route
+tests — F-STRAT-ID core and F-SELECTOR-ROUTE-TESTS slices CLOSED) · #1233
+(docs) · #1232 (prompt). **STACKED-MERGE GAP:** #1235 and #1237 were merged
+into `fix/strategy-identity-consumers`, NOT main (heads non-ancestors; files
+absent) — replacement drafts opened from main: **#1238** (options-level
+preflight port; byte-identical, 154 tests) and **#1239** (risk-cap routing
+port; matrix re-derived IDENTICAL 30/30; blast radius re-verified
+reporting-only — zero budget_snapshot readers; operator's #1237 approval
+covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
+
+- **F-CREDIT-SIGN (nightly 07-15, HIGH): CONFIRMED_CURRENT at `b3cf45b` and
+  FIXED in draft #1240** — internal-fill closes routed through the #1056
+  unsigned-magnitude/structural-direction owner; exact QQQ regression pinned
+  (−224.04, never +1815.96); live closes untouched (below broker-ack guard).
+  **Operator-gated data-correction plan in the PR body** (shadow rows, cash
+  ledger compensating entries, learning re-derivation) — never automatic.
+  Rider: `test_csx_close_sign_convention.py` is a #1126 costume — test-repair
+  lane.
+- **Rebalance endpoints: CONFIRMED broken 4-ways (not 1) — FIXED, MERGED
+  #1242** (`e4e634b`), call-contract only; execute is suggestion-only (no
+  broker path, preserved); failure truth typed. Rider: the CI-only 401 in its
+  route tests was collection-time auth-patch leakage from an earlier suite
+  module — fixed by resolving override keys from the LIVE route objects
+  (pattern worth reusing for future api-app tests). `test_security_exception_leaks.py` mocks
+  around the old brokenness — refresh at #774 unskip.
+- **Funnel telemetry phase-2 code slice: MERGED #1241** (`6bc0b5f`) — strategy_key
+  attribution at 21 sites (honest-NULL for pre-strategy + summary rows) +
+  typed `strategy_phase_excluded` (HOLD no longer mislabeled). No migration.
+- **Shadow-fleet schema: APPLIED 2026-07-17 05:22Z** (operator-instructed;
+  tracked as `20260717052208 small_tier_shadow_fleet` — match by NAME per
+  convention, the file keeps its `20260716060000` prefix). Post-apply
+  verified: both tables exist with **0 rows** (nothing provisioned/activated),
+  `decision_event_id` backfill 0-null/0-mismatch, immutability trigger live.
+  **ACTIVATION remains gated** on the operator transaction + legacy-terminal
+  attestation (6 stale 04-09 `alpaca_paper` 'submitted' order rows still need
+  adjudication first).
+- **F-BAN-INTEGRITY: BLOCKED_OWNER_DECISION** (packet says DECISION PENDING).
+  **UI honesty: BLOCKED_UI_FILE_OWNERSHIP** (21 open Palette/Jules PRs).
+- **Not attempted tonight** (sequencing + capacity; queue order unchanged):
+  ⑤ observe-only foundation · multi-basis cost slice · canonical-position
+  consumer.
+- **Strategic order UNCHANGED:** 1 F-SHADOW-CAPITAL-PARITY operationalization ·
+  2 ⑤ terminal distribution · 3 multi-basis cost phase 2 · 4 canonical-position
+  remainder · 5 funnel telemetry → liquidity provenance → OI floor · 6 E19-2B.
+- Merge state 07-17 early-AM: #1241 + #1242 MERGED (operator-directed);
+  remaining order: #1240 → #1238 → #1239 → this docs PR merged last.
+
 ## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
 
 This is the current action surface after PRs #1203–#1227. Older dated sections
@@ -54,6 +106,10 @@ falsifiers remain in the ledger.
   unchanged.
 
 ### Current independent draft lanes
+
+> **SUPERSEDED 2026-07-17: #1228 and #1229 are MERGED code, not drafts** (runtime
+> falsifiers pending: reader never run; broker-closed weekday 2026-09-07). The
+> text below is history.
 
 - **#1228 — replay tape-hash reader:** DRAFT; recomputes persisted aggregate
   hashes/counts through a signed operator-triggered, read-only job. It is

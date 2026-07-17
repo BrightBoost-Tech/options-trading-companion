@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional, TypedDict
 from pydantic import BaseModel
 from datetime import datetime
 from packages.quantum.common_enums import StrategyType
+from packages.quantum.analytics.strategy_identity import resolve_strategy_identity
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -37,13 +38,23 @@ class LossMinimizer:
         # 1. Normalize
         normalized = raw_strategy.lower().strip().replace(" ", "_").replace("-", "_")
 
-        # 2. Direct Enum Match
+        # 2. Canonical crosswalk (exact-normalized) — selector-emitted IDs
+        # resolve here BEFORE the substring heuristics below, so a
+        # defined-risk debit vertical is never demoted to a naked long
+        # (pre-fix: "LONG_CALL_DEBIT_SPREAD" hit the '"long" and "call"'
+        # heuristic -> LONG_CALL). Unknown strings fall through to the
+        # legacy heuristics unchanged.
+        ident = resolve_strategy_identity(normalized)
+        if ident is not None:
+            return ident.strategy_type
+
+        # 3. Direct Enum Match
         try:
             return StrategyType(normalized)
         except ValueError:
             pass
 
-        # 3. Heuristics
+        # 4. Heuristics (legacy strings only — canonical IDs resolved above)
         # "credit_put_spread", "credit_put" -> SHORT_PUT_CREDIT_SPREAD
         if "credit" in normalized and "put" in normalized:
             logger.info(f"Heuristic mapping: {raw_strategy} -> SHORT_PUT_CREDIT_SPREAD")

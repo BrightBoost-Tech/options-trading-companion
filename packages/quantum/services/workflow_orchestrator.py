@@ -4363,6 +4363,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "existing": existing_count,
                 # Observability (FIX 2 H9 verification):
                 "rejection_persist_failures": _persist_failures,
+                # #1218 job-truth (2026-07-16): per-suggestion inserts that
+                # exhausted the bounded strip/retry (e.g. a required column
+                # missing from the schema, like the ranking_costs PGRST204)
+                # are LOST rows. Surface the count so the suggestions_open
+                # handler can propagate it to counts.errors -> partial instead
+                # of the cycle silently completing green. The aggregated
+                # workflow_midday_suggestion_insert_failed alert is unchanged.
+                "suggestion_insert_failures": len(_midday_insert_failures),
             },
             "cycle_metadata": _build_cycle_metadata(
                 # Happy path: exit_reason=None signals successful funnel

@@ -16,6 +16,16 @@ class StrategyType(str, Enum):
     IRON_CONDOR = "iron_condor"
     LONG_CALL = "long_call"
     LONG_PUT = "long_put"
+    # 2026-07-16 strategy-identity repair: typed members for the two
+    # selector-emitted debit verticals. Before these existed,
+    # LossMinimizer.get_strategy_type demoted "LONG_CALL_DEBIT_SPREAD" /
+    # "LONG_PUT_DEBIT_SPREAD" to the naked LONG_CALL / LONG_PUT via
+    # substring heuristics — a defined-risk spread classified as an
+    # uncapped single leg. Additive string members; no existing branch
+    # keys on them (verified: zero StrategyType branches outside
+    # loss_minimizer + tests at b95d3a3).
+    LONG_CALL_DEBIT_SPREAD = "long_call_debit_spread"
+    LONG_PUT_DEBIT_SPREAD = "long_put_debit_spread"
     UNKNOWN = "unknown"
 
 class OutcomeStatus(str, Enum):

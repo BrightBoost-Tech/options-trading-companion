@@ -712,6 +712,20 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         suggestion_id=suggestion_id, is_shadow=_is_shadow_portfolio,
     )
 
+    # Options-level preflight (2026-07-16): fail the ENTRY early/terminally
+    # when the broker account's EFFECTIVE options trading level is missing or
+    # below the strategy requirement — BEFORE any order row is inserted or
+    # broker submit attempted (mirrors the #1038/#1101 placement above).
+    # LAZY by scope: the account read happens ONLY on a path that would
+    # actually submit to the broker in THIS call (alpaca_paper/alpaca_live
+    # exec mode + live_eligible routing + not dry-run + this function owns
+    # the submit) — internal_paper and shadow_blocked staging never gain a
+    # broker call they didn't make before. CLOSES (position_id set) exempt.
+    _apply_options_level_preflight(
+        supabase, ticket, position_id, portfolio,
+        suggestion_id=suggestion_id, submit_to_broker=submit_to_broker,
+    )
+
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
 
@@ -1398,6 +1412,135 @@ def _apply_entry_roundtrip_gate(
             )
 
     raise EntryRoundtripCostExceedsEV(gross_ev_f, applied_round_trip, applied_net)
+
+
+def _apply_options_level_preflight(
+    supabase, ticket, position_id, portfolio, suggestion_id=None,
+    submit_to_broker=True,
+) -> None:
+    """Pre-broker-submit ENTRY rejection on the account's options level.
+
+    Delegates the decision to services/options_level_preflight
+    (STRATEGY_MIN_LEVEL map; permission basis = EFFECTIVE
+    options_trading_level, approved level diagnostics-only; unknown
+    strategy → conservative L3; missing/unreadable level → fail CLOSED).
+    This wrapper owns the LAZY SCOPE and the blocked_reason stamp:
+
+    - CLOSE orders (position_id set): exempt — never preflighted (a
+      permission change must never trap an existing position).
+    - The account read is added ONLY where this call would actually submit
+      to the broker: exec mode alpaca_paper/alpaca_live, live_eligible
+      routing, not dry-run, and this function owns the submit
+      (submit_to_broker=True). internal_paper and shadow_blocked staging
+      paths made no broker call before and gain none now.
+    - HOLD/CASH (strategy_identity NO_TRADE verdicts): not option
+      structures — no requirement, no account read, and they must never be
+      treated as submitted structures (loud warning; check_options_level
+      double-guards the same way).
+    - The account read goes through options_level_preflight's 60s TTL
+      cache (get_account_with_ttl — the equity_state accepted 60s
+      account-read pattern), so multiple live candidates in one executor
+      cycle share ONE read. Still exactly one read per cold call: never
+      per-leg, never per-retry (submit_and_track performs no account
+      reads). NOT a process-lifetime permission cache.
+    - No alpaca client on an alpaca_* mode, or an account read failure →
+      fail CLOSED via EntryOptionsLevelUnavailable (H9: a permission we
+      cannot prove is a permission we do not have). A failed read is never
+      cached — the next call re-reads.
+
+    On reject: stamps blocked_reason (fail-soft, mirrors the roundtrip
+    gate's stamp) then re-raises the typed exception so the autopilot loops
+    count it as not-executed — the same clean no-order-row reject shape as
+    EntryQuoteUnpriceable / EntryRoundtripCostExceedsEV. Healthy L3
+    account: every shipped strategy passes → behavior unchanged.
+    """
+    if position_id is not None:
+        return  # CLOSE order — exempt by contract; never preflighted
+
+    from packages.quantum.brokers.execution_router import (
+        get_execution_mode, ExecutionMode,
+    )
+    exec_mode = get_execution_mode()
+    if exec_mode not in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+        return  # internal_paper staging — no broker call today, none added
+    if not submit_to_broker:
+        return  # caller owns submission — this call only stages
+    if os.environ.get("ALPACA_DRY_RUN", "0") == "1":
+        return  # dry-run never submits — no broker call added
+    _routing = str((portfolio or {}).get("routing_mode") or "").strip().lower()
+    if _routing != "live_eligible":
+        # shadow_only / unknown routing stages as shadow_blocked (the
+        # should_submit_to_broker whitelist) — no broker call there either.
+        return
+
+    from packages.quantum.brokers.alpaca_client import get_alpaca_client
+    from packages.quantum.services.options_level_preflight import (
+        check_options_level,
+        get_account_with_ttl,
+        is_no_trade_verdict,
+        EntryOptionsLevelError,
+        EntryOptionsLevelUnavailable,
+    )
+
+    strategy_id = getattr(ticket, "strategy_type", None)
+    if is_no_trade_verdict(strategy_id):
+        # HOLD/CASH — canonical NO_TRADE verdicts (strategy_identity), not
+        # option structures. Nothing to permission, nothing that may be
+        # submitted; no account read. Reaching the stage seam at all is
+        # anomalous — loud, never silent.
+        logger.warning(
+            "[OPTIONS_LEVEL] no-trade verdict %r reached the stage seam "
+            "(suggestion=%s) — not an option structure; no level "
+            "requirement, no account read, never a submitted structure",
+            strategy_id, suggestion_id,
+        )
+        return
+    try:
+        alpaca = get_alpaca_client()
+        if alpaca is None:
+            logger.error(
+                "[OPTIONS_LEVEL] exec_mode=%s but no alpaca client "
+                "(credentials missing?) — FAIL CLOSED on the OPEN entry "
+                "suggestion=%s", exec_mode.value, suggestion_id,
+            )
+            raise EntryOptionsLevelUnavailable(
+                strategy_id, None, None,
+                detail=" (no alpaca client on an alpaca_* execution mode)",
+            )
+        try:
+            # 60s TTL cache (options_level_preflight.get_account_with_ttl,
+            # mirroring equity_state's accepted 60s account-read pattern):
+            # one broker GET serves every candidate staged inside the TTL;
+            # failures are never cached (fail-closed below, re-read next
+            # call).
+            account = get_account_with_ttl(alpaca)
+        except Exception as _acct_err:
+            logger.error(
+                "[OPTIONS_LEVEL] account read failed on the stage path — "
+                "FAIL CLOSED on the OPEN entry suggestion=%s: %s",
+                suggestion_id, _acct_err,
+            )
+            raise EntryOptionsLevelUnavailable(
+                strategy_id, None, None,
+                detail=f" (account read failed: {_acct_err})",
+            )
+        check_options_level(strategy_id, is_open_order=True, account=account)
+    except EntryOptionsLevelError as _le:
+        # Stamp the row so the cause survives the morning stale-sweep
+        # (mirrors _apply_entry_roundtrip_gate's stamp). Fail-soft: a stamp
+        # failure never blocks the reject.
+        if suggestion_id:
+            try:
+                supabase.table(TRADE_SUGGESTIONS_TABLE).update({
+                    "blocked_reason": _le.blocked_reason,
+                    "blocked_detail": str(_le)[:300],
+                }).eq("id", suggestion_id).execute()
+            except Exception as _se:
+                logger.warning(
+                    "[OPTIONS_LEVEL] blocked_reason stamp failed for %s: %s",
+                    suggestion_id, _se,
+                )
+        raise
 
 
 def _abs_entry_premium(fill_price) -> float:

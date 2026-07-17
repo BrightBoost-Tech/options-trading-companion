@@ -218,6 +218,35 @@ class AlpacaClient:
             )
         return float(value)
 
+    @staticmethod
+    def _opt_int_level(field: str, value: Any) -> Optional[int]:
+        """Coerce an OPTIONAL options-level field, None-PRESERVING.
+
+        Options-level preflight (2026-07-16): options_approved_level /
+        options_trading_level are optional-but-DISTINGUISHABLE — a legacy
+        paper account may lack the field entirely (missing attr → None, the
+        cannot-prove-permission signal the entry preflight fails CLOSED on),
+        while a real numeric 0 (no options approval) must stay 0. Never
+        coerce None → 0: the consumer (services/options_level_preflight)
+        relies on the distinction, same contract as options_buying_power /
+        last_equity above. A malformed (non-int-coercible) value serializes
+        None with ONE loud typed log rather than raising — these are
+        OPTIONAL fields and must not take down the whole account read for
+        capital consumers (the M4 item 0.1 lesson: a broker payload change
+        killed get_account via TypeError soup)."""
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.error(
+                f"[ALPACA] account payload field '{field}' malformed "
+                f"(non-int-coercible: {value!r}) — serializing None; the "
+                f"options-level entry preflight treats None as "
+                f"cannot-prove-permission and fails CLOSED on OPEN orders"
+            )
+            return None
+
     def get_account(self) -> Dict[str, Any]:
         """Account summary: balance, buying power, equity, PDT status.
 
@@ -249,6 +278,22 @@ class AlpacaClient:
         _last_eq = getattr(acct, "last_equity", None)
         last_equity = float(_last_eq) if _last_eq is not None else None
         _dtc = getattr(acct, "daytrade_count", None)
+        # Options trading levels (2026-07-16, options-level entry preflight):
+        # the raw SDK object carried these since options support, but this
+        # curated dict silently DROPPED them — no downstream consumer could
+        # ever see the account's permission level. Serialized independently
+        # and None-preserving (missing ≠ 0): options_trading_level is the
+        # EFFECTIVE permission basis (broker may throttle it below the
+        # approved level, e.g. during PDT-equity or margin events);
+        # options_approved_level rides along for diagnostics only.
+        options_approved_level = self._opt_int_level(
+            "options_approved_level",
+            getattr(acct, "options_approved_level", None),
+        )
+        options_trading_level = self._opt_int_level(
+            "options_trading_level",
+            getattr(acct, "options_trading_level", None),
+        )
         return {
             "account_id": str(acct.id),
             "status": str(acct.status),
@@ -257,6 +302,8 @@ class AlpacaClient:
             "cash": self._req_float("cash", acct.cash),
             "buying_power": self._req_float("buying_power", acct.buying_power),
             "options_buying_power": options_buying_power,
+            "options_approved_level": options_approved_level,
+            "options_trading_level": options_trading_level,
             "portfolio_value": self._req_float(
                 "portfolio_value", acct.portfolio_value
             ),

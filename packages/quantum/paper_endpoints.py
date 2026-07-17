@@ -1433,9 +1433,20 @@ def _apply_options_level_preflight(
       routing, not dry-run, and this function owns the submit
       (submit_to_broker=True). internal_paper and shadow_blocked staging
       paths made no broker call before and gain none now.
+    - HOLD/CASH (strategy_identity NO_TRADE verdicts): not option
+      structures — no requirement, no account read, and they must never be
+      treated as submitted structures (loud warning; check_options_level
+      double-guards the same way).
+    - The account read goes through options_level_preflight's 60s TTL
+      cache (get_account_with_ttl — the equity_state accepted 60s
+      account-read pattern), so multiple live candidates in one executor
+      cycle share ONE read. Still exactly one read per cold call: never
+      per-leg, never per-retry (submit_and_track performs no account
+      reads). NOT a process-lifetime permission cache.
     - No alpaca client on an alpaca_* mode, or an account read failure →
       fail CLOSED via EntryOptionsLevelUnavailable (H9: a permission we
-      cannot prove is a permission we do not have).
+      cannot prove is a permission we do not have). A failed read is never
+      cached — the next call re-reads.
 
     On reject: stamps blocked_reason (fail-soft, mirrors the roundtrip
     gate's stamp) then re-raises the typed exception so the autopilot loops
@@ -1465,11 +1476,25 @@ def _apply_options_level_preflight(
     from packages.quantum.brokers.alpaca_client import get_alpaca_client
     from packages.quantum.services.options_level_preflight import (
         check_options_level,
+        get_account_with_ttl,
+        is_no_trade_verdict,
         EntryOptionsLevelError,
         EntryOptionsLevelUnavailable,
     )
 
     strategy_id = getattr(ticket, "strategy_type", None)
+    if is_no_trade_verdict(strategy_id):
+        # HOLD/CASH — canonical NO_TRADE verdicts (strategy_identity), not
+        # option structures. Nothing to permission, nothing that may be
+        # submitted; no account read. Reaching the stage seam at all is
+        # anomalous — loud, never silent.
+        logger.warning(
+            "[OPTIONS_LEVEL] no-trade verdict %r reached the stage seam "
+            "(suggestion=%s) — not an option structure; no level "
+            "requirement, no account read, never a submitted structure",
+            strategy_id, suggestion_id,
+        )
+        return
     try:
         alpaca = get_alpaca_client()
         if alpaca is None:
@@ -1483,7 +1508,12 @@ def _apply_options_level_preflight(
                 detail=" (no alpaca client on an alpaca_* execution mode)",
             )
         try:
-            account = alpaca.get_account()
+            # 60s TTL cache (options_level_preflight.get_account_with_ttl,
+            # mirroring equity_state's accepted 60s account-read pattern):
+            # one broker GET serves every candidate staged inside the TTL;
+            # failures are never cached (fail-closed below, re-read next
+            # call).
+            account = get_account_with_ttl(alpaca)
         except Exception as _acct_err:
             logger.error(
                 "[OPTIONS_LEVEL] account read failed on the stage path — "

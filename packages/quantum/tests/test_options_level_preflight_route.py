@@ -20,6 +20,7 @@ Route matrix:
   gain an account read.
 """
 
+import contextlib
 import os
 import sys
 import types
@@ -36,9 +37,12 @@ sys.modules.setdefault(
 
 from packages.quantum import paper_endpoints as pe  # noqa: E402
 from packages.quantum.models import OptionLeg, TradeTicket  # noqa: E402
+from packages.quantum.services import options_level_preflight as olp  # noqa: E402
 from packages.quantum.services.options_level_preflight import (  # noqa: E402
+    ACCOUNT_LEVEL_TTL_SECONDS,
     EntryOptionsLevelInsufficient,
     EntryOptionsLevelUnavailable,
+    reset_account_cache,
 )
 
 VALID_QUOTE = {"bid": 1.40, "ask": 1.60, "bid_price": 1.40,
@@ -55,6 +59,27 @@ def _spread_ticket():
                       type="put", strike=640.0, expiry="2026-08-21"),
             OptionLeg(symbol="O:QQQ260821P00600000", action="sell",
                       type="put", strike=600.0, expiry="2026-08-21"),
+        ],
+        limit_price=1.50,
+        quantity=1,
+    )
+
+
+def _condor_ticket():
+    """OPEN 4-leg iron condor — the max-leg-count structure the selector
+    emits; pins that the account read is per-STAGE-CALL, never per-leg."""
+    return TradeTicket(
+        symbol="QQQ",
+        strategy_type="IRON_CONDOR",
+        legs=[
+            OptionLeg(symbol="O:QQQ260821P00600000", action="buy",
+                      type="put", strike=600.0, expiry="2026-08-21"),
+            OptionLeg(symbol="O:QQQ260821P00620000", action="sell",
+                      type="put", strike=620.0, expiry="2026-08-21"),
+            OptionLeg(symbol="O:QQQ260821C00700000", action="sell",
+                      type="call", strike=700.0, expiry="2026-08-21"),
+            OptionLeg(symbol="O:QQQ260821C00720000", action="buy",
+                      type="call", strike=720.0, expiry="2026-08-21"),
         ],
         limit_price=1.50,
         quantity=1,
@@ -174,43 +199,86 @@ class _RouteHarness(unittest.TestCase):
     boundary; the preflight, gates, and _stage_order_internal itself run
     REAL."""
 
+    def setUp(self):
+        # The 60s account-read cache is process-global (keyed per client
+        # identity) — start every test cold.
+        reset_account_cache()
+
+    def tearDown(self):
+        reset_account_cache()
+
     def _stage(self, *, effective_level, approved_level=3,
                execution_mode="alpaca_paper", routing_mode="live_eligible",
                position_id=None, submit_to_broker=True, account_dict=None,
-               suggestion_id="sugg-1"):
+               suggestion_id="sugg-1", client=None, ticket=None,
+               dry_run=False, real_submit=False):
+        """Drive the REAL _stage_order_internal once.
+
+        client: pass a previous outcome's client to REUSE it across stage
+        calls (the TTL-cache tests) — its get_account is left untouched.
+        real_submit: do NOT mock submit_and_track — run the real retry
+        loop (sleep/alerts stubbed); the caller programs
+        client.submit_option_order.
+        """
         sb = FakeSupabase(_portfolio(routing_mode))
-        fake_client = MagicMock()
-        fake_client.paper = True
-        fake_client.get_account.return_value = (
-            account_dict if account_dict is not None
-            else _account(effective_level, approved_level)
-        )
+        if client is not None:
+            fake_client = client
+        else:
+            fake_client = MagicMock()
+            fake_client.paper = True
+            fake_client.get_account.return_value = (
+                account_dict if account_dict is not None
+                else _account(effective_level, approved_level)
+            )
         submit_mock = MagicMock(return_value={"status": "submitted"})
 
         env = {
             "EXECUTION_MODE": execution_mode,
-            "ALPACA_DRY_RUN": "0",
+            "ALPACA_DRY_RUN": "1" if dry_run else "0",
         }
         outcome = {"sb": sb, "client": fake_client, "submit": submit_mock,
                    "order_id": None, "raised": None}
-        with patch.dict(os.environ, env), \
-                patch.object(pe, "PolygonService", MagicMock()), \
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, env))
+            stack.enter_context(
+                patch.object(pe, "PolygonService", MagicMock()))
+            stack.enter_context(
                 patch.object(pe, "_fetch_quote_with_retry",
-                             lambda poly, sym, **k: dict(VALID_QUOTE)), \
+                             lambda poly, sym, **k: dict(VALID_QUOTE)))
+            stack.enter_context(
                 patch.object(pe, "_make_entry_quote_fetch_fn",
-                             lambda poly: (lambda sym: dict(VALID_QUOTE))), \
+                             lambda poly: (lambda sym: dict(VALID_QUOTE))))
+            stack.enter_context(
                 patch.object(pe, "_process_orders_for_user",
-                             MagicMock(return_value={"processed": 0})), \
+                             MagicMock(return_value={"processed": 0})))
+            stack.enter_context(
                 patch("packages.quantum.brokers.alpaca_client."
-                      "get_alpaca_client", return_value=fake_client), \
-                patch("packages.quantum.brokers.alpaca_order_handler."
-                      "submit_and_track", submit_mock), \
+                      "get_alpaca_client", return_value=fake_client))
+            stack.enter_context(
                 patch("packages.quantum.execution.marketable_entry."
                       "maybe_apply_marketable_entry",
-                      lambda supabase, row, user_id: row):
+                      lambda supabase, row, user_id: row))
+            if real_submit:
+                # Real submit_and_track retry loop; only its side effects
+                # (backoff sleeps, alert egress) are stubbed.
+                from packages.quantum.brokers import (
+                    alpaca_order_handler as _handler,
+                )
+                stack.enter_context(patch.object(_handler.time, "sleep"))
+                stack.enter_context(
+                    patch("packages.quantum.observability.alerts.alert"))
+                stack.enter_context(
+                    patch("packages.quantum.observability.alerts."
+                          "_get_admin_supabase",
+                          return_value=MagicMock()))
+            else:
+                stack.enter_context(
+                    patch("packages.quantum.brokers.alpaca_order_handler."
+                          "submit_and_track", submit_mock))
             try:
                 outcome["order_id"] = pe._stage_order_internal(
-                    sb, None, "user-1", _spread_ticket(),
+                    sb, None, "user-1",
+                    ticket if ticket is not None else _spread_ticket(),
                     portfolio_id_arg="port-1",
                     position_id=position_id,
                     suggestion_id_override=suggestion_id,
@@ -288,6 +356,17 @@ class TestRouteCloseExempt(_RouteHarness):
         self.assertIn("paper_orders", out["sb"].inserted_tables())
         self.assertIsNotNone(out["order_id"])
 
+    def test_close_route_works_with_missing_level(self):
+        """The close route must survive an account with NO readable level
+        (effective=None) — a permission outage must never trap an existing
+        position. Zero account reads, staging proceeds."""
+        out = self._stage(effective_level=None, approved_level=None,
+                          position_id="pos-1", submit_to_broker=False)
+        self.assertIsNone(out["raised"], repr(out["raised"]))
+        out["client"].get_account.assert_not_called()
+        self.assertIn("paper_orders", out["sb"].inserted_tables())
+        self.assertIsNotNone(out["order_id"])
+
 
 class TestRouteLazyScope(_RouteHarness):
     """The account read exists ONLY where a broker submit would happen —
@@ -308,6 +387,139 @@ class TestRouteLazyScope(_RouteHarness):
         out["client"].get_account.assert_not_called()
         self.assertIn("paper_orders", out["sb"].inserted_tables())
         out["submit"].assert_not_called()
+
+    def test_dry_run_never_reads_account(self):
+        """ALPACA_DRY_RUN=1 never submits — the preflight adds no broker
+        call there (even on an account that would reject)."""
+        out = self._stage(effective_level=2, dry_run=True)
+        self.assertIsNone(out["raised"], repr(out["raised"]))
+        out["client"].get_account.assert_not_called()
+        self.assertIn("paper_orders", out["sb"].inserted_tables())
+        out["submit"].assert_not_called()
+
+
+class TestRouteAccountReadScope(_RouteHarness):
+    """Exactly ONE account read per submitting stage call — never per-leg,
+    never per-retry — and the 60s TTL cache shares that read across
+    candidates in one executor cycle."""
+
+    def test_four_leg_condor_single_account_read_not_per_leg(self):
+        """4 legs, each with its own entry-quote validation fetch — still
+        exactly ONE get_account (the read is per stage call, not per
+        leg)."""
+        out = self._stage(effective_level=3, ticket=_condor_ticket())
+        self.assertIsNone(out["raised"], repr(out["raised"]))
+        self.assertEqual(out["client"].get_account.call_count, 1)
+        out["submit"].assert_called_once()
+
+    def test_second_stage_within_ttl_reuses_single_read(self):
+        """Two live candidates in one executor cycle (same client, inside
+        the 60s TTL): the second stage call performs ZERO additional
+        get_account calls (the equity_state 60s pattern)."""
+        first = self._stage(effective_level=3)
+        self.assertIsNone(first["raised"], repr(first["raised"]))
+        self.assertEqual(first["client"].get_account.call_count, 1)
+        second = self._stage(effective_level=3, client=first["client"])
+        self.assertIsNone(second["raised"], repr(second["raised"]))
+        self.assertEqual(second["client"].get_account.call_count, 1)
+        # Both calls really staged + submitted.
+        self.assertIn("paper_orders", second["sb"].inserted_tables())
+        second["submit"].assert_called_once()
+
+    def test_ttl_expiry_rereads_account(self):
+        """Past the 60s TTL the cache must NOT serve the stale read — the
+        next stage call re-reads the broker (NOT a process-lifetime
+        permission cache). Clock injected via monkeypatched
+        time.monotonic."""
+        class _Clock:
+            t = 1000.0
+
+            def __call__(self):
+                return _Clock.t
+
+        clock = _Clock()
+        with patch.object(olp.time, "monotonic", clock):
+            first = self._stage(effective_level=3)
+            self.assertEqual(first["client"].get_account.call_count, 1)
+            _Clock.t += ACCOUNT_LEVEL_TTL_SECONDS + 1.0
+            second = self._stage(effective_level=3, client=first["client"])
+            self.assertIsNone(second["raised"], repr(second["raised"]))
+            self.assertEqual(second["client"].get_account.call_count, 2)
+
+    def test_read_failure_fails_closed_and_is_never_cached(self):
+        """A failed account read rejects the entry (fail CLOSED) and must
+        not poison the cache: the next stage call re-reads and, once the
+        broker recovers, proceeds."""
+        broken = MagicMock()
+        broken.paper = True
+        broken.get_account.side_effect = RuntimeError("broker 500")
+        out = self._stage(effective_level=3, client=broken)
+        self.assertIsInstance(out["raised"], EntryOptionsLevelUnavailable)
+        self.assertNotIn("paper_orders", out["sb"].inserted_tables())
+        out["submit"].assert_not_called()
+        self.assertEqual(broken.get_account.call_count, 1)
+        # Broker recovers — same client, new stage call: RE-reads (the
+        # failure was never cached) and stages clean.
+        broken.get_account.side_effect = None
+        broken.get_account.return_value = _account(3)
+        again = self._stage(effective_level=3, client=broken)
+        self.assertIsNone(again["raised"], repr(again["raised"]))
+        self.assertEqual(broken.get_account.call_count, 2)
+        again["submit"].assert_called_once()
+
+    def test_submit_retries_never_reread_account(self):
+        """Drive the REAL submit_and_track retry loop (transient error →
+        MAX_SUBMIT_ATTEMPTS submits): the account read stays exactly ONE —
+        never per-retry."""
+        from packages.quantum.brokers.alpaca_order_handler import (
+            MAX_SUBMIT_ATTEMPTS,
+        )
+        client = MagicMock()
+        client.paper = True
+        client.get_account.return_value = _account(3)
+        client.submit_option_order.side_effect = Exception(
+            "connection reset by peer"
+        )
+        out = self._stage(effective_level=3, client=client,
+                          real_submit=True)
+        # Submit failures are swallowed at the stage seam (order stays
+        # staged for retry) — the stage call itself succeeds.
+        self.assertIsNone(out["raised"], repr(out["raised"]))
+        # The REAL retry loop actually ran all attempts...
+        self.assertEqual(client.submit_option_order.call_count,
+                         MAX_SUBMIT_ATTEMPTS)
+        # ...and never triggered another account read.
+        self.assertEqual(client.get_account.call_count, 1)
+
+
+class TestRouteNoTradeVerdicts(_RouteHarness):
+    """HOLD/CASH are no-trade verdicts, not option structures: the wiring
+    resolves them via strategy_identity and returns BEFORE any account
+    read — never treated as submitted structures. (They cannot legally
+    reach _stage_order_internal as a full ticket — no legs to validate —
+    so this pins the wrapper seam the route calls.)"""
+
+    def test_hold_cash_no_account_read_no_reject(self):
+        for verdict in ("HOLD", "CASH", "hold", "cash"):
+            with self.subTest(strategy=verdict):
+                client = MagicMock()
+                client.get_account.return_value = _account(0)  # worst case
+                sb = FakeSupabase(_portfolio("live_eligible"))
+                ticket = SimpleNamespace(strategy_type=verdict)
+                with patch.dict(os.environ, {
+                        "EXECUTION_MODE": "alpaca_paper",
+                        "ALPACA_DRY_RUN": "0"}), \
+                        patch("packages.quantum.brokers.alpaca_client."
+                              "get_alpaca_client", return_value=client):
+                    # Must not raise — and must never read the account.
+                    pe._apply_options_level_preflight(
+                        sb, ticket, None, _portfolio("live_eligible"),
+                        suggestion_id="sugg-1", submit_to_broker=True,
+                    )
+                client.get_account.assert_not_called()
+                # No blocked_reason stamp — this is not a rejection.
+                self.assertEqual(
+                    sb.updates_for(pe.TRADE_SUGGESTIONS_TABLE), [])
 
 
 if __name__ == "__main__":

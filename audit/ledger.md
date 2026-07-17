@@ -6,6 +6,17 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
 ## 2026-07-17 — POST-MERGE RECOVERY SPRINT · status:reported/drafts-pending
 
+**07-17 05:xxZ EXECUTION ADDENDUM (operator-instructed):** #1242 repaired
+(CI-only 401 = collection-time auth-patch leakage; diagnostic run proved
+override_keys=[] + stale symbol id; fix = route-resolved override keys) and
+**MERGED** -> main `e4e634b`; #1241 merged by the operator in parallel
+(`6bc0b5f`). **Fleet schema APPLIED** (05:22Z; tracked `20260717052208
+small_tier_shadow_fleet`; verified: 2 tables, 0 rows, decision_event_id
+0-null/0-mismatch, trigger live) — SCHEMA ONLY, activation still
+operator-gated behind the legacy-terminal attestation (6 stale 04-09
+'submitted' rows). #1243 refreshed + merged with these facts. Remaining
+drafts: #1240 (F-CREDIT-SIGN) · #1238 · #1239.
+
 Main `b3cf45b` deployed (Railway SUCCESS 02:03Z). Broker flat $2,067.86 L3/L3.
 **Stacked-merge gap PROVEN + recovered**: #1235/#1237 merged into the feature
 branch, never main → replacement drafts #1238 (preflight, byte-identical port,

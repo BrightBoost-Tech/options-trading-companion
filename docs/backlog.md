@@ -33,18 +33,24 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
   ledger compensating entries, learning re-derivation) — never automatic.
   Rider: `test_csx_close_sign_convention.py` is a #1126 costume — test-repair
   lane.
-- **Rebalance endpoints: CONFIRMED broken 4-ways (not 1) — fixed in draft
-  #1242**, call-contract only; execute is suggestion-only (no broker path,
-  preserved); failure truth typed. `test_security_exception_leaks.py` mocks
+- **Rebalance endpoints: CONFIRMED broken 4-ways (not 1) — FIXED, MERGED
+  #1242** (`e4e634b`), call-contract only; execute is suggestion-only (no
+  broker path, preserved); failure truth typed. Rider: the CI-only 401 in its
+  route tests was collection-time auth-patch leakage from an earlier suite
+  module — fixed by resolving override keys from the LIVE route objects
+  (pattern worth reusing for future api-app tests). `test_security_exception_leaks.py` mocks
   around the old brokenness — refresh at #774 unskip.
-- **Funnel telemetry phase-2 code slice: draft #1241** — strategy_key
+- **Funnel telemetry phase-2 code slice: MERGED #1241** (`6bc0b5f`) — strategy_key
   attribution at 21 sites (honest-NULL for pre-strategy + summary rows) +
   typed `strategy_phase_excluded` (HOLD no longer mislabeled). No migration.
-- **Shadow-fleet migration `20260716060000` readiness: READY_SCHEMA_APPLY_ONLY**
-  (untracked, zero drift, `policy_decisions.suggestion_id` 0/323 NULL, market
-  closed). Activation-side footnote: 6 stale 04-09 `alpaca_paper` 'submitted'
-  order rows must be adjudicated before the legacy-terminal boundary attests.
-  Apply only via the operator migration prompt.
+- **Shadow-fleet schema: APPLIED 2026-07-17 05:22Z** (operator-instructed;
+  tracked as `20260717052208 small_tier_shadow_fleet` — match by NAME per
+  convention, the file keeps its `20260716060000` prefix). Post-apply
+  verified: both tables exist with **0 rows** (nothing provisioned/activated),
+  `decision_event_id` backfill 0-null/0-mismatch, immutability trigger live.
+  **ACTIVATION remains gated** on the operator transaction + legacy-terminal
+  attestation (6 stale 04-09 `alpaca_paper` 'submitted' order rows still need
+  adjudication first).
 - **F-BAN-INTEGRITY: BLOCKED_OWNER_DECISION** (packet says DECISION PENDING).
   **UI honesty: BLOCKED_UI_FILE_OWNERSHIP** (21 open Palette/Jules PRs).
 - **Not attempted tonight** (sequencing + capacity; queue order unchanged):
@@ -53,8 +59,8 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
 - **Strategic order UNCHANGED:** 1 F-SHADOW-CAPITAL-PARITY operationalization ·
   2 ⑤ terminal distribution · 3 multi-basis cost phase 2 · 4 canonical-position
   remainder · 5 funnel telemetry → liquidity provenance → OI floor · 6 E19-2B.
-- Recommended merge order (report-only): #1240 → #1238 → #1239 → #1242 →
-  #1241 → docs PR last.
+- Merge state 07-17 early-AM: #1241 + #1242 MERGED (operator-directed);
+  remaining order: #1240 → #1238 → #1239 → this docs PR merged last.
 
 ## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
 

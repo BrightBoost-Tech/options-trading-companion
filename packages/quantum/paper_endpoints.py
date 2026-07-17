@@ -712,6 +712,20 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         suggestion_id=suggestion_id, is_shadow=_is_shadow_portfolio,
     )
 
+    # Options-level preflight (2026-07-16): fail the ENTRY early/terminally
+    # when the broker account's EFFECTIVE options trading level is missing or
+    # below the strategy requirement — BEFORE any order row is inserted or
+    # broker submit attempted (mirrors the #1038/#1101 placement above).
+    # LAZY by scope: the account read happens ONLY on a path that would
+    # actually submit to the broker in THIS call (alpaca_paper/alpaca_live
+    # exec mode + live_eligible routing + not dry-run + this function owns
+    # the submit) — internal_paper and shadow_blocked staging never gain a
+    # broker call they didn't make before. CLOSES (position_id set) exempt.
+    _apply_options_level_preflight(
+        supabase, ticket, position_id, portfolio,
+        suggestion_id=suggestion_id, submit_to_broker=submit_to_broker,
+    )
+
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
 
@@ -1398,6 +1412,105 @@ def _apply_entry_roundtrip_gate(
             )
 
     raise EntryRoundtripCostExceedsEV(gross_ev_f, applied_round_trip, applied_net)
+
+
+def _apply_options_level_preflight(
+    supabase, ticket, position_id, portfolio, suggestion_id=None,
+    submit_to_broker=True,
+) -> None:
+    """Pre-broker-submit ENTRY rejection on the account's options level.
+
+    Delegates the decision to services/options_level_preflight
+    (STRATEGY_MIN_LEVEL map; permission basis = EFFECTIVE
+    options_trading_level, approved level diagnostics-only; unknown
+    strategy → conservative L3; missing/unreadable level → fail CLOSED).
+    This wrapper owns the LAZY SCOPE and the blocked_reason stamp:
+
+    - CLOSE orders (position_id set): exempt — never preflighted (a
+      permission change must never trap an existing position).
+    - The account read is added ONLY where this call would actually submit
+      to the broker: exec mode alpaca_paper/alpaca_live, live_eligible
+      routing, not dry-run, and this function owns the submit
+      (submit_to_broker=True). internal_paper and shadow_blocked staging
+      paths made no broker call before and gain none now.
+    - No alpaca client on an alpaca_* mode, or an account read failure →
+      fail CLOSED via EntryOptionsLevelUnavailable (H9: a permission we
+      cannot prove is a permission we do not have).
+
+    On reject: stamps blocked_reason (fail-soft, mirrors the roundtrip
+    gate's stamp) then re-raises the typed exception so the autopilot loops
+    count it as not-executed — the same clean no-order-row reject shape as
+    EntryQuoteUnpriceable / EntryRoundtripCostExceedsEV. Healthy L3
+    account: every shipped strategy passes → behavior unchanged.
+    """
+    if position_id is not None:
+        return  # CLOSE order — exempt by contract; never preflighted
+
+    from packages.quantum.brokers.execution_router import (
+        get_execution_mode, ExecutionMode,
+    )
+    exec_mode = get_execution_mode()
+    if exec_mode not in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+        return  # internal_paper staging — no broker call today, none added
+    if not submit_to_broker:
+        return  # caller owns submission — this call only stages
+    if os.environ.get("ALPACA_DRY_RUN", "0") == "1":
+        return  # dry-run never submits — no broker call added
+    _routing = str((portfolio or {}).get("routing_mode") or "").strip().lower()
+    if _routing != "live_eligible":
+        # shadow_only / unknown routing stages as shadow_blocked (the
+        # should_submit_to_broker whitelist) — no broker call there either.
+        return
+
+    from packages.quantum.brokers.alpaca_client import get_alpaca_client
+    from packages.quantum.services.options_level_preflight import (
+        check_options_level,
+        EntryOptionsLevelError,
+        EntryOptionsLevelUnavailable,
+    )
+
+    strategy_id = getattr(ticket, "strategy_type", None)
+    try:
+        alpaca = get_alpaca_client()
+        if alpaca is None:
+            logger.error(
+                "[OPTIONS_LEVEL] exec_mode=%s but no alpaca client "
+                "(credentials missing?) — FAIL CLOSED on the OPEN entry "
+                "suggestion=%s", exec_mode.value, suggestion_id,
+            )
+            raise EntryOptionsLevelUnavailable(
+                strategy_id, None, None,
+                detail=" (no alpaca client on an alpaca_* execution mode)",
+            )
+        try:
+            account = alpaca.get_account()
+        except Exception as _acct_err:
+            logger.error(
+                "[OPTIONS_LEVEL] account read failed on the stage path — "
+                "FAIL CLOSED on the OPEN entry suggestion=%s: %s",
+                suggestion_id, _acct_err,
+            )
+            raise EntryOptionsLevelUnavailable(
+                strategy_id, None, None,
+                detail=f" (account read failed: {_acct_err})",
+            )
+        check_options_level(strategy_id, is_open_order=True, account=account)
+    except EntryOptionsLevelError as _le:
+        # Stamp the row so the cause survives the morning stale-sweep
+        # (mirrors _apply_entry_roundtrip_gate's stamp). Fail-soft: a stamp
+        # failure never blocks the reject.
+        if suggestion_id:
+            try:
+                supabase.table(TRADE_SUGGESTIONS_TABLE).update({
+                    "blocked_reason": _le.blocked_reason,
+                    "blocked_detail": str(_le)[:300],
+                }).eq("id", suggestion_id).execute()
+            except Exception as _se:
+                logger.warning(
+                    "[OPTIONS_LEVEL] blocked_reason stamp failed for %s: %s",
+                    suggestion_id, _se,
+                )
+        raise
 
 
 def _abs_entry_premium(fill_price) -> float:

@@ -4,6 +4,25 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-17 — POST-MERGE RECOVERY SPRINT · status:reported/drafts-pending
+
+Main `b3cf45b` deployed (Railway SUCCESS 02:03Z). Broker flat $2,067.86 L3/L3.
+**Stacked-merge gap PROVEN + recovered**: #1235/#1237 merged into the feature
+branch, never main → replacement drafts #1238 (preflight, byte-identical port,
+154 tests) + #1239 (cap routing; matrix IDENTICAL 30/30; reporting-only blast
+radius re-verified — do not re-find). **F-CREDIT-SIGN CONFIRMED_CURRENT +
+fixed in draft #1240** (route-reproduced +1815.96 vs −224.04; canonical #1056
+seam; data-correction plan operator-gated in PR). **Rebalance: 4 contract
+breaks (filed as 1) fixed in draft #1242**; execute = suggestion-only, no
+broker path (verified). **Funnel slice draft #1241** (21 attributed sites +
+typed phase exclusion; summary rows honestly NULL by design). Shadow-fleet
+migration readiness: READY_SCHEMA_APPLY_ONLY; 6 stale 04-09 'submitted'
+paper-order rows block only the ACTIVATION attestation. F-BAN
+BLOCKED_OWNER_DECISION; UI BLOCKED_UI_FILE_OWNERSHIP (21 PRs). ⑤/cost/
+canonical-position foundations NOT attempted (recorded, queue unchanged).
+No merge, no deploy, no DB/broker write, no migration apply, no fleet
+activation this run; all new PRs draft.
+
 ## 2026-07-16 — ADJUDICATED: Fable 5 options-entry strategy verification · status:reported
 
 Prompt: `docs/review/fable5-options-entry-strategy-verification-prompt-2026-07-16.md`

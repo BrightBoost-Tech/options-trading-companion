@@ -377,7 +377,13 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   APPLIED to production 2026-07-16 15:51Z ahead of its PR (#1231, draft) —
   **NEVER REAPPLY**; repo file exists for history reconciliation.
   F-MIDDAY-POSITION-READ-FAILOPEN, F-A9-6, F-A9-8: shipped CODE; runtime
-  falsifiers pending (ledger owns them). Draft PRs are tracked in
+  falsifiers pending (ledger owns them). 07-17: #1231/#1236/#1234/#1233
+  MERGED+DEPLOYED at `b3cf45b`; ⚠ the original #1235/#1237 merged into a
+  NON-DEFAULT branch and never reached main — replacements are draft PRs
+  (backlog owns them). F-CREDIT-SIGN (07-15 nightly, HIGH) CONFIRMED at
+  `b3cf45b`, fix in draft — internal-fill credit closes overstate realized
+  P&L until it merges; treat shadow realized_pl for credit internal fills as
+  suspect (§8-class liar until fixed). Draft PRs are tracked in
   docs/backlog.md + audit/ledger.md only — this registry lists
   merged/deployed facts.
 

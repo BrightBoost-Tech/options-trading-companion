@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-05-24 - WAI-ARIA Disclosure pattern for generic accordions
+**Learning:** Native `<button>` elements used as accordions/collapsibles often lack `focus-visible` styles and proper WAI-ARIA disclosure attributes (`aria-expanded`, `aria-controls`), making them difficult to use for keyboard and screen-reader users. While the standard HTML `<details>` and `<summary>` elements exist, they are sometimes hard to style in complex layouts.
+**Action:** When using buttons as custom accordions (e.g., collapsible sections in lists), prefer the design system `Button` (e.g., `<Button variant="ghost">`) over native `<button>` to inherit focus rings, and always include `aria-expanded={isExpanded}` and `aria-controls="content-id"`. Ensure the content region has the corresponding `id="content-id"`.

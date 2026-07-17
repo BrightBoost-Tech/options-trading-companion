@@ -133,3 +133,54 @@ then, follow the procedure below for every PR that touches
 If the migration's PR description explicitly states observation-
 window sequencing (e.g. "apply after Phase 1 verifies clean at
 T+24h"), do NOT apply on merge. Follow the PR's gating exactly.
+
+## Migration-audit methodology: field-level, not filename-level
+
+Discovered 2026-07-16 (PR #1218 `ranking_costs`). PR #1218 began stamping a new
+top-level field, `suggestion["ranking_costs"]`, in
+`analytics/canonical_ranker.py` but shipped **no migration**. A
+filename-vs-history reconciliation (compare `supabase/migrations/*.sql` names
+against `supabase_migrations.schema_migrations`) reported **PASS** — there was
+no new migration file to be missing — while production silently could not
+persist the field: PostgREST returned `PGRST204` ("Could not find the
+'ranking_costs' column of 'trade_suggestions' in the schema cache"),
+`created=0`, the executor processed 0, the row (with its required cost
+provenance) was lost, and `suggestions_open` still completed green.
+
+**The lesson: a filename/history reconciliation cannot see a persisted field
+that never got a migration.** The audit must reconcile at the level of the
+**payload fields the code actually writes**, against BOTH the repository
+schema and the live schema:
+
+1. **Enumerate newly persisted top-level payload fields.** For each table a
+   code path inserts/updates, collect the top-level keys the producer stamps
+   onto the row dict (e.g. every `suggestion["<field>"] = ...` reaching the
+   `trade_suggestions` insert; every `row["<field>"] = ...` reaching its
+   table). Diff against the prior revision to find *newly* added fields.
+
+2. **Reconcile each field against the REPOSITORY schema.** The field must have
+   a committed column — a `CREATE TABLE`/`ALTER TABLE ... ADD COLUMN` in
+   `supabase/migrations/*.sql` — **or** an explicit, sanctioned entry in the
+   producer's droppable/strip list (a deliberate degrade-gracefully shim, not
+   a silent loss). A field that is neither is the #1218 class: fail the audit.
+
+3. **Reconcile each field against the LIVE schema.** Query
+   `information_schema.columns` for the target table and confirm the column is
+   actually present in production (repository-committed ≠ applied — see the
+   filename/history procedure above). A field committed but unapplied is a
+   deploy-ordering gap; a field applied but not committed is drift.
+
+4. **Never accept "no new migration file" as evidence of "no schema change
+   needed."** The absence of a migration is exactly the failure signature when
+   a persisted field was added without one.
+
+5. **Required-provenance fields are never droppable.** A field that carries
+   decision/cost/risk provenance (e.g. `ranking_costs`) must get a real column;
+   silently discarding it via the strip list is not an acceptable resolution.
+
+This methodology is enforced in CI by
+`packages/quantum/tests/test_ranking_costs_schema_contract.py`, which parses the
+canonical ranker's persisted stamps and asserts each has a committed
+`trade_suggestions` column (or a sanctioned droppable entry). Extend that
+contract test to any other producer/table pair as new persisted fields are
+introduced.

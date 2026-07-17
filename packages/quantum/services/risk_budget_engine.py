@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from packages.quantum.common_enums import RegimeState
+from packages.quantum.services.risk_cap_routing import resolve_risk_cap_family
 from packages.quantum.models import SpreadPosition
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.analytics.regime_engine_v3 import GlobalRegimeSnapshot
@@ -282,15 +283,29 @@ class RiskBudgetEngine:
         st = strategy_type.lower()
         base_cap = 0.05 # Default low
 
-        # 1. Exact match
+        # 1. Exact match (family keys passed directly, e.g. 'debit_call')
         if st in regime_caps:
             base_cap = regime_caps[st]
         else:
-            # 2. Substring match
-            for k, v in regime_caps.items():
-                if k in st:
-                    base_cap = v
-                    break
+            # 2. Canonical selector-ID routing (2026-07-16 fix): the
+            # persisted selector IDs never contain the family keys as
+            # substrings ('long_call_debit_spread' contains 'call_debit',
+            # not 'debit_call'; 'short_put_credit_spread' contains
+            # 'put_credit', not 'credit_put'), so every selector-emitted
+            # vertical fell through to the 0.05 base cap. Exact-normalized
+            # resolution to the intended family; a family with no key in
+            # this regime's table (e.g. iron_condor in REBOUND) falls
+            # through to the legacy path below — never an invented cap.
+            _family = resolve_risk_cap_family(st)
+            if _family is not None and _family in regime_caps:
+                base_cap = regime_caps[_family]
+            else:
+                # 3. Legacy substring match (unchanged fallback for
+                # non-canonical strings; genuinely unknown -> base_cap)
+                for k, v in regime_caps.items():
+                    if k in st:
+                        base_cap = v
+                        break
 
         # Conviction Scaling (if needed, but usually this is a hard cap)
         # We'll stick to base caps for budget checks. Conviction scaling is for sizing.

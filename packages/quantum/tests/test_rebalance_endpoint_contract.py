@@ -88,6 +88,27 @@ limiter.enabled = False
 
 client = TestClient(app)
 
+def _diag(resp):
+    """CI-truth diagnostic: why did the request not take the override path?"""
+    import packages.quantum.api as _api
+    from packages.quantum import security as _sec
+    route_dep = None
+    for r in _api.app.routes:
+        if getattr(r, "path", "") == "/rebalance/execute":
+            names = [(d.call.__module__, d.call.__qualname__, id(d.call))
+                     for d in r.dependant.dependencies]
+            route_dep = names
+            break
+    return (
+        f"body={resp.text[:300]!r} "
+        f"same_app={_api.app is app} "
+        f"override_keys={[getattr(k, '__qualname__', k) for k in app.dependency_overrides]} "
+        f"gcu_id={id(get_current_user)} sec_gcu_id={id(_sec.get_current_user)} "
+        f"route_deps={route_dep}"
+    )
+
+
+
 USER_ID = "test-user-rebalance"
 VERTICAL_TICKER = "SPY 2026-12-18 Call Debit Spread"
 CONDOR_TICKER = "QQQ 2026-12-18"
@@ -341,7 +362,7 @@ def test_preview_empty_positions_ok_and_read_only():
     fake_sb = FakeSupabase([])
     with _wired(fake_sb):
         resp = client.post("/rebalance/preview")
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "ok"
     assert body["count"] == 0
@@ -354,7 +375,7 @@ def test_execute_empty_positions_ok_and_read_only():
     fake_sb = FakeSupabase([])
     with _wired(fake_sb):
         resp = client.post("/rebalance/execute")
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "ok"
     assert body["count"] == 0
@@ -372,7 +393,7 @@ def test_preview_vertical_and_condor_returns_trades_without_side_effects():
     with _wired(fake_sb, weights=weights):
         resp = client.post("/rebalance/preview")
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "ok"
     assert body["count"] == 2
@@ -397,7 +418,7 @@ def test_execute_vertical_and_condor_persists_suggestions_no_broker_path():
     with _wired(fake_sb, weights=weights) as handles:
         resp = client.post("/rebalance/execute")
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "ok"
     assert body["count"] == 2
@@ -433,7 +454,7 @@ def test_execute_compute_failure_returns_typed_500_no_leak():
     with _wired(fake_sb, compute_explodes=True):
         with mock.patch.dict(os.environ, {"APP_ENV": "production"}):
             resp = client.post("/rebalance/execute")
-    assert resp.status_code == 500
+    assert resp.status_code == 500, _diag(resp)
     assert resp.json()["detail"] == "Risk budget computation failed"
     assert _ExplodingRiskBudgetEngine.SECRET not in resp.text
     # Failure never reaches the write path
@@ -445,7 +466,7 @@ def test_preview_compute_failure_returns_typed_error_payload_no_leak():
     with _wired(fake_sb, compute_explodes=True):
         with mock.patch.dict(os.environ, {"APP_ENV": "production"}):
             resp = client.post("/rebalance/preview")
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "error"
     assert body["message"] == "Risk budget computation failed"
@@ -463,7 +484,7 @@ def test_execute_optimizer_failure_returns_typed_500_no_leak():
     with _wired(fake_sb, opt_exc=RuntimeError(OPT_SECRET)):
         with mock.patch.dict(os.environ, {"APP_ENV": "production"}):
             resp = client.post("/rebalance/execute")
-    assert resp.status_code == 500
+    assert resp.status_code == 500, _diag(resp)
     assert resp.json()["detail"] == "Optimization failed"
     assert OPT_SECRET not in resp.text
     assert _tables_touched(fake_sb) == {"positions"}
@@ -474,7 +495,7 @@ def test_preview_optimizer_failure_returns_typed_error_payload_no_leak():
     with _wired(fake_sb, opt_exc=RuntimeError(OPT_SECRET)):
         with mock.patch.dict(os.environ, {"APP_ENV": "production"}):
             resp = client.post("/rebalance/preview")
-    assert resp.status_code == 200
+    assert resp.status_code == 200, _diag(resp)
     body = resp.json()
     assert body["status"] == "error"
     assert body["message"] == "Optimization failed"

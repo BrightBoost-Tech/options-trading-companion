@@ -2376,19 +2376,38 @@ class PaperExitEvaluator:
 
         # --- Internal fill (internal_paper or Alpaca fallback) ---
         # 06-12 (#1017 class): the fill prices at the EXECUTABLE side, not
-        # the triggering mid. Sign convention unchanged — achievable_close
-        # comes from the same finalize_mark stack as current_mark. Fail-soft:
-        # mid fallback carries an explicit fill_quality flag so learning can
-        # weight or exclude; this step can never abort the close.
+        # the triggering mid. Fail-soft: mid fallback carries an explicit
+        # fill_quality flag so learning can weight or exclude; this step can
+        # never abort the close.
+        #
+        # F-CREDIT-SIGN (07-15 audit, A2): the selected price is SIGNED —
+        # achievable_close/current_mark come from the finalize_mark stack,
+        # where negative means closing the structure pays a net debit (every
+        # credit-structure buy-back). EVERY consumer below is contractually
+        # UNSIGNED-magnitude + structural-direction: avg_fill_price (a broker
+        # fill is always positive), cash_delta (signed by close `side`),
+        # ledger emit_fill, and synth_legs.filled_avg_price → close_math.
+        # compute_realized_pl (signs by LEG ACTION; docstring requires a
+        # positive per-contract price). Feeding the signed value negated
+        # twice on credit closes — realized_pl error 2×|mark|×qty×100 (07-14
+        # QQQ c1c9ad04 booked +1,815.96 on a −224.04 close; the shadow cash
+        # ledger was credited +1,020 for a buy-back that pays 1,020). #1056
+        # (06-11) fixed this exact class at the broker-LIMIT seam; the FILL
+        # seam is normalized through the SAME canonical owner of "unsigned
+        # magnitude + structural direction": _close_limit_and_direction.
         _mid_reference = float(exit_price)
-        exit_price, _fill_quality = _select_internal_fill_price(
+        _signed_fill, _fill_quality = _select_internal_fill_price(
             position, exit_price
+        )
+        exit_price, _ = _close_limit_and_direction(
+            _signed_fill, qty, len(close_legs)
         )
         logger.warning(
             f"[INTERNAL_FILL] position={position_id[:8]} fill_quality="
             f"{_fill_quality} mid={_mid_reference} executable_fill="
-            f"{round(exit_price, 4)} "
-            f"delta={round((exit_price - _mid_reference), 4)}"
+            f"{round(_signed_fill, 4)} "
+            f"delta={round((_signed_fill - _mid_reference), 4)} "
+            f"fill_magnitude={round(exit_price, 4)}"
         )
 
         # CLOSE_FILL_GAP (internal/shadow + Alpaca-fallback fill): record the

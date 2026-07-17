@@ -34,13 +34,20 @@ sys.modules.setdefault(
 )
 
 from packages.quantum.services.options_level_preflight import (  # noqa: E402
+    ACCOUNT_LEVEL_TTL_SECONDS,
+    FUTURE_CAPABILITY_IDS,
     STRATEGY_MIN_LEVEL,
     UNKNOWN_STRATEGY_MIN_LEVEL,
     EntryOptionsLevelInsufficient,
     EntryOptionsLevelUnavailable,
+    _assert_permission_map_locked,
+    _permission_map_drift,
     check_options_level,
+    get_account_with_ttl,
+    is_no_trade_verdict,
     normalize_strategy_id,
     required_options_level,
+    reset_account_cache,
 )
 
 
@@ -208,6 +215,200 @@ class TestStrategyMinLevelMap(unittest.TestCase):
     def test_map_covers_all_selector_ids_exactly_normalized(self):
         for sid in SELECTOR_STRATEGY_IDS:
             self.assertIn(normalize_strategy_id(sid), STRATEGY_MIN_LEVEL)
+
+
+class TestIdentityIntegration(unittest.TestCase):
+    """The preflight consumes the CANONICAL identity source
+    (analytics/strategy_identity) — no duplicate normalization, no second
+    selector registry, drift-locked permission map."""
+
+    def test_normalize_is_the_canonical_function(self):
+        """The module re-exports strategy_identity's normalize — it must be
+        the SAME object, not a copy (the duplicate-normalization class)."""
+        from packages.quantum.analytics import strategy_identity as si
+        self.assertIs(normalize_strategy_id, si.normalize_strategy_id)
+
+    def test_tradable_domain_derived_from_strategy_identity(self):
+        """Every canonical tradable id has an explicit mapping, derived
+        from TRADABLE_IDS (the selector registry), not a local list — and
+        all of today's tradables are multi-leg spreads → L3."""
+        from packages.quantum.analytics.strategy_identity import TRADABLE_IDS
+        for tid in TRADABLE_IDS:
+            with self.subTest(strategy=tid):
+                self.assertIn(tid, STRATEGY_MIN_LEVEL)
+                self.assertEqual(STRATEGY_MIN_LEVEL[tid], 3)
+
+    def test_future_capability_ids_excluded_from_drift_domain(self):
+        """covered_call/CSP + long premium are future-capability keys —
+        allowed in the map, declared, and NOT selector-tradable today."""
+        from packages.quantum.analytics.strategy_identity import TRADABLE_IDS
+        for fid in ("long_call", "long_put", "covered_call",
+                    "cash_secured_put"):
+            self.assertIn(fid, FUTURE_CAPABILITY_IDS)
+            self.assertNotIn(fid, TRADABLE_IDS)
+            self.assertIn(fid, STRATEGY_MIN_LEVEL)
+
+    def test_drift_lock_clean_on_current_state(self):
+        missing, unexplained = _permission_map_drift()
+        self.assertEqual(missing, frozenset())
+        self.assertEqual(unexplained, frozenset())
+        _assert_permission_map_locked()  # must not raise
+
+    def test_drift_lock_trips_on_new_tradable_missing_from_map(self):
+        """A newly added selector strategy absent from the permission map
+        must fail LOUDLY (import-time RuntimeError), never be silently
+        omitted."""
+        from packages.quantum.analytics.strategy_identity import TRADABLE_IDS
+        drifted = frozenset(TRADABLE_IDS) | {"brand_new_selector_spread"}
+        missing, _ = _permission_map_drift(tradable_ids=drifted)
+        self.assertEqual(missing, frozenset({"brand_new_selector_spread"}))
+        with self.assertRaises(RuntimeError) as cm:
+            _assert_permission_map_locked(tradable_ids=drifted)
+        self.assertIn("brand_new_selector_spread", str(cm.exception))
+
+    def test_drift_lock_trips_on_unexplained_map_key(self):
+        """A map key that is neither tradable nor declared future-capability
+        is a typo/stale entry/second registry — the lock must trip."""
+        bad_map = dict(STRATEGY_MIN_LEVEL)
+        bad_map["mystery_structure"] = 2
+        _, unexplained = _permission_map_drift(permission_map=bad_map)
+        self.assertEqual(unexplained, frozenset({"mystery_structure"}))
+        with self.assertRaises(RuntimeError):
+            _assert_permission_map_locked(permission_map=bad_map)
+
+    def test_hold_cash_are_not_in_the_permission_map(self):
+        """No-trade verdicts must never look like permissioned structures."""
+        for nid in ("hold", "cash"):
+            self.assertNotIn(nid, STRATEGY_MIN_LEVEL)
+            self.assertNotIn(nid, FUTURE_CAPABILITY_IDS)
+
+
+class TestNoTradeVerdicts(unittest.TestCase):
+    """HOLD/CASH: not option structures — no requirement, never evaluated
+    against the account, never treated as submitted structures."""
+
+    def test_is_no_trade_verdict_truth_table(self):
+        for nid in ("HOLD", "hold", "CASH", "cash", " Hold "):
+            self.assertTrue(is_no_trade_verdict(nid), nid)
+        for sid in ("IRON_CONDOR", "long_call", "unknown_thing", "", None):
+            self.assertFalse(is_no_trade_verdict(sid), sid)
+
+    def test_required_level_is_none_for_no_trade(self):
+        self.assertIsNone(required_options_level("HOLD"))
+        self.assertIsNone(required_options_level("cash"))
+
+    def test_check_options_level_never_evaluates_no_trade(self):
+        """Even is_open_order=True with the WORST account payloads: a
+        no-trade verdict returns None (no requirement) and never raises —
+        it is not a structure that could be submitted."""
+        for nid in ("HOLD", "CASH"):
+            for account in (_account(effective=None), {}, None,
+                            _account(effective=0),
+                            _account(effective=2)):
+                with self.subTest(strategy=nid, account=account):
+                    self.assertIsNone(check_options_level(
+                        nid, is_open_order=True, account=account,
+                    ))
+
+
+class _CountingClient:
+    """Fake broker client: counts get_account calls; programmable payload."""
+
+    def __init__(self, payload=None):
+        self.calls = 0
+        self.payload = payload if payload is not None else {
+            "options_trading_level": 3, "options_approved_level": 3,
+        }
+        self.raise_on_next = None
+
+    def get_account(self):
+        self.calls += 1
+        if self.raise_on_next is not None:
+            err, self.raise_on_next = self.raise_on_next, None
+            raise err
+        return self.payload
+
+
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+class TestAccountTTLCache(unittest.TestCase):
+    """get_account_with_ttl: 60s TTL (the equity_state pattern), keyed per
+    client identity, bypass-safe (failure/None never cached)."""
+
+    def setUp(self):
+        reset_account_cache()
+
+    def tearDown(self):
+        reset_account_cache()
+
+    def test_ttl_is_60_seconds_matching_equity_state(self):
+        self.assertEqual(ACCOUNT_LEVEL_TTL_SECONDS, 60.0)
+
+    def test_reuse_within_ttl_single_underlying_read(self):
+        client = _CountingClient()
+        a1 = get_account_with_ttl(client)
+        a2 = get_account_with_ttl(client)
+        self.assertEqual(client.calls, 1)
+        self.assertIs(a1, a2)
+
+    def test_expiry_after_ttl_rereads(self):
+        import packages.quantum.services.options_level_preflight as olp
+        clock = _Clock()
+        client = _CountingClient()
+        with patch.object(olp.time, "monotonic", clock):
+            get_account_with_ttl(client)
+            clock.t += ACCOUNT_LEVEL_TTL_SECONDS - 0.5  # still fresh
+            get_account_with_ttl(client)
+            self.assertEqual(client.calls, 1)
+            clock.t += 1.0  # now past the TTL
+            get_account_with_ttl(client)
+            self.assertEqual(client.calls, 2)
+
+    def test_read_failure_never_cached_next_call_rereads(self):
+        client = _CountingClient()
+        client.raise_on_next = RuntimeError("broker down")
+        with self.assertRaises(RuntimeError):
+            get_account_with_ttl(client)
+        self.assertEqual(client.calls, 1)
+        # Recovery: the failure was not cached — the next call re-reads
+        # and succeeds.
+        out = get_account_with_ttl(client)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(out["options_trading_level"], 3)
+        # And THAT successful read is now cached.
+        get_account_with_ttl(client)
+        self.assertEqual(client.calls, 2)
+
+    def test_none_payload_never_cached(self):
+        client = _CountingClient(payload=None)
+        client.payload = None
+        self.assertIsNone(get_account_with_ttl(client))
+        self.assertIsNone(get_account_with_ttl(client))
+        self.assertEqual(client.calls, 2)  # None re-reads every time
+        client.payload = {"options_trading_level": 3}
+        self.assertEqual(
+            get_account_with_ttl(client)["options_trading_level"], 3
+        )
+        self.assertEqual(client.calls, 3)
+
+    def test_keyed_per_client_identity(self):
+        """Two distinct clients never share an entry (paper/live safety —
+        production is a singleton, but the key must not conflate)."""
+        c1 = _CountingClient({"options_trading_level": 3})
+        c2 = _CountingClient({"options_trading_level": 1})
+        self.assertEqual(
+            get_account_with_ttl(c1)["options_trading_level"], 3
+        )
+        self.assertEqual(
+            get_account_with_ttl(c2)["options_trading_level"], 1
+        )
+        self.assertEqual((c1.calls, c2.calls), (1, 1))
 
 
 class TestCheckOptionsLevel(unittest.TestCase):

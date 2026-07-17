@@ -34,6 +34,9 @@ _sizing_mod = importlib.import_module(
     "packages.quantum.services.sizing_engine"
 )
 load_strategy_lifecycle_states = _progression_mod.load_strategy_lifecycle_states
+LifecycleReadResult = _progression_mod.LifecycleReadResult
+RECOGNIZED_LIFECYCLE_STATES = _progression_mod.RECOGNIZED_LIFECYCLE_STATES
+MALFORMED_STATE_SENTINEL = _progression_mod.MALFORMED_STATE_SENTINEL
 calculate_sizing = _sizing_mod.calculate_sizing
 
 assert callable(load_strategy_lifecycle_states), (
@@ -53,8 +56,11 @@ ORCHESTRATOR_PATH = (
 
 
 class TestLoadStrategyLifecycleStates(unittest.TestCase):
-    """Helper test: cycle-cached read returns dict mapping strategy
-    name -> current_state, fails soft to empty dict on read errors.
+    """Loader test (2026-07-16 fail-closed tightening): the read is
+    TYPED — a query failure, an empty table, and a clean read are
+    distinct statuses. The loader itself never raises; the entry gate
+    fails closed on anything but a clean recognized row (route-level
+    proof lives in test_lifecycle_fail_closed_route.py).
     """
 
     def _make_supabase(self, rows):
@@ -67,31 +73,128 @@ class TestLoadStrategyLifecycleStates(unittest.TestCase):
         sb.table.return_value = chain
         return sb
 
-    def test_full_seed_returned_as_dict(self):
+    def test_full_seed_returned_as_ok_states(self):
         sb = self._make_supabase([
             {"strategy_name": "IRON_CONDOR", "current_state": "live_full"},
             {"strategy_name": "LONG_CALL_DEBIT_SPREAD", "current_state": "experimental"},
             {"strategy_name": "FOO", "current_state": "designed"},
         ])
         result = load_strategy_lifecycle_states(sb)
-        self.assertEqual(result, {
+        self.assertEqual(result.status, "ok")
+        self.assertIsNone(result.error)
+        self.assertEqual(result.malformed_rows, 0)
+        self.assertEqual(result.states, {
             "IRON_CONDOR": "live_full",
             "LONG_CALL_DEBIT_SPREAD": "experimental",
             "FOO": "designed",
         })
 
-    def test_empty_table_returns_empty_dict(self):
+    def test_empty_table_is_typed_empty_not_ok(self):
         sb = self._make_supabase([])
         result = load_strategy_lifecycle_states(sb)
-        self.assertEqual(result, {})
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.states, {})
 
-    def test_db_failure_returns_empty_dict(self):
+    def test_db_failure_is_typed_failed_with_error(self):
         sb = MagicMock()
         sb.table.return_value.select.return_value.execute.side_effect = (
             RuntimeError("simulated DB failure")
         )
         result = load_strategy_lifecycle_states(sb)
-        self.assertEqual(result, {})
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.states, {})
+        self.assertIn("simulated DB failure", result.error)
+
+    def test_non_list_payload_is_typed_failed(self):
+        """A MagicMock/garbage ``.data`` payload (the shape naive mocks
+        produce) is a malformed READ — typed 'failed', never a raise
+        into the scanner and never a silent live_full."""
+        sb = self._make_supabase([])
+        sb.table.return_value.execute.return_value = MagicMock(
+            data=MagicMock()
+        )
+        result = load_strategy_lifecycle_states(sb)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.states, {})
+        self.assertIn("non-list", result.error)
+
+    def test_malformed_rows_counted_and_fail_closed_shape(self):
+        """Non-dict rows and rows without a usable strategy_name are
+        dropped (strategy then classifies as missing); a usable name
+        with an unusable state keeps attribution under the sentinel
+        (classifies as invalid-state). Well-formed rows are unaffected.
+        """
+        sb = self._make_supabase([
+            {"strategy_name": "IRON_CONDOR", "current_state": "live_full"},
+            "not-a-dict",
+            {"current_state": "live_full"},              # no name
+            {"strategy_name": None, "current_state": "live_full"},
+            {"strategy_name": "LONG_CALL", "current_state": None},
+        ])
+        result = load_strategy_lifecycle_states(sb)
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.malformed_rows, 4)
+        self.assertEqual(result.states["IRON_CONDOR"], "live_full")
+        self.assertEqual(
+            result.states["LONG_CALL"], MALFORMED_STATE_SENTINEL
+        )
+        self.assertNotIn(MALFORMED_STATE_SENTINEL,
+                         RECOGNIZED_LIFECYCLE_STATES)
+
+
+class TestClassifyForEntry(unittest.TestCase):
+    """LifecycleReadResult.classify_for_entry — the single
+    classification the scanner's entry gate consumes. Exactly one of
+    (state, rejection_reason) is non-None; every non-clean shape maps
+    to a DISTINCT typed rejection reason.
+    """
+
+    def test_failed_read_is_unavailable(self):
+        r = LifecycleReadResult(states={}, status="failed", error="boom")
+        self.assertEqual(
+            r.classify_for_entry("LONG_CALL_DEBIT_SPREAD"),
+            (None, "strategy_lifecycle_unavailable"),
+        )
+
+    def test_empty_table_is_empty_distinct_from_unavailable(self):
+        r = LifecycleReadResult(states={}, status="empty")
+        state, reason = r.classify_for_entry("LONG_CALL_DEBIT_SPREAD")
+        self.assertIsNone(state)
+        self.assertEqual(reason, "strategy_lifecycle_empty")
+        self.assertNotEqual(reason, "strategy_lifecycle_unavailable")
+
+    def test_missing_strategy_row_is_missing(self):
+        r = LifecycleReadResult(
+            states={"IRON_CONDOR": "live_full"}, status="ok"
+        )
+        self.assertEqual(
+            r.classify_for_entry("LONG_CALL_DEBIT_SPREAD"),
+            (None, "strategy_lifecycle_missing"),
+        )
+
+    def test_unrecognized_state_is_invalid_state(self):
+        r = LifecycleReadResult(
+            states={"LONG_CALL_DEBIT_SPREAD": "foo"}, status="ok"
+        )
+        self.assertEqual(
+            r.classify_for_entry("LONG_CALL_DEBIT_SPREAD"),
+            (None, "strategy_lifecycle_invalid_state"),
+        )
+
+    def test_malformed_state_sentinel_is_invalid_state(self):
+        r = LifecycleReadResult(
+            states={"LONG_CALL_DEBIT_SPREAD": MALFORMED_STATE_SENTINEL},
+            status="ok",
+        )
+        self.assertEqual(
+            r.classify_for_entry("LONG_CALL_DEBIT_SPREAD"),
+            (None, "strategy_lifecycle_invalid_state"),
+        )
+
+    def test_all_four_recognized_states_pass_through(self):
+        for s in ("designed", "experimental", "live_full", "deprecated"):
+            r = LifecycleReadResult(states={"X": s}, status="ok")
+            self.assertEqual(r.classify_for_entry("X"), (s, None))
 
 
 class TestSizingCapAtEachState(unittest.TestCase):
@@ -172,6 +275,67 @@ class TestSizingCapAtEachState(unittest.TestCase):
         self.assertFalse(result["experimental_capped"])
 
 
+class TestSizingUnrecognizedStateFailClosed(unittest.TestCase):
+    """2026-07-16 defense-in-depth: the scanner now rejects
+    unrecognized lifecycle states before emission; if one reaches
+    sizing anyway, contracts=0 with a typed reason (a zero-contract
+    result vetoes the entry upstream). None (legacy no-tag callers)
+    keeps current behavior byte-identical.
+    """
+
+    def _size(self, lifecycle_state, **overrides):
+        kwargs = dict(
+            account_buying_power=10000.0,
+            max_loss_per_contract=200.0,
+            collateral_required_per_contract=200.0,
+            risk_budget_dollars=2000.0,    # would size to ~10 contracts
+            max_contracts=100,
+            strategy="LONG_CALL_DEBIT_SPREAD",
+            lifecycle_state=lifecycle_state,
+        )
+        kwargs.update(overrides)
+        return calculate_sizing(**kwargs)
+
+    def test_unrecognized_state_zero_contracts_typed_reason(self):
+        result = self._size("foo")
+        self.assertEqual(result["contracts"], 0)
+        self.assertIn("lifecycle_state_unrecognized", result["reason"])
+        self.assertIn("'foo'", result["reason"])
+        self.assertIs(result["lifecycle_unrecognized"], True)
+        # Zero-size propagates to every capital total.
+        self.assertEqual(result["capital_required"], 0.0)
+        self.assertEqual(result["max_loss_total"], 0.0)
+
+    def test_malformed_sentinel_state_also_zero_sized(self):
+        result = self._size("__malformed__")
+        self.assertEqual(result["contracts"], 0)
+        self.assertIn("lifecycle_state_unrecognized", result["reason"])
+
+    def test_none_legacy_result_has_no_new_key(self):
+        """Healthy-path bytes: the veto key appears ONLY when the veto
+        fired — legacy/None and recognized-state results carry the
+        exact pre-tightening dict shape.
+        """
+        for state in (None, "live_full", "experimental", "designed",
+                      "deprecated"):
+            result = self._size(state)
+            self.assertNotIn(
+                "lifecycle_unrecognized", result,
+                f"unexpected veto key for lifecycle_state={state!r}",
+            )
+            self.assertNotIn("lifecycle_state_unrecognized",
+                             result["reason"])
+
+    def test_recognized_states_sizing_unchanged(self):
+        """Byte-comparison style: recognized states produce the same
+        contract counts as before the guard (live_full/designed/
+        deprecated full-size; experimental capped at 1)."""
+        self.assertGreater(self._size("live_full")["contracts"], 1)
+        self.assertGreater(self._size("designed")["contracts"], 1)
+        self.assertGreater(self._size("deprecated")["contracts"], 1)
+        self.assertEqual(self._size("experimental")["contracts"], 1)
+
+
 class TestScannerLifecycleGate(unittest.TestCase):
     """Source-level guards on the scanner candidate-emission gate."""
 
@@ -182,8 +346,18 @@ class TestScannerLifecycleGate(unittest.TestCase):
     def test_lifecycle_states_loaded_once_per_cycle(self):
         self.assertIn("load_strategy_lifecycle_states", self.src)
         # Outer fetch happens inside scan_for_opportunities, before
-        # the per-symbol fan-out.
-        self.assertIn("lifecycle_states_map", self.src)
+        # the per-symbol fan-out. 2026-07-16: the read is TYPED
+        # (lifecycle_read), no longer a bare dict defaulted to {}.
+        self.assertIn("lifecycle_read", self.src)
+        self.assertNotIn("lifecycle_states_map", self.src)
+
+    def test_gate_carries_all_typed_fail_closed_reasons(self):
+        """Structural guard: every typed rejection reason is present at
+        the gate (the EXECUTING proof is the route suite in
+        test_lifecycle_fail_closed_route.py — this is drift detection
+        only)."""
+        self.assertIn('"strategy_lifecycle_unavailable"', self.src)
+        self.assertIn("classify_for_entry", self.src)
 
     def test_designed_and_deprecated_filtered_at_emission(self):
         """The scanner must short-circuit before constructing the

@@ -126,6 +126,219 @@ falsifiers remain in the ledger.
 
 ---
 
+## 2026-07-16 — FABLE 5 OPTIONS-ENTRY STRATEGY VERIFICATION (adjudicated)
+
+Read-only docs-lane audit at `b95d3a3` (== deployed SHA on BE/worker/worker-
+background, verified). Results:
+**`docs/review/fable5-options-entry-strategy-verification-results-2026-07-16.md`**
+(H1–H18 dispositions, capability manifest, funnel matrix, account census
+$2,067.86 flat/small/level-3 re-read 07-16). Ledger 07-16 Fable-5 entry is
+exclusion memory. **DEDUPLICATED — deliberately NOT re-filed:** credit-EV≡0
+(⑤ owns it; now numerically proven + 0 credit suggestions all-time) · condor
+mis-rank (A6-3/⑤) · cost-basis splits (multi-basis phase 2; the three bases
+were measured live at scanner/ranker/stage gates) · qty>1 roundtrip basis (E2
+observe item) · 07-06 micro-tier storm (resolved M4 item 0) · executor
+legacy-filter skip (documented in-code, #1126-family memory) ·
+`entries_paused` fail-open polarity (#1097 doctrine). **"Actual next
+priorities" ordering: UNCHANGED** — everything below is P2/RESEARCH beneath
+the standing safety lane and ①–⑦.
+
+- **F-STRAT-ID-CONSUMERS (P2 · extends canonical-position remainder ·
+  VERIFIED-CODE).** Strategy-identifier drift has two behavior-relevant
+  consumers: (a) `LossMinimizer.get_strategy_type` classifies
+  `LONG_CALL/PUT_DEBIT_SPREAD` as naked `LONG_CALL`/`LONG_PUT` because
+  `StrategyType` has no debit-spread member (`common_enums.py:13-19`,
+  `loss_minimizer.py:57-67`) — production-wired on the morning deep-loser and
+  adaptive-caps paths (`workflow_orchestrator.py:877-896,4431-4472`); wrong
+  payoff class for the two most-produced strategies, latent while flat. (b)
+  `calculate_strategy_cap` substring-match misses `long_call_debit_spread`
+  (reversed token order) → 0.05 floor cap instead of the intended 0.15
+  (`risk_budget_engine.py:282-293`) — fail-TIGHT, wrong basis. Fix tightens
+  nothing/loosens nothing intentionally: it makes consumers resolve the
+  selector's actual identifiers (or consume the canonical position model — do
+  NOT rebuild the shipped max-loss slice). Accept: both consumers resolve
+  every selector-emitted identifier correctly + one crosswalk test pinning
+  each producer identifier to exactly one canonical strategy (route-driven,
+  not source-string). Falsifier: a morning-cycle loss analysis of a losing
+  debit spread using a naked-long payoff. · origin Fable-5 H18.
+- **F-BAN-INTEGRITY (P2 · NEW · VERIFIED-CODE + VERIFIED-RUNTIME).**
+  `settings.banned_strategies` is a phantom feature: NO migration defines the
+  column (repo grep, all of `supabase/migrations/`); the production column
+  exists as untracked drift (ARRAY, `settings` has 0 rows); the sole reader
+  silently degrades to `[]` at `logger.debug`
+  (`workflow_orchestrator.py:2549-2563`); zero write surface (no UI/API/SQL);
+  downstream enforcement (StrategyPolicy → selector → scanner double-check) is
+  real, live-routed, and permanently fed `[]`. OWNER DECISION: build it
+  end-to-end (migration + write surface + typed loud read failure + a route
+  test proving a persisted ban blocks and a failed read never silently
+  authorizes) OR remove the dead read+enforcement. Controls unchanged either
+  way today (no ban has ever existed). Drift facet strengthens the existing
+  migration-drift name-normalized allowlist item. Falsifier: a persisted ban
+  row that fails to block on the scheduled route. · origin Fable-5 H12.
+- **F-OPTIONS-LEVEL-PREFLIGHT (P2 · NEW · VERIFIED-CODE; account re-read
+  VERIFIED-RUNTIME).** The broker wrapper's curated dict drops
+  `options_approved_level`/`options_trading_level`
+  (`alpaca_client.py:252-267`; repo-wide, the only "level" hit is a log
+  string, `cash_service.py:119`); no strategy→minimum-level preflight exists;
+  `_TERMINAL_REJECT_MARKERS` has no permission bucket
+  (`alpaca_order_handler.py:56-61`) so a level rejection would burn 3 retries
+  then land `needs_manual_review`. Alpaca mapping (docs, 2026-07-16): L1
+  covered call/CSP · L2 +long call/put · L3 +spreads; account approved=3,
+  effective=3 → LATENT (every shipped structure is L3-covered). Fix
+  TIGHTENS (entries fail closed on missing/insufficient level; exits
+  untouched). Accept: both levels serialized distinctly; per-strategy min-level
+  preflight at the entry stage seam; permission-shaped rejects classified
+  terminal; missing field → entries reject loudly. Falsifier: a broker
+  permission rejection observed being retried as transient. · origin Fable-5 H9.
+- **F-LIFECYCLE-TYPED-DEGRADE (P2 · NEW · VERIFIED-CODE · HARD TRIGGER:
+  before any `strategy_lifecycle_states` row leaves `live_full`).** Loader
+  fail-opens to `live_full` on table-missing/query-throw/empty
+  (`progression_service.py:190-224` returns `{}`); missing row → `live_full`
+  (`options_scanner.py:3918-3920`); malformed/unknown state is neither
+  filtered nor capped (`:3921`, `sizing_engine.py:224`) — documented as
+  intentional. Inert today: exactly 5 DB rows, all `live_full` (DB-verified
+  07-16); exits are lifecycle-independent (verified), so entry fail-closed
+  cannot strand exits. Wiring is pinned only by source-string tests
+  (`test_lifecycle_sizing_cap.py:175-229`). Fix TIGHTENS the failure path
+  only. Accept: typed loader failure distinguishes failed-read from
+  empty-table; unknown state fails closed for ENTRIES (cap or exclude);
+  origin-injected route test (query throws → no full-size entry emitted).
+  Falsifier: DB blip during a cycle with an `experimental` row → full-size
+  entry. · origin Fable-5 H11.
+- **F-UI-CAPABILITY-HONESTY (P2 · NEW · VERIFIED-CODE).** The primary "New
+  Trade" nav CTA (`DashboardLayout.tsx:66-70`) leads to a `Math.random()`
+  mock validator with a 17-month-stale example expiry and zero network calls
+  (`compose/page.tsx:17-35`); its dropdown advertises `covered_call`, which
+  has ZERO backend hits repo-wide; `GET /validation/self-assessment` returns a
+  hardcoded placeholder (`validation_endpoints.py:144-177`); registry
+  metadata over-advertises (9 keys; 5 have no live producer; keys match NO
+  persisted strategy string). Rider: UI-orphaned arbitrary-ticket endpoints
+  `/paper/order/stage` + `/paper/execute` accept out-of-set structures incl.
+  1-leg naked at the stage seam (leg-count check only,
+  `paper_endpoints.py:91-141`) — still gated by #1038/#1101 but not by
+  strategy set/phase/lifecycle. Accept: Compose wired-or-labeled-or-removed;
+  dead options removed; orphan endpoints strategy-set-checked at the stage
+  seam or removed; TradeInbox "no live execution" copy reflects server truth.
+  No trading behavior change. · origin Fable-5 H17/H2/H1-rider.
+- **F-SELECTOR-ROUTE-TESTS (P2 · NEW · VERIFIED-TEST-REACH gap).** The
+  production selector path `get_candidates` (`strategy_selector.py:241-401`)
+  and the IRON_CONDOR phase gate (`:372-387`) have ZERO executing tests
+  (`determine_strategy` — off the production route — is the only selector
+  method tested); tier-boundary tests pin the legacy ~3% number ($38.88),
+  not the production allocator value (~$360 at $1,000). Accept: route tests
+  drive `scan_for_opportunities` → `get_candidates` (pool + phase exclusion)
+  and the allocator-path boundary numbers; §9 doctrine (drive entrypoint,
+  assert output). · origin Fable-5 H1/H7/H10 test-reach.
+- **Funnel telemetry phase 2 — EXTENDED (not re-filed):** add (a) a typed
+  `strategy_phase_excluded` rejection distinct from
+  `strategy_hold_no_candidates` (today conflated,
+  `options_scanner.py:3115-3120`; only a filtered INFO line differs), and
+  (b) `suggestion_rejections.strategy_key` population — NULL on 5,076/5,076
+  rows in the last 14d, so per-strategy rejection attribution is currently
+  impossible. · origin Fable-5 H10/H18.
+- **F-TIER-CLIFF-REVIEW (RESEARCH · owner decision · VERIFIED-CODE).** The
+  micro 90%-per-trade doctrine is documented operator intent
+  (`small_account_compounder.py:29-30`, `docs/small_tier_allocation.md` §6,
+  `docs/risk_math.md:29-33`) but produces a risk-RAISING discontinuity
+  crossing DOWN through $1,000: NORMAL $360→$900 (2.5×), SHOCK $50→$450
+  (9× — micro bypasses the 5% shock global cap, `risk_budget_engine.py:465`
+  vs `:468`); a second, downward cliff sits at $5,000 (~$720→$112). No doc
+  reconciles the drawdown-through-$1,000 direction. NOT a defect filing —
+  an owner review: affirm / taper / SHOCK-gate. NEVER ad-hoc-adjust (existing
+  loss-limit-coherence doctrine). Current equity $2,067.86. · origin Fable-5 H7.
+- **F-SINGLE-LEG-EXPERIMENTAL (RESEARCH · owner-gated · VERIFIED-CODE).**
+  Single-leg long calls/puts are supported at EVERY seam except candidate
+  generation (registry/EV-with-cap/PoP/sizing/staging/broker-1-leg/close all
+  verified; the missing piece is one `get_candidates` pool entry emitting a
+  1-element legs list). Prerequisites before any build: scanner primitive
+  `max_profit=inf` reconciled with the EV cap (`options_scanner.py:2070,2138`),
+  F-OPTIONS-LEVEL-PREFLIGHT, F-LIFECYCLE-TYPED-DEGRADE (it would be the first
+  real user of the `experimental` 1-contract cap). Broker level 2 satisfied.
+  Strategy additions stay BEHIND integrity repairs. · origin Fable-5 H14.
+- **Pending verification (ledger owns):** deployed `CONDOR_EV_MODEL` +
+  tail-constant read-back — the ⑤ charter text says "tail deployed" with
+  constants 0.6/0.35 that match NO code default (`options_scanner.py:214-216`
+  defaults: strict / 1.00 / 0.50); reconcile by operator env read-back
+  (names-only hygiene), then correct whichever side is stale. · origin
+  Fable-5 H5.
+
+### 2026-07-16 POST-CLOSE SPRINT ADDENDUM (same-day; draft PRs = build-pending, NOT shipped)
+
+- **CONDOR_EV_MODEL pending-verification CLOSED**: deployed env read back on BOTH
+  workers (names+these values only): `tail` / severity `0.35` / prob-mult `0.6` —
+  the ⑤ charter text was CORRECT; the code defaults (`strict`/0.50/1.00) are the
+  divergent side. VERIFIED-DEPLOYMENT 2026-07-16 ~23:45Z.
+- **Blast-radius correction to F-STRAT-ID-CONSUMERS** (build found > audit): the
+  cap-key miss is **4-wide** (both credit verticals also fell to 0.05 —
+  `put_credit`/`call_credit` token order); and `LossMinimizer.get_strategy_type`
+  has **zero production callers** at `b95d3a3` (orchestrator calls
+  `analyze_position`/`generate_guardrail_policy`, both strategy-agnostic) — the
+  misclassification was latent-orphan, not live-wired; the live delta of the fix
+  is cap ROUTING only (values untouched; looser NORMAL debit 0.05→0.15, tighter
+  SHOCK credit 0.05→0.02).
+- **Same-cycle provenance finding (Row B) — root-caused + fixed in PR #1231's
+  branch**: second writer = policy-lab cohort clone (`_clone_suggestion_for_cohort`)
+  omitted `ranking_costs`/`code_sha` on live-executable pending rows; fix inherits
+  ranking_costs, stamps fresh code_sha, NULL-inherits legacy (never fabricates);
+  route-tested against the real fork. W4 rebalance writer documented inapplicable
+  (`cohort_name` NULL → never fetched by the per-cohort executor). A successful
+  under-stamped clone was invisible to every truth gate — now pinned by test.
+- **PR #1231 migration**: `20260716155023` was APPLIED to production ~15:51Z
+  2026-07-16 (operator override after the live 14:49Z insert failure;
+  `migration_apply` receipt in risk_alerts). **Never reapply**; the PR lands the
+  file for history reconciliation + schema-contract test. CI green at attempt 2
+  (coverage-artifact upload transient).
+- **Draft PRs opened (build-pending)**: #1234 strategy-identity crosswalk +
+  selector route tests (F-STRAT-ID-CONSUMERS + F-SELECTOR-ROUTE-TESTS) · #1235
+  options-level preflight (F-OPTIONS-LEVEL-PREFLIGHT) · #1236 lifecycle typed
+  degrade (F-LIFECYCLE-TYPED-DEGRADE; its hard trigger is now satisfied-by-build,
+  merge-gated). All draft; none deployed; runtime falsifiers attach at merge.
+- **Provenance runtime proofs (2026-07-16, natural)**: `decision_runs.git_sha` =
+  full `b95d3a3f…` on all 3 runs (matches deployed SHA) — GIT-SHA writer
+  runtime-PROVEN; first natural leg-aware `ranking_costs` suggestion row landed
+  16:00:32Z. #1228/#1229 are MERGED code (not drafts); pending falsifiers: tape
+  reader never yet run (unscheduled by design) · broker-closed-weekday zero
+  false-stale (next natural 2026-09-07).
+- **New small ledger note**: advisory `/scout/weekly` calls the scanner with no
+  client → retains legacy lifecycle default (stages nothing; accepted).
+- **F-BAN-INTEGRITY decision packet delivered** (Option A build vs Option B
+  remove; recommendation B) — operator choice still open; no implementation.
+- Lane 4 UI honesty: **BLOCKED_UI_FILE_OWNERSHIP** (open Palette PR #1093 owns
+  `compose/page.tsx`; ~12 open Palette PRs contest `TradeInbox.tsx`).
+
+#### 07-17 integration pass (all PRs remain DRAFT; merge order at bottom)
+
+- **#1234 SPLIT (head `824bdca`)**: now identity/test repair ONLY (no RBE
+  delta vs main; `risk_cap_family` removed; 35 tests). **#1237 NEW stacked
+  owner-gated PR** (`fix/strategy-risk-cap-routing`, base = #1234 branch, head
+  `39d9bc1`): the cap-routing hunk + 5×6 impact matrix + caller trace.
+  **Caller-trace finding: the reroute is REPORTING-ONLY on today's live route**
+  (`strategy_allocation`→`budget_snapshot` has zero readers; optimizer path is
+  Literal-immune, bit-identical) — still owner-gated as a control change; the
+  matrix describes potential, not currently-gating, deltas. 67 tests.
+- **#1235** rebased-by-merge onto the identity core (base retargeted to the
+  #1234 branch); duplicate normalization removed — permission map keyed by
+  canonical IDs with a drift-lock; 60s-TTL narrow account-read cache
+  (equity_state pattern; never caches failure). Healthy-path wording corrected:
+  L3 decisions EQUIVALENT, not byte-identical (adds one lazy account read on
+  already-submitting paths).
+- **#1231 finalized**: live-schema reconciliation AGREEMENT (repo file ==
+  tracked `20260716155023` == live DDL; `vrp_ranking` independently covered by
+  tracked `20260624002451`); 87-test battery green; body states never-reapply.
+- **#1236 verified independent** (5 files, zero overlap; 37 tests; malformed
+  rows collapse by design into missing/invalid_state with counter visibility).
+- **Nightly 07-15 swept into this PR** (report + ledger section):
+  ⚠ **F-CREDIT-SIGN (HIGH, status:reported, verified at `f34d5cd`)** —
+  internal-fill credit-close realized-P&L sign regression (#1056 re-opened via
+  #1017) — **pending operator adjudication at current SHA** (nightly's own
+  caveat: newer SHAs unread; adjudicate before building).
+- New ledger-flag (pre-existing, untouched): `/rebalance/execute` +
+  `/rebalance/preview` call `compute()` with a stale signature — dead/broken
+  on main (guaranteed TypeError).
+- **Recommended merge order (report-only, none executed)**: #1231 → #1236 →
+  #1234 → #1235 (after #1234 merges, retarget to main) → owner decision on
+  #1237 → #1233 last.
+
 ## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION
 
 Executed the v1.5 audit brief; completed report = **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**

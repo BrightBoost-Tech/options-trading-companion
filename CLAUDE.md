@@ -363,6 +363,24 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   path (breaker critical → inbox, real event). Do not re-prove these hops;
   new work verifies only its own seam.
 
+- **#1228/#1229 merged 07-16 (NOT drafts) + provenance proofs** — #1228
+  tape-hash reader: signed, operator-triggered, read-only, deliberately
+  UNSCHEDULED; zero runs ever — runtime execution pending, full deterministic
+  replay still open. #1229 broker-clock holiday guard: detection-only;
+  falsifier = a broker-closed weekday with zero false `data_stale`/`job_late`
+  (next natural 2026-09-07). Git-SHA decision provenance: RUNTIME-PROVEN
+  2026-07-16 — `decision_runs.git_sha` carried the full deployed SHA on all 3
+  natural runs. Condor EV model read-back 07-16: deployed `tail` /
+  severity 0.35 / prob-mult 0.6 on BOTH workers (code defaults differ:
+  `strict`/0.50/1.00 — env wins; verify on Railway per §1, never here).
+  Migration `20260716155023` (trade_suggestions ranking_costs+vrp_ranking)
+  APPLIED to production 2026-07-16 15:51Z ahead of its PR (#1231, draft) —
+  **NEVER REAPPLY**; repo file exists for history reconciliation.
+  F-MIDDAY-POSITION-READ-FAILOPEN, F-A9-6, F-A9-8: shipped CODE; runtime
+  falsifiers pending (ledger owns them). Draft PRs are tracked in
+  docs/backlog.md + audit/ledger.md only — this registry lists
+  merged/deployed facts.
+
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
 flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073,
 #1076 `CALIBRATION_TRAIN_LIVE_ONLY`, #1101

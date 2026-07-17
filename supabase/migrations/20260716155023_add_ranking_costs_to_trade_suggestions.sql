@@ -1,0 +1,30 @@
+-- Additive schema for the canonical ranker's persisted cost-provenance fields.
+--
+-- ROOT CAUSE (2026-07-16 production failure): PR #1218 began stamping
+-- suggestion["ranking_costs"] (a jsonb cost-provenance blob) in
+-- analytics/canonical_ranker.py but shipped NO migration, so production
+-- trade_suggestions lacked the column. Every scan-selected suggestion carrying
+-- ranking_costs then failed to persist with PostgREST PGRST204 ("Could not find
+-- the 'ranking_costs' column of 'trade_suggestions' in the schema cache"):
+-- created=0, the executor processed 0, and the row (with its required cost
+-- provenance) was lost — while suggestions_open still reported green. The
+-- ranking_costs column is NOT added to DROPPABLE_SUGGESTION_COLUMNS: silently
+-- discarding required cost provenance is not an acceptable fix; the column is.
+--
+-- vrp_ranking is the same class, currently gated OFF by VRP_LIVE_ENABLED
+-- (canonical_ranker._vrp_live_enabled, default off). It has no column either;
+-- it is added here so a future flag flip cannot reintroduce the same PGRST204
+-- loss. Surfaced by the new ranker-persisted-field schema-contract test
+-- (packages/quantum/tests/test_ranking_costs_schema_contract.py).
+--
+-- Contract: ADDITIVE, NULLABLE, no default, no backfill, no trigger, no data
+-- mutation. Backward-compatible — deployed code that does not yet stamp these
+-- fields is unaffected; code that does stamp them now has a home for them.
+--
+-- APPLIED to production 2026-07-16 (operator-authorized override, mid-RTH) via
+-- mcp__supabase__apply_migration; recorded in schema_migrations as version
+-- 20260716155023 (this file renamed to match). Re-applying is a no-op
+-- (IF NOT EXISTS). The immediate live fix was the column itself; the #1231
+-- job-truth/tests/doc changes merge post-close.
+ALTER TABLE public.trade_suggestions ADD COLUMN IF NOT EXISTS ranking_costs jsonb;
+ALTER TABLE public.trade_suggestions ADD COLUMN IF NOT EXISTS vrp_ranking jsonb;

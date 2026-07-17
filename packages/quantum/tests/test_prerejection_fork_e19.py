@@ -1164,6 +1164,11 @@ def _champion_view(client):
         for k in ("id", "trace_id", "created_at"):
             r.pop(k, None)
         r.pop("ev_raw", None)  # sanctioned additive provenance (normal clones)
+        # F-CLONE-PROVENANCE (2026-07-16): ranking_costs/code_sha are sanctioned
+        # additive provenance stamps on normal clones (test_fork_clone_provenance
+        # pins their presence); behavioral divergence still fails this view.
+        r.pop("ranking_costs", None)
+        r.pop("code_sha", None)
         sz = r.get("sizing_metadata")
         if isinstance(sz, dict):
             sz.pop("ev_basis", None)

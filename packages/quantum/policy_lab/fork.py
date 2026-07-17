@@ -21,6 +21,7 @@ from packages.quantum.policy_lab.config import (
 )
 from packages.quantum.policy_lab.champion import get_current_champion
 from packages.quantum.policy_lab.capital import normalize_capital
+from packages.quantum.observability.lineage import get_code_sha
 
 logger = logging.getLogger(__name__)
 
@@ -806,6 +807,13 @@ def _clone_suggestion_for_cohort(
         "ev": _clone_ev,
         "ev_raw": source.get("ev_raw"),
         "risk_adjusted_ev": source.get("risk_adjusted_ev"),
+        # A cohort clone is a live-executable pending row the executor fetches
+        # exactly like a champion row, so it must carry the same provenance:
+        # ranking_costs travels with the inherited risk_adjusted_ev (its cost
+        # basis); code_sha is the version producing THIS row. Inherited-or-NULL
+        # — never fabricated when the source row predates the stamps.
+        "ranking_costs": source.get("ranking_costs"),
+        "code_sha": get_code_sha(),
         # E14: typed top-level risk — rescaled to THIS clone's contracts, or an
         # explicit NULL (never fabricated) — so fill/orphan consumers stop reading
         # a NULL beside a lying JSON total.

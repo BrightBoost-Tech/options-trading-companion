@@ -14,8 +14,13 @@ override_keys=[] + stale symbol id; fix = route-resolved override keys) and
 small_tier_shadow_fleet`; verified: 2 tables, 0 rows, decision_event_id
 0-null/0-mismatch, trigger live) — SCHEMA ONLY, activation still
 operator-gated behind the legacy-terminal attestation (6 stale 04-09
-'submitted' rows). #1243 refreshed + merged with these facts. Remaining
-drafts: #1240 (F-CREDIT-SIGN) · #1238 · #1239.
+'submitted' rows). #1243 refreshed + merged with these facts.
+**CORRECTION (same hour): #1238/#1239/#1240 were ALREADY operator-merged
+04:50-04:56Z** — the full recovery set (#1238-#1243) is on main; nothing from
+the sprint remains draft. Runtime falsifiers now attach at deploy: preflight
+first live-open account read · cap-routing budget_snapshot truth ·
+F-CREDIT-SIGN first internal credit close · the operator-gated shadow-row
+data correction (#1240 PR body) is now unblocked.
 
 Main `b3cf45b` deployed (Railway SUCCESS 02:03Z). Broker flat $2,067.86 L3/L3.
 **Stacked-merge gap PROVEN + recovered**: #1235/#1237 merged into the feature

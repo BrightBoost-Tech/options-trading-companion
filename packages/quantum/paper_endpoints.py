@@ -616,6 +616,11 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     if ticket.source_ref_id and not suggestion_id:
         suggestion_id = str(ticket.source_ref_id)
 
+    # ⑤ scan-time underlying spot the scanner captured at candidate construction,
+    # rode the suggestion's order_json here. Read off the re-fetched suggestion
+    # (the honest carrier — "the stage call receives the suggestion"); None on
+    # any path without a scanner suggestion → typed-unavailable at populate.
+    _scan_spot_capture = None
     if suggestion_id:
         # Fetch suggestion context
         try:
@@ -631,6 +636,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                  strategy = s_data.get("strategy")
                  window = s_data.get("window")
                  regime = s_data.get("regime")
+                 _scan_spot_capture = (s_data.get("order_json") or {}).get("scan_underlying_spot")
         except:
             pass
 
@@ -763,10 +769,13 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # typed, source-attributed greek basis. OPEN-only (closes exempt inside).
     _populate_stage_leg_greeks(order_json.get("legs"), position_id=position_id)
     # Stage-level entry underlying spot (⑤ future scorability; observe-only).
-    # Same order_json, same OPEN-only close-exemption, same fail-soft. Captured
-    # as typed-unavailable (no honest same-fetch source at this seam — see
-    # _populate_stage_entry_spot); NEVER adds a market-data fetch, NEVER blocks.
-    _populate_stage_entry_spot(order_json, position_id=position_id)
+    # Same order_json, same OPEN-only close-exemption, same fail-soft. Upgrades
+    # to POPULATED when the scanner's scan-time spot rode the suggestion's
+    # order_json here (_scan_spot_capture); else typed-unavailable. NEVER adds a
+    # market-data fetch, NEVER blocks, NEVER downgrades a higher-authority marker.
+    _populate_stage_entry_spot(
+        order_json, position_id=position_id, scan_spot=_scan_spot_capture
+    )
 
     order_payload = {
         "user_id": user_id,
@@ -1161,6 +1170,18 @@ _IV_STATUS_UNAVAILABLE = _GREEKS_STATUS_UNAVAILABLE
 _SPOT_STATUS_POPULATED = _GREEKS_STATUS_POPULATED
 _SPOT_STATUS_UNAVAILABLE = _GREEKS_STATUS_UNAVAILABLE
 _SPOT_REASON_NO_SAME_FETCH = "no_same_fetch_spot_source"
+# ⑤ scan-time spot upgrade (07-18): the scanner's own underlying quote-mid,
+# captured at candidate construction (options_scanner.build_scan_spot_capture),
+# rides the suggestion's order_json to this seam. It is a HONEST same-cycle spot
+# (not a same-FETCH one — it predates the stage snapshot), so it is a valid,
+# provenance-tagged source for entry_underlying_spot. LOWER authority than any
+# future same-fetch source: a marker already populated by a non-scan_time source
+# is NEVER downgraded/replaced.
+_SPOT_SOURCE_SCAN_TIME = "scan_time"
+# A scan carrier arrived but its value was not finite-&-positive (defensive —
+# the scanner rejects a missing quote before building a candidate, so this is a
+# should-not-happen guard, never a fabricated spot — H9).
+_SPOT_REASON_SCAN_NONPOSITIVE = "scan_spot_nonpositive"
 
 
 def _is_occ_symbol(sym) -> bool:
@@ -1325,23 +1346,33 @@ def _populate_stage_leg_greeks(
         _apply_leg_greeks(leg, snap)
 
 
-def _populate_stage_entry_spot(order_json, *, position_id=None) -> None:
+def _populate_stage_entry_spot(order_json, *, position_id=None, scan_spot=None) -> None:
     """OBSERVE-ONLY (⑤): stamp a typed stage-level ``entry_underlying_spot``
-    marker onto the built order_json so a later consumer (the #1260 challenger
-    study, which abstains ``missing_spot`` without one) has an HONEST entry-spot
-    slot with provenance. Runs on the SAME order_json the greeks populate mutates
-    — every route (internal / live / shadow / dry-run) persists it identically.
+    marker onto the built order_json so the #1260 challenger study (which
+    abstains ``missing_spot`` without one) has an HONEST entry-spot slot with
+    provenance. Runs on the SAME order_json the greeks populate mutates — every
+    route (internal / live / shadow / dry-run) persists it identically because
+    this sits BEFORE the exec-mode branch.
 
-    There is NO honest SAME-FETCH spot source at the stage seam (see
-    ``_SPOT_REASON_NO_SAME_FETCH``): the per-contract option snapshots the stage
-    already fetched carry IV + greeks but not the underlying price, and the flow
-    issues no equities snapshot. Per H9 (and the ⑤ 'no extra network fetch'
-    charter) we do NOT add a market-data request and NEVER fabricate a spot from
-    option prices — we record a typed-unavailable marker
-    {value=None, source=None, as_of=None, status='unavailable_at_stage',
-    reason='no_same_fetch_spot_source'}, a wired slot a future lane can fill from
-    an honest source. When such a source lands, populate value + source + as_of
-    and set status='populated_at_stage' — the study mapper already consumes it.
+    UPGRADE (07-18): ``scan_spot`` is the scanner's own scan-time underlying
+    quote-mid capture (``options_scanner.build_scan_spot_capture``) that rode the
+    suggestion's ``order_json.scan_underlying_spot`` to this seam
+    (``_stage_order_internal`` reads it off the re-fetched suggestion). When it
+    carries a FINITE, STRICTLY-POSITIVE ``value`` we POPULATE the marker
+    {value, source='scan_time', as_of, as_of_source, status='populated_at_stage'}
+    — an honest same-CYCLE spot, provenance-tagged, that makes a future outcome
+    challenger-scorable. NO extra market-data fetch is made here; the value is a
+    number the scanner already computed (⑤ no-extra-fetch charter).
+
+    PRECEDENCE / NEVER-DOWNGRADE: scan_time is LOWER authority than a future
+    same-FETCH source. If a newer mechanism already stamped a POPULATED marker
+    from a non-scan_time source, we leave it untouched — never downgrade/replace.
+
+    H9 / fail-CLOSED-to-abstention: no scan carrier → typed-unavailable with
+    reason ``no_same_fetch_spot_source`` (unchanged); a carrier whose value is
+    not finite-&-positive → typed-unavailable with reason
+    ``scan_spot_nonpositive`` — NEVER a fabricated spot, so the challenger keeps
+    abstaining ``missing_spot`` rather than scoring on a lie.
 
     OPEN-only: a CLOSE (position_id set) is exempt (mirrors the greeks step).
     Fail-soft — never raises, never blocks staging. Mutates order_json in place."""
@@ -1350,14 +1381,49 @@ def _populate_stage_entry_spot(order_json, *, position_id=None) -> None:
     if not isinstance(order_json, dict):
         return
     try:
-        # No honest same-fetch source today → typed unavailable with reason.
-        order_json["entry_underlying_spot"] = {
-            "value": None,
-            "source": None,
-            "as_of": None,
-            "status": _SPOT_STATUS_UNAVAILABLE,
-            "reason": _SPOT_REASON_NO_SAME_FETCH,
-        }
+        # NEVER-DOWNGRADE: a higher-authority (non-scan_time) POPULATED marker
+        # already present is owned by a newer same-fetch mechanism — leave it.
+        existing = order_json.get("entry_underlying_spot")
+        if (
+            isinstance(existing, dict)
+            and existing.get("status") == _SPOT_STATUS_POPULATED
+            and existing.get("source") not in (None, _SPOT_SOURCE_SCAN_TIME)
+        ):
+            return
+
+        # Upgrade to POPULATED when a finite-positive scan-time spot rode the
+        # suggestion's order_json to this seam.
+        value = None
+        as_of = None
+        as_of_source = None
+        if isinstance(scan_spot, dict):
+            value = _finite_pos_float_or_none(scan_spot.get("value"))
+            as_of = scan_spot.get("as_of")
+            as_of_source = scan_spot.get("as_of_source")
+
+        if value is not None:
+            order_json["entry_underlying_spot"] = {
+                "value": value,
+                "source": _SPOT_SOURCE_SCAN_TIME,
+                "as_of": as_of,
+                "as_of_source": as_of_source,
+                "status": _SPOT_STATUS_POPULATED,
+            }
+        else:
+            # No honest scan-time spot → typed unavailable with the precise
+            # reason (nothing rode the carrier vs a carrier with a bad value).
+            reason = (
+                _SPOT_REASON_SCAN_NONPOSITIVE
+                if isinstance(scan_spot, dict)
+                else _SPOT_REASON_NO_SAME_FETCH
+            )
+            order_json["entry_underlying_spot"] = {
+                "value": None,
+                "source": None,
+                "as_of": None,
+                "status": _SPOT_STATUS_UNAVAILABLE,
+                "reason": reason,
+            }
     except Exception as exc:  # fail-soft — spot capture never blocks staging
         logger.warning(
             f"[STAGE_SPOT] entry_underlying_spot capture failed: {exc} "

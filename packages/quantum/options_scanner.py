@@ -2564,6 +2564,65 @@ def build_scanner_cost_capture(
     }
 
 
+# ⑤ scan-time underlying-spot capture source tag (the equities quote-mid the
+# scanner already holds at candidate construction — used as the option-chain
+# ``spot=`` and written to ``option_liquidity_observations``).
+_SCAN_SPOT_SOURCE = "scanner_underlying_quote_mid"
+
+
+def build_scan_spot_capture(
+    current_price: Any,
+    *,
+    provider_ts_ms: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Verbatim scan-time capture of the underlying spot the scanner ALREADY
+    holds at candidate construction (``current_price`` — the equities quote-mid
+    used as the option-chain ``spot=`` at :3407 and written to
+    ``option_liquidity_observations`` at :2661). OBSERVE-ONLY, additive.
+
+    This dict rides the candidate's persisted ``order_json``
+    (``build_midday_order_json`` → ``trade_suggestions.order_json``) to the stage
+    seam, where ``paper_endpoints._populate_stage_entry_spot`` upgrades the ⑤
+    ``entry_underlying_spot`` marker from typed-unavailable to POPULATED — the
+    input the #1260 lognormal challenger abstains ``missing_spot`` without. NO
+    decision path reads it (``compute_legs_fingerprint`` hashes legs only, so the
+    top-level key leaves dedup byte-identical); NO extra market-data fetch is
+    made anywhere — the value is a number the scanner already computed.
+
+    DETERMINISM: carries NO wall-clock. ``value`` is the input ``current_price``;
+    ``as_of`` is the INPUT snapshot's provider quote timestamp
+    (``provider_ts_ms``, part of the deterministic scan input) rendered ISO-8601
+    UTC, or None when the snapshot carried none (``as_of_source`` labels which).
+    NEVER ``now()`` — a wall-clock here would break the candidate byte-pin
+    (test_lifecycle_fail_closed_route's healthy-path deterministic assertion),
+    the same reason ``build_scanner_cost_capture`` carries no timestamp.
+
+    H9: a non-finite / non-positive ``current_price`` → ``value=None`` (typed
+    unavailable downstream), never a fabricated spot."""
+    try:
+        f = float(current_price)
+        value = f if (math.isfinite(f) and f > 0) else None
+    except (TypeError, ValueError):
+        value = None
+    as_of = None
+    as_of_source = "provider_ts_absent"
+    if provider_ts_ms is not None:
+        try:
+            as_of = datetime.fromtimestamp(
+                float(provider_ts_ms) / 1000.0, tz=timezone.utc
+            ).isoformat()
+            as_of_source = "provider_quote_ts"
+        except (TypeError, ValueError, OSError, OverflowError):
+            as_of = None
+            as_of_source = "provider_ts_absent"
+    return {
+        "value": value,
+        "source": _SCAN_SPOT_SOURCE,
+        "as_of": as_of,
+        "as_of_source": as_of_source,
+    }
+
+
 def _apply_tier_price_filter(
     symbols: List[str],
     quotes_map: Dict[str, Any],
@@ -4210,7 +4269,7 @@ def scan_for_opportunities(
                 "execution_drag_estimate": expected_execution_cost,
                 "execution_drag_samples": cost_details["execution_cost_samples_used"],
                 "execution_drag_source": cost_details["execution_drag_source"],
-                "execution_cost_source_used": cost_details["execution_cost_samples_used"],
+                "execution_cost_source_used": cost_details["execution_cost_source_used"],
                 "execution_cost_samples_used": cost_details["execution_cost_samples_used"],
                 # Multi-basis cost model phase-2 (Lane 3, consumer #2): verbatim
                 # scan-time capture of the scanner's OWN execution-cost numbers
@@ -4225,6 +4284,23 @@ def scan_for_opportunities(
                     combo_width_share=combo_width_share,
                     num_legs=len(legs),
                     is_limit_order=is_limit_order,
+                ),
+                # ⑤ scan-time underlying spot (OBSERVE-ONLY, additive): the
+                # verbatim quote-mid the scanner already holds here (current_price
+                # — the option-chain spot= and option_liquidity_observations
+                # value). as_of is the INPUT snapshot's provider quote timestamp
+                # (deterministic — snapshot_item is assigned once at :3034 and
+                # never reassigned; NO wall-clock, preserving the candidate
+                # byte-pin). Rides order_json to the stage seam, where
+                # _populate_stage_entry_spot upgrades entry_underlying_spot to
+                # POPULATED. No decision path reads it; no extra fetch.
+                "scan_underlying_spot": build_scan_spot_capture(
+                    current_price,
+                    provider_ts_ms=(
+                        (snapshot_item.get("provider_ts")
+                         or (snapshot_item.get("quote") or {}).get("quote_ts"))
+                        if isinstance(snapshot_item, dict) else None
+                    ),
                 ),
                 # Risk Primitives
                 "max_loss_per_contract": max_loss_contract,

@@ -10,7 +10,38 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-18 — FRIDAY SPRINT MERGED (authoritative standing; supersedes older queue text)
+## 2026-07-18 SAT — WEEKEND RUN CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (weekend closed at `e0a1584` + docs;
+⚠ BE deploy FAILED at e0a1584 on a clean start — BE serves `264b720d` until
+the docs-merge redeploy adjudicates; morning ritual checks convergence).
+**MERGED+DEPLOYED:** #1257 `4b311180` · #1256 `25d0f494` (+ migration
+`20260718144818` APPLIED — job_runs 'partial'; NEVER REAPPLY) · #1258
+`72f689c0` · #1259 `7f393580` · #1260 `264b720d` · #1261 `e0a1584`.
+**DATA:** F-CREDIT-SIGN + six stale orders + seventh row + five orphan
+job_runs ALL APPLIED (fingerprints in ledger) — **legacy-terminal boundary
+CLEAN; seven blockers RESOLVED**. Full record:
+`docs/review/weekend-results-2026-07-18.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **Safety/integrity:** nightly-audit runner deaths 07-16/07-17 (runner
+   reliability + headless Alpaca MCP absence) · BE deploy-failure follow-up
+   (if the docs redeploy also fails BE → deterministic defect, diagnose
+   before Mon open).
+2. **Fleet:** reconcile DONE → provision BLOCKED on owner manifest
+   (50 policy ids + env window; bundle `fleet-readiness-2026-07-18.md`) →
+   activation (separate authorization; attestation inputs now exist).
+3. **⑤ evidence:** stage-seam capture of per-leg iv + entry_spot (delta now
+   persists via #1259 greeks) so the challenger becomes scorable; then
+   re-run the #1260 study unchanged.
+4. **Multi-basis consumers:** #2 next (foundation + consumer-#1 shipped).
+5. **Canonical remainder:** wire normalize_position(greeks_by_symbol=…) to
+   the persisted stage greeks; D2 signed-aggregate fix; then the separate
+   arm-the-caps decision (must consume greeks_coverage).
+6. **Funnel natural proof** (Mon dispositions/provenance rows) → OI floor.
+7. **E19-2B** (post-fleet-epoch).
+
+## 2026-07-18 — FRIDAY SPRINT MERGED (superseded by the weekend standing above)
 
 Main pointer: verify on Railway/GitHub (sprint closed at `c51f41eb`, all
 services deployed). **MERGED+DEPLOYED (squash SHAs):** #1246 test-honesty

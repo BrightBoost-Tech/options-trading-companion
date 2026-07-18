@@ -47,7 +47,7 @@ class _RetryFailedJobsTestBase(unittest.TestCase):
 
 
 class TestRetryBranch(_RetryFailedJobsTestBase):
-    def test_retry_eligible_row_is_requeued(self):
+    def _run_with_row(self, row):
         client = MagicMock()
         # Chain 1: SELECT failed_retryable WHERE attempt < 2 → 1 row
         retry_chain = (
@@ -58,9 +58,7 @@ class TestRetryBranch(_RetryFailedJobsTestBase):
             .lt.return_value
             .limit.return_value
         )
-        retry_chain.execute.return_value.data = [
-            {"id": "job-1", "job_name": "alpaca_order_sync", "attempt": 1},
-        ]
+        retry_chain.execute.return_value.data = [row]
         # Chain 2: SELECT failed_retryable WHERE attempt >= 2 → empty
         deadletter_chain = (
             client.table.return_value
@@ -76,15 +74,65 @@ class TestRetryBranch(_RetryFailedJobsTestBase):
             return_value=client,
         ):
             self.scheduler._retry_failed_jobs()
+        return client
 
-        # Verify update() was called with the re-queue payload
+    def test_retry_eligible_row_is_requeued(self):
+        """A5-2 (2026-07-17): the re-queue update now ALSO carries the
+        internal_retry provenance annotation in payload.origin_retries —
+        the exact-dict assertion is widened to field-level asserts."""
+        client = self._run_with_row(
+            {
+                "id": "job-1",
+                "job_name": "alpaca_order_sync",
+                "attempt": 1,
+                "payload": {"trigger_ts": "t0", "origin": {"origin": "scheduler"}},
+            }
+        )
+
         update_call = client.table.return_value.update
-        update_call.assert_any_call({
-            "status": "queued",
-            "attempt": 2,  # incremented from 1
-            "locked_by": None,
-            "locked_at": None,
-        })
+        update_dicts = [
+            call.args[0] for call in update_call.call_args_list
+            if call.args and isinstance(call.args[0], dict)
+            and call.args[0].get("status") == "queued"
+        ]
+        self.assertEqual(len(update_dicts), 1)
+        fields = update_dicts[0]
+        self.assertEqual(fields["attempt"], 2)  # incremented from 1
+        self.assertIsNone(fields["locked_by"])
+        self.assertIsNone(fields["locked_at"])
+
+        # A5-2: internal_retry annotation appended; creator origin immutable.
+        payload = fields["payload"]
+        self.assertEqual(payload["trigger_ts"], "t0")
+        self.assertEqual(payload["origin"], {"origin": "scheduler"})
+        retries = payload["origin_retries"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["origin"], "internal_retry")
+        self.assertEqual(retries[0]["trigger_actor_class"], "scheduler_auto_retry")
+        self.assertEqual(retries[0]["parent_job_run_id"], "job-1")
+
+    def test_origin_stamp_failure_never_blocks_requeue(self):
+        """A stamp error must degrade to the legacy update (no payload key),
+        never skip the retry — provenance is metadata, not a gate."""
+        with patch(
+            "packages.quantum.jobs.origin.append_retry_origin",
+            side_effect=RuntimeError("stamp boom"),
+        ):
+            client = self._run_with_row(
+                {"id": "job-2", "job_name": "validation_eval", "attempt": 0,
+                 "payload": {}}
+            )
+
+        update_call = client.table.return_value.update
+        update_dicts = [
+            call.args[0] for call in update_call.call_args_list
+            if call.args and isinstance(call.args[0], dict)
+            and call.args[0].get("status") == "queued"
+        ]
+        self.assertEqual(len(update_dicts), 1)
+        fields = update_dicts[0]
+        self.assertEqual(fields["attempt"], 1)
+        self.assertNotIn("payload", fields)  # stamp failed → legacy shape
 
 
 class TestDeadLetterBranch(_RetryFailedJobsTestBase):

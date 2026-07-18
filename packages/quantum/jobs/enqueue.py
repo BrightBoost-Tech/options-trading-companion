@@ -8,19 +8,27 @@ def enqueue_idempotent(
     job_name: str,
     idempotency_key: str,
     payload: Optional[Dict[str, Any]] = None,
-    run_after: Optional[datetime] = None
+    run_after: Optional[datetime] = None,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> UUID:
     """
     Enqueues a job into the job_runs table idempotently.
     Returns the job_run_id (new or existing).
+
+    Legacy DB-only path (no RQ push) — sole remaining caller is the operator
+    smoke script ``packages/quantum/scripts/rq_smoke_morning_brief.py``.
+    A5-2 origin provenance: stamped at insert time into ``payload.origin``;
+    ``origin=None`` coerces to ``unknown_legacy``.
     """
+    from packages.quantum.jobs.origin import coerce_origin
+
     if payload is None:
         payload = {}
 
     data = {
         "job_name": job_name,
         "idempotency_key": idempotency_key,
-        "payload": payload,
+        "payload": {**payload, "origin": coerce_origin(origin)},
         "status": "queued"
     }
     if run_after:

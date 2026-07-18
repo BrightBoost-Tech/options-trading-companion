@@ -120,6 +120,39 @@ def _redact_sensitive_fields(data: dict) -> dict:
 
 
 # =============================================================================
+# Origin Provenance Headers (A5-2)
+# =============================================================================
+
+
+def _origin_headers() -> dict:
+    """Self-assert origin provenance for the enqueue seam (A5-2).
+
+    The X-Task-Origin headers ride OUTSIDE the HMAC canonical string
+    (v4:{ts}:{nonce}:{method}:{path}:{body_hash}:{scope}), so they change
+    nothing about signing or dispatch — they only let the job_runs row record
+    WHO triggered it (operator_signed_endpoint class; the actor is a CLASS,
+    never a personal identity or token). GitHub Actions runs are
+    distinguished from local operator runs via the GITHUB_ACTIONS env marker.
+    """
+    from packages.quantum.jobs.origin import (
+        ORIGIN_HEADER,
+        ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+        ACTOR_CLASS_HEADER,
+        REQUEST_ID_HEADER,
+    )
+    actor_class = (
+        "github_actions_workflow"
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        else "run_signed_task_cli"
+    )
+    return {
+        ORIGIN_HEADER: ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+        ACTOR_CLASS_HEADER: actor_class,
+        REQUEST_ID_HEADER: str(uuid.uuid4()),
+    }
+
+
+# =============================================================================
 # Task Definitions
 # =============================================================================
 
@@ -892,6 +925,8 @@ def run_task(
         key_id=key_id,
     )
     headers["Content-Type"] = "application/json"
+    # A5-2 origin provenance assertion (outside the HMAC canonical string).
+    headers.update(_origin_headers())
 
     url = f"{base_url.rstrip('/')}{path}"
 

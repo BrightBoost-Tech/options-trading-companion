@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-04-21 - Added Tooltips to Icon-Only Buttons
+**Learning:** In Next.js with Radix UI, wrapping interactive components like `<Button>` with `<TooltipTrigger asChild>` without applying it directly to the button element itself can sometimes lead to minor accessibility inconsistencies for screen readers if applied to a wrapper `div` instead. Additionally, test execution artifacts should never be checked into version control.
+**Action:** Ensure `<TooltipTrigger asChild>` directly wraps the interactive element (e.g., `<Button>`) rather than a structural wrapper `<div className="relative">`. Always clean up temporary verification scripts and ensure test-results directories are ignored or removed before submitting patches.

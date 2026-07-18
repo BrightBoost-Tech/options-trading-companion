@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 from packages.quantum.risk.position_model import (
     PositionNormalizationError,
     RiskClassification,
+    _direction_sign,
+    aggregate_greeks,
     analyze_payoff,
     normalize_position,
 )
@@ -190,6 +192,16 @@ class EnvelopeCheckResult:
     # is expected 0 until #1259's stage-time greek population ships.
     greeks_coverage: Dict[str, Any] = field(default_factory=dict)
 
+    # OBSERVE-ONLY canonical portfolio greeks (aggregate_canonical_greeks): the
+    # SIGNED, ratio- and multiplier-aware aggregate built through the canonical
+    # position model from the persisted stage-time leg greeks (#1259). Sits
+    # ALONGSIDE portfolio_greeks — it modulates NOTHING, arms no cap, and never
+    # feeds a violation. Longs and shorts NET here (canonical aggregate_greeks),
+    # unlike the D2-defective portfolio_greeks. Empty until check_all_envelopes
+    # runs; {delta,gamma,vega,theta} are None (typed unavailable) whenever any
+    # contributing structure is missing that greek — never a fabricated 0 (H9).
+    canonical_greeks: Dict[str, Any] = field(default_factory=dict)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -209,6 +221,7 @@ class EnvelopeCheckResult:
             "symbol_loss_stops": self.symbol_loss_stops,
             "stress_unavailable": self.stress_unavailable,
             "greeks_coverage": self.greeks_coverage,
+            "canonical_greeks": self.canonical_greeks,
         }
 
 
@@ -267,7 +280,7 @@ def check_greeks(
     config: EnvelopeConfig,
     coverage_out: Optional[Dict[str, Any]] = None,
 ) -> tuple:
-    """Check portfolio-level Greeks limits — null-safe (H9).
+    """Check portfolio-level Greeks limits — null-safe (H9) and SIGN-aware (D2).
 
     A leg whose greeks are missing / None / partial / nonfinite contributes
     NOTHING to the portfolio sums. It is NEVER coerced to a fabricated 0 (the
@@ -276,18 +289,29 @@ def check_greeks(
     legs — and silently zeroed a genuinely absent one). A leg counts toward the
     aggregate only when ALL of delta/gamma/vega/theta are present and finite.
 
+    **D2 FIX (signed aggregation):** each covered leg's contribution is signed by
+    its OWN direction via the canonical sign authority
+    ``position_model._direction_sign`` (reuse, not a second copy of the BUY/SELL
+    token logic). A long leg and a short leg now NET instead of ADD — the pre-fix
+    ``abs(qty)`` add treated a delta-hedged spread as if both legs pointed the
+    same way (a 4-leg condor reported 4×|per-leg greek|). A leg whose side cannot
+    be determined (unknown / missing action|side) is UNSIGNABLE and therefore
+    typed uncovered (contributes nothing, counts against coverage), never a
+    fabricated unsigned add (H9). Magnitude scaling (``abs(qty) × 100``) is
+    UNCHANGED — leg-ratio (D3) and per-leg multiplier (D4) remain their own lanes.
+
     Coverage is reported via ``coverage_out`` (optional out-param, matching the
     ``check_loss_envelopes`` ``degraded_out`` idiom): ``{legs_total,
     legs_with_greeks, complete}`` so a consumer can see the aggregate is PARTIAL
     rather than trust a sum built from an incomplete book.
 
     Caps are UNCHANGED: every greek limit still defaults 0 (no-limit) and the
-    ``if limit > 0`` gate is untouched. While the caps are dormant (all 0) this
-    returns exactly the pre-fix ``(violations=[], greeks)`` for every input that
-    did not previously raise — the two shapes that actually occur (every leg
-    greek-less pre-#1259 → all-zero sums; every leg a complete finite dict
-    post-#1259 → identical real sums) are byte-identical to the old aggregation;
-    they diverge only on a partial-value dict, a shape no populate path emits.
+    ``if limit > 0`` gate is untouched — the aggregate is observe-only telemetry
+    (``portfolio_greeks``) while dormant, so ``(violations, passed)`` are
+    identical for every caps-0 input. The reported greek VALUE is now the honest
+    signed net (a measurement correction, like #1017/#1051/#1071); it diverges
+    from the pre-fix unsigned add exactly for opposing-direction legs — the point
+    of the D2 lane.
     """
     violations = []
     total_delta = 0.0
@@ -323,11 +347,23 @@ def check_greeks(
                 # Partial / nonfinite greeks → never fabricate the missing legs
                 # as 0; the whole leg is typed uncovered and contributes nothing.
                 continue
+            # D2: sign by the leg's own direction via the canonical helper. An
+            # indeterminate side is unsignable → the leg is typed uncovered, not
+            # coerced to a directionless unsigned add.
+            side_raw = (
+                leg.get("action")
+                if leg.get("action") is not None
+                else leg.get("side")
+            )
+            try:
+                sign = _direction_sign(side_raw)
+            except PositionNormalizationError:
+                continue
 
-            total_delta += d * abs(qty) * 100
-            total_gamma += g * abs(qty) * 100
-            total_vega += v * abs(qty) * 100
-            total_theta += t * abs(qty) * 100
+            total_delta += sign * d * abs(qty) * 100
+            total_gamma += sign * g * abs(qty) * 100
+            total_vega += sign * v * abs(qty) * 100
+            total_theta += sign * t * abs(qty) * 100
             legs_with_greeks += 1
 
     greeks = {
@@ -360,6 +396,79 @@ def check_greeks(
             ))
 
     return violations, greeks
+
+
+def aggregate_canonical_greeks(positions: List[Dict]) -> Dict[str, Any]:
+    """OBSERVE-ONLY signed portfolio greeks via the canonical position model.
+
+    For each position, normalize it (per-contract greeks auto-sourced from the
+    position's own persisted leg jsonb — #1259 stage-time populate) and
+    aggregate via the canonical ``aggregate_greeks``: ``signed_ratio ×
+    structure_quantity × multiplier`` is applied EXACTLY ONCE and a long and a
+    short leg NET (never the D2 unsigned add that ``check_greeks`` still carries).
+
+    Book-level: each greek total is the sum across structures, typed UNAVAILABLE
+    (``None``) the moment ANY contributing structure is missing that greek — a
+    partial book sum is a fabricated total (H9). ``complete`` is True only when
+    every structure normalized and every leg carried a complete finite greek set.
+
+    PURE TELEMETRY. It NEVER raises (a structure that fails to normalize is
+    counted unrepresentable and drops out, the book flagged incomplete), NEVER
+    arms a cap, NEVER gates a decision. It sits ALONGSIDE ``check_greeks`` and
+    does not replace or feed it. Returns a JSON-serializable dict.
+    """
+    names = ("delta", "gamma", "vega", "theta")
+    sums = {n: 0.0 for n in names}
+    missing = {n: False for n in names}
+    legs_total = 0
+    legs_with_greeks = 0
+    sources: List[str] = []
+    as_of: List[str] = []
+    missing_legs: List[str] = []
+    unrepresentable = 0
+
+    for pos in positions:
+        try:
+            canonical = normalize_position(pos, source="risk_envelope_observe")
+        except PositionNormalizationError:
+            # Unrepresentable structure: it cannot contribute an honest greek
+            # basis, so the whole book is flagged incomplete (never silently
+            # dropped as if flat).
+            unrepresentable += 1
+            for n in names:
+                missing[n] = True
+            continue
+        exposure = aggregate_greeks(canonical)
+        legs_total += exposure.legs_total
+        legs_with_greeks += exposure.legs_with_greeks
+        missing_legs.extend(exposure.missing_legs)
+        sources.extend(exposure.sources)
+        as_of.extend(exposure.as_of)
+        for name, value in (
+            ("delta", exposure.delta_dollars_per_underlying_point),
+            ("gamma", exposure.gamma_dollars_per_point_squared),
+            ("vega", exposure.vega_dollars_per_vol_point),
+            ("theta", exposure.theta_dollars_per_day),
+        ):
+            if value is None:
+                missing[name] = True
+            else:
+                sums[name] += value
+
+    complete = unrepresentable == 0 and not any(missing.values())
+    return {
+        "delta": None if missing["delta"] else sums["delta"],
+        "gamma": None if missing["gamma"] else sums["gamma"],
+        "vega": None if missing["vega"] else sums["vega"],
+        "theta": None if missing["theta"] else sums["theta"],
+        "complete": complete,
+        "legs_total": legs_total,
+        "legs_with_greeks": legs_with_greeks,
+        "missing_legs": sorted(set(missing_legs)),
+        "unrepresentable_structures": unrepresentable,
+        "sources": sorted({s for s in sources if s}),
+        "as_of": sorted({a for a in as_of if a}),
+    }
 
 
 def check_concentration(
@@ -805,6 +914,17 @@ def check_all_envelopes(
     result.portfolio_greeks = greeks
     for v in greek_violations:
         result.add_violation(v)
+
+    # 1b. Canonical signed portfolio greeks (OBSERVE-ONLY telemetry, alongside
+    #     the D2-defective portfolio_greeks above). Fail-soft: a computation
+    #     error here must NEVER break the envelope check — it modulates nothing.
+    try:
+        result.canonical_greeks = aggregate_canonical_greeks(positions)
+    except Exception as exc:  # observe-only; never break the envelope check
+        logger.warning(
+            "[CANONICAL_GREEKS] observe-only aggregate failed: %s", exc
+        )
+        result.canonical_greeks = {"complete": False, "error": str(exc)}
 
     # 2. Concentration
     conc_violations, concentration = check_concentration(

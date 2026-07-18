@@ -26,11 +26,13 @@ import math
 import pytest
 
 from scripts.analytics.challenger_study import (
+    STUDY_SQL,
     build_study,
     dte_bucket,
     parse_occ,
     render_markdown,
     to_foundation_row,
+    _captured_leg_index,
     _geometry_bounds,
 )
 
@@ -228,3 +230,203 @@ class TestRender:
         assert "Cohort: LIVE" in md and "Cohort: SHADOW" in md
         assert "missing_delta" in md and "missing_spot" in md
         assert "UNADJUDICABLE" in md
+
+
+# --- 10. ⑤ future scorability: captured spot/iv/delta -> models SCORE ---------
+LONG_SYM = "O:XYZ260417C00090000"
+SHORT_SYM = "O:XYZ260417C00100000"
+
+
+def _captured_leg(sym, action, iv, delta):
+    """An OPEN-order stage-populated leg (the corrected SQL's captured_legs
+    shape): per-leg iv + greeks, keyed by the same OCC symbol as the geometry."""
+    return {"action": action, "symbol": sym, "quantity": 1,
+            "iv": iv, "iv_status": "populated_at_stage", "iv_source": "alpaca",
+            "greeks": {"delta": delta, "gamma": 0.02, "theta": -0.03, "vega": 0.10},
+            "greeks_status": "populated_at_stage"}
+
+
+def _future_debit_row(record_id, is_paper, pnl, spot=95.0, iv_long=0.20,
+                      iv_short=0.18, delta_long=0.60, delta_short=0.45,
+                      known_at="2026-03-19T15:19:13Z", spot_marker=None,
+                      captured_legs="default"):
+    """A row shaped as the CORRECTED SQL emits for a FUTURE outcome: geometry is
+    the DECISION-record suggestion legs ('side', no market fields — same as
+    _debit_row: buy 90C / sell 100C, premium 4.55, expiry 2026-04-17), and the
+    captured iv/greeks ride a SEPARATE ``captured_legs`` payload (the OPEN
+    order's stage-populated legs), merged by OCC symbol. entry_underlying_spot
+    is the typed-POPULATED marker by default."""
+    if captured_legs == "default":
+        captured_legs = [
+            _captured_leg(LONG_SYM, "buy", iv_long, delta_long),
+            _captured_leg(SHORT_SYM, "sell", iv_short, delta_short),
+        ]
+    row = {
+        "record_id": record_id,
+        "is_paper": is_paper,
+        "strategy": "LONG_CALL_DEBIT_SPREAD",
+        "regime": "normal",
+        "known_at": known_at,
+        "realized_pnl": pnl,
+        "pop_pred": 0.55,
+        "ev_pred": 42.0,
+        "net_premium": 4.55,
+        "contracts": 1,
+        "corrected": False,
+        # GEOMETRY: decision-record suggestion legs (authority) — NO market fields.
+        "legs": [
+            {"side": "buy", "symbol": LONG_SYM, "quantity": 1},
+            {"side": "sell", "symbol": SHORT_SYM, "quantity": 1},
+        ],
+        "captured_legs": captured_legs,
+        "entry_underlying_spot": spot_marker if spot_marker is not None else {
+            "value": spot, "source": "alpaca", "as_of": known_at,
+            "status": "populated_at_stage",
+        },
+    }
+    return row
+
+
+class TestCapturedLegIndex:
+    def test_by_symbol_map_of_iv_and_delta(self):
+        idx = _captured_leg_index([
+            _captured_leg(LONG_SYM, "buy", 0.20, 0.60),
+            _captured_leg(SHORT_SYM, "sell", 0.18, 0.45),
+        ])
+        assert idx[LONG_SYM] == (0.20, 0.60)
+        assert idx[SHORT_SYM] == (0.18, 0.45)
+
+    def test_none_or_nonlist_is_empty(self):
+        assert _captured_leg_index(None) == {}
+        assert _captured_leg_index({"not": "a list"}) == {}
+
+    def test_dark_captured_leg_contributes_nothing(self):
+        idx = _captured_leg_index([
+            {"symbol": LONG_SYM, "iv": None, "iv_status": "unavailable_at_stage",
+             "greeks": None, "greeks_status": "unavailable_at_stage"},
+        ])
+        assert idx[LONG_SYM] == (None, None)
+
+
+class TestFutureCapturedRowIsScorable:
+    def test_mapper_merges_captured_inputs_by_symbol(self):
+        frow, _ = to_foundation_row(_future_debit_row("f1", False, 30.0))
+        assert frow["spot"] == 95.0                       # captured entry spot
+        # per-leg iv + delta merged onto the suggestion geometry by symbol
+        by_strike = {l["strike"]: l for l in frow["legs"]}
+        assert by_strike[90.0]["iv"] == 0.20 and by_strike[90.0]["delta"] == 0.60
+        assert by_strike[100.0]["iv"] == 0.18 and by_strike[100.0]["delta"] == 0.45
+
+    def test_challenger_and_adapter_SCORE_the_future_row(self):
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [_future_debit_row("f1", False, 30.0)]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        # The lognormal challenger EMITS A PREDICTION (no longer missing_spot/iv).
+        assert live.challenger.scored == 1
+        assert live.challenger.abstained == 0
+        # The frozen adapter scores too (per-leg delta now present).
+        assert live.adapter.scored == 1
+        # Baseline (stored pop/ev) scores → the head-to-head joint set is
+        # non-empty → the charter falsifier is now ADJUDICABLE for this row
+        # (the exact gap the 07-18 INSUFFICIENT_EVIDENCE run reported).
+        assert live.h2h_baseline_challenger.n_joint == 1
+
+    def test_historical_row_still_abstains_alongside_a_future_row(self):
+        # Mixed cohort: one FUTURE-shaped row (scores) + one HISTORICAL-shaped
+        # row (no capture → abstains). Never backfilled/fabricated (H9).
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [
+                       _future_debit_row("f1", False, 30.0),
+                       _debit_row("h1", False, 0.6, 50.0, -20.0),  # historical shape
+                   ]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 1 and live.challenger.abstained == 1
+        assert live.adapter.scored == 1 and live.adapter.abstained == 1
+        # the historical row is the one that abstains, on the honest reasons
+        chal_abstain = {p.record_id: p.abstain_reason
+                        for p in live.challenger.predictions if not p.scored}
+        assert chal_abstain == {"h1": "missing_spot"}
+        adapt_abstain = {p.record_id: p.abstain_reason
+                         for p in live.adapter.predictions if not p.scored}
+        assert adapt_abstain == {"h1": "missing_delta"}
+
+    def test_typed_unavailable_spot_marker_keeps_challenger_abstaining(self):
+        # A CURRENT production row: captured_legs carry iv/delta, but the entry
+        # spot is the typed-UNAVAILABLE marker (no honest same-fetch source yet).
+        # The challenger must still abstain missing_spot — never on a fabricated
+        # spot — while the delta-only frozen adapter DOES score.
+        row = _future_debit_row("u1", False, 10.0, spot_marker={
+            "value": None, "source": None, "as_of": None,
+            "status": "unavailable_at_stage", "reason": "no_same_fetch_spot_source",
+        })
+        frow, _ = to_foundation_row(row)
+        assert frow["spot"] is None
+        live = next(c for c in build_study(
+            {"generated_at": "x", "source": "s", "rows": [row]}
+        ).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 0
+        assert {p.abstain_reason for p in live.challenger.predictions} == {"missing_spot"}
+        assert live.adapter.scored == 1        # delta present → adapter scores
+
+
+class TestCloseLegsNeverBecomeGeometry:
+    """Reviewer 3(b): the CLOSE order's reversed/partial legs must NEVER become
+    the studied geometry — suggestion legs win, always. Even a captured_legs
+    payload shaped like a 1-leg close cannot shrink/reverse the structure."""
+
+    def _condor_geometry_row(self, captured_legs):
+        # 4-leg condor suggestion geometry (the decision record).
+        r = _condor_row("c1", False, 0.7, 100.0, 25.0)
+        r["captured_legs"] = captured_legs
+        r["entry_underlying_spot"] = {"value": 250.0, "status": "populated_at_stage"}
+        return r
+
+    def test_close_shaped_captured_legs_do_not_replace_condor_geometry(self):
+        # captured_legs shaped like a 1-leg buy-to-close on a NON-matching symbol.
+        close_shaped = [{"action": "buy", "symbol": "O:AMD260313C00999000",
+                         "quantity": 5, "iv": 0.4,
+                         "greeks": {"delta": 0.9, "gamma": 0.0, "theta": 0.0, "vega": 0.0},
+                         "greeks_status": "populated_at_stage",
+                         "iv_status": "populated_at_stage"}]
+        frow, _ = to_foundation_row(self._condor_geometry_row(close_shaped))
+        # geometry is the FULL 4-leg condor from the suggestion, unshrunk.
+        assert len(frow["legs"]) == 4
+        assert sorted(l["strike"] for l in frow["legs"]) == [175.0, 180.0, 255.0, 260.0]
+        # the non-matching close symbol contributed NO iv/delta to any geometry leg.
+        assert all("iv" not in l and "delta" not in l for l in frow["legs"])
+
+    def test_matching_captured_symbols_attach_only_to_their_leg(self):
+        # captured_legs matching TWO of the condor's OCC symbols → only those two
+        # geometry legs gain iv/delta; the structure stays 4 legs.
+        captured = [
+            _captured_leg("O:AMD260313P00180000", "sell", 0.30, -0.30),
+            _captured_leg("O:AMD260313C00255000", "sell", 0.28, 0.30),
+        ]
+        frow, _ = to_foundation_row(self._condor_geometry_row(captured))
+        assert len(frow["legs"]) == 4
+        got = {l["strike"]: ("iv" in l) for l in frow["legs"]}
+        assert got == {175.0: False, 180.0: True, 255.0: True, 260.0: False}
+
+
+class TestStudySqlStructure:
+    """Reviewer 3(a): pin the SQL text semantics so the opens-only linkage and
+    the geometry authority can never silently regress (the §9 SQL-path gap)."""
+
+    def test_opens_only_marker_predicate_present(self):
+        # captured fields come ONLY from an order carrying the OPEN-path capture
+        # marker — closes are capture-exempt and can never be selected.
+        assert "order_json ? 'entry_underlying_spot'" in STUDY_SQL
+
+    def test_opening_order_is_earliest_not_latest(self):
+        assert "po.staged_at ASC" in STUDY_SQL
+        assert "po.staged_at DESC" not in STUDY_SQL   # the close-picking bug is gone
+
+    def test_geometry_is_suggestion_legs_not_order_legs(self):
+        assert "ts.order_json->'legs' AS legs" in STUDY_SQL
+        # the geometry-replacing COALESCE(po.legs, ts.legs) must be absent.
+        assert "COALESCE(po.order_json->'legs'" not in STUDY_SQL
+        assert "COALESCE(open_po.order_json->'legs'" not in STUDY_SQL
+
+    def test_captured_legs_and_spot_sourced_from_open_order(self):
+        assert "open_po.order_json->'legs' AS captured_legs" in STUDY_SQL
+        assert "open_po.order_json->'entry_underlying_spot' AS entry_underlying_spot" in STUDY_SQL

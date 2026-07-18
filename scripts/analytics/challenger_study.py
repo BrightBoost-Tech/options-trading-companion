@@ -24,9 +24,28 @@ DATA CONTRACT (one row per closed historical outcome, deduped by suggestion):
     record_id, is_paper, strategy (DB vocab), regime, known_at (ISO-8601 as-of),
     realized_pnl (CORRECTED live value), pop_pred, ev_pred (stored production
     predictions, may be null), net_premium (>0), contracts,
-    legs [{side, symbol (OCC), quantity}], corrected (bool).
-Per H9, ``spot`` and per-leg ``iv``/``delta`` are intentionally absent from the
-historical record; the challenger and the frozen adapter abstain on them.
+    legs [{side|action, symbol (OCC), quantity}]  (the DECISION-record suggestion
+        legs — the GEOMETRY authority; NEVER the order legs),
+    corrected (bool),
+    captured_legs [{symbol (OCC), iv, greeks{delta,…}, …}] | null  (per-leg
+        stage-seam capture from the OPEN order only; merged onto geometry BY
+        OCC SYMBOL),
+    entry_underlying_spot {value, status, …} | null  (stage-level capture, OPEN
+        order only).
+
+⑤ FUTURE SCORABILITY (stage-seam capture, PRs #1259 + entry-spot/IV): geometry
+ALWAYS comes from the suggestion legs; the CAPTURED market inputs (per-leg iv +
+greeks.delta, and the entry spot marker) come ONLY from the OPENING order,
+identified by the capture marker ``order_json ? 'entry_underlying_spot'`` which
+is written EXCLUSIVELY on the OPEN path (closes are capture-exempt — no exit-side
+iv can ever leak in). The mapper merges captured per-leg fields onto the
+suggestion geometry BY OCC SYMBOL: the frozen adapter scores once per-leg delta
+is present; the lognormal challenger scores once spot AND per-leg IV are BOTH
+present. HISTORICAL rows (staged before the capture) have captured_legs=null and
+entry_underlying_spot=null → the fields are absent → the models abstain
+(missing_delta / missing_spot / missing_iv), COUNTED not scored. Per H9 nothing
+is ever backfilled or defaulted: an absent field stays absent and the model
+abstains, never a fabricated spot/IV/delta.
 """
 
 from __future__ import annotations
@@ -95,9 +114,33 @@ FROM (
     round((ts.order_json->>'limit_price')::numeric,4) AS net_premium,
     COALESCE((ts.order_json->>'contracts')::int,1) AS contracts,
     (l.suggestion_id IS NOT NULL) AS corrected,
-    ts.order_json->'legs' AS legs
+    -- GEOMETRY is ALWAYS the decision-record suggestion legs (the authority).
+    -- NEVER the order legs: a CLOSE order carries reversed/partial legs (e.g. a
+    -- 1-leg buy-to-close vs the 4-leg condor open) and would corrupt the
+    -- structure (40/82 scored outcomes have open/close leg-count differences).
+    ts.order_json->'legs' AS legs,
+    -- queue-5 CAPTURED market inputs come ONLY from the OPEN order, identified
+    -- by the stage-seam capture marker itself: `order_json ? 'entry_underlying_
+    -- spot'` is written EXCLUSIVELY on the OPEN path (position_id IS NULL at
+    -- stage); CLOSES are capture-exempt and never carry it, so this can never
+    -- read exit-side iv/greeks. `staged_at ASC` picks the opening order.
+    -- captured_legs carries per-leg {iv, greeks.delta}; the mapper merges it
+    -- onto the suggestion geometry BY OCC SYMBOL. NULL for every pre-capture
+    -- (historical) row -> the models abstain, never defaulted (H9).
+    open_po.order_json->'legs' AS captured_legs,
+    open_po.order_json->'entry_underlying_spot' AS entry_underlying_spot
   FROM ded d
   JOIN trade_suggestions ts ON ts.id = d.suggestion_id
+  LEFT JOIN LATERAL (
+    -- The OPENING order for this suggestion: earliest-staged order that ran the
+    -- stage-seam capture (marker present == OPEN by construction). Read-only.
+    SELECT po.order_json
+    FROM paper_orders po
+    WHERE po.suggestion_id = d.suggestion_id
+      AND po.order_json ? 'entry_underlying_spot'
+    ORDER BY po.staged_at ASC NULLS LAST
+    LIMIT 1
+  ) open_po ON true
   LEFT JOIN LATERAL (
     SELECT lfl.suggestion_id FROM learning_feedback_loops lfl
     WHERE lfl.suggestion_id = d.suggestion_id
@@ -149,6 +192,87 @@ def _geometry_bounds(strategy: str, strikes: List[float], premium: float, contra
     return max(0.0, (width - premium)) * scale, premium * scale
 
 
+# --- ⑤ captured stage-seam market inputs (per-leg iv/delta + entry spot) -----
+# Consumed NATURALLY when present; absent on historical rows → models abstain.
+# H9: never defaulted, never fabricated — an absent/typed-unavailable field maps
+# to None and the model abstains, it is never invented.
+def _finite(x: Any) -> Optional[float]:
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _leg_iv(leg: Dict[str, Any]) -> Optional[float]:
+    """Per-leg captured implied volatility (stage-seam populate). Honoured only
+    when the leg's ``iv_status`` is 'populated_at_stage' (or the status key is
+    absent, for a plain synthetic/future test shape) AND the value is finite and
+    > 0. A typed-unavailable / dark / non-positive IV → None → the challenger
+    abstains missing_iv (never a default IV — the dormant ``iv or 0.30``)."""
+    if not isinstance(leg, dict):
+        return None
+    status = leg.get("iv_status")
+    if status is not None and status != "populated_at_stage":
+        return None
+    iv = _finite(leg.get("iv"))
+    return iv if (iv is not None and iv > 0) else None
+
+
+def _leg_delta(leg: Dict[str, Any]) -> Optional[float]:
+    """Per-leg captured delta (#1259 greeks populate). RAW per-contract delta as
+    the snapshot reported it (call +, put −); the frozen adapter abs()es like
+    production. Reads leg['greeks']['delta'] (the populated shape) or a flat
+    leg['delta'] (synthetic/future test shape). Dark greeks (greeks=None) → None
+    → the frozen adapter abstains missing_delta, never fabricated."""
+    if not isinstance(leg, dict):
+        return None
+    g = leg.get("greeks")
+    if isinstance(g, dict) and g.get("delta") is not None:
+        return _finite(g.get("delta"))
+    if leg.get("delta") is not None:
+        return _finite(leg.get("delta"))
+    return None
+
+
+def _entry_spot(raw: Any) -> Optional[float]:
+    """Entry underlying spot from the ⑤ stage-level capture. Accepts the typed
+    marker {value, status, …} (value honoured ONLY when status is
+    'populated_at_stage', or status absent for a plain test shape) or a bare
+    number (synthetic/future shape). Typed-unavailable / missing → None → the
+    challenger abstains missing_spot, never a fabricated spot (H9)."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        status = raw.get("status")
+        if status is not None and status != "populated_at_stage":
+            return None
+        v = _finite(raw.get("value"))
+        return v if (v is not None and v > 0) else None
+    v = _finite(raw)
+    return v if (v is not None and v > 0) else None
+
+
+def _captured_leg_index(captured_legs: Any) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+    """Build an OCC-symbol -> (iv, delta) map from the OPEN order's stage-seam
+    captured legs. Keyed by symbol so it merges onto the suggestion GEOMETRY by
+    identity — never by position, never replacing the geometry. A symbol that is
+    not in the captured set (or a captured leg with dark iv/greeks) contributes
+    nothing → that leg stays uncaptured → the model abstains (H9). Absent /
+    non-list captured_legs (every historical row) → empty map."""
+    idx: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    if not isinstance(captured_legs, list):
+        return idx
+    for leg in captured_legs:
+        if not isinstance(leg, dict):
+            continue
+        sym = leg.get("symbol") or leg.get("occ_symbol")
+        if not sym:
+            continue
+        idx[sym] = (_leg_iv(leg), _leg_delta(leg))
+    return idx
+
+
 # --- DB row -> foundation row-dict + stored-prediction side map -------------
 def to_foundation_row(db_row: Dict[str, Any]) -> Tuple[Dict[str, Any], Tuple[Optional[float], Optional[float], float, float]]:
     """Map ONE db row to the ``records_from_rows`` schema and extract the stored
@@ -159,12 +283,36 @@ def to_foundation_row(db_row: Dict[str, Any]) -> Tuple[Dict[str, Any], Tuple[Opt
     if strategy is None:
         raise ValueError(f"unmapped strategy {db_row['strategy']!r}")
 
+    # GEOMETRY authority: the DECISION-record suggestion legs, ALWAYS. Captured
+    # market inputs (iv/delta) merge on top BY OCC SYMBOL from the OPEN order —
+    # the close-order legs (reversed/partial) can NEVER become the geometry.
+    captured = _captured_leg_index(db_row.get("captured_legs"))
     legs: List[Dict[str, Any]] = []
     strikes: List[float] = []
     expiries: List[date] = []
     for leg in db_row["legs"]:
-        option_type, strike, expiry = parse_occ(leg["symbol"])
-        legs.append({"action": leg["side"], "option_type": option_type, "strike": strike})
+        sym = leg["symbol"]
+        option_type, strike, expiry = parse_occ(sym)
+        # Suggestion legs use 'side' (accept 'action' defensively).
+        fleg: Dict[str, Any] = {
+            "action": leg.get("side") or leg.get("action"),
+            "option_type": option_type,
+            "strike": strike,
+        }
+        # ⑤ captured iv/delta from the OPEN order, matched to THIS geometry leg
+        # by symbol. Prefer the captured_legs payload (the corrected SQL shape);
+        # when there is no captured_legs at all, fall back to iv/delta carried
+        # on the leg itself (a flat synthetic/test row). Absent either way → the
+        # field is omitted and the model abstains, never defaulted (H9).
+        if captured:
+            iv, delta = captured.get(sym, (None, None))
+        else:
+            iv, delta = _leg_iv(leg), _leg_delta(leg)
+        if iv is not None:
+            fleg["iv"] = iv
+        if delta is not None:
+            fleg["delta"] = delta
+        legs.append(fleg)
         strikes.append(strike)
         expiries.append(expiry)
 
@@ -180,7 +328,10 @@ def to_foundation_row(db_row: Dict[str, Any]) -> Tuple[Dict[str, Any], Tuple[Opt
         "legs": legs,
         "net_premium": premium,
         "contracts": contracts,
-        "spot": None,          # NOT persisted at decision time (H9)
+        # ⑤ entry spot from the stage-level capture when present; None on
+        # historical rows and on the current typed-unavailable marker (H9) →
+        # challenger abstains missing_spot, never a fabricated spot.
+        "spot": _entry_spot(db_row.get("entry_underlying_spot")),
         "dte_days": dte_days,
         "risk_free_rate": 0.0,
         "outcome_status": "resolved",

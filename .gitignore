@@ -69,3 +69,15 @@ scripts/_friday_eod_check_one_off.py
 start.ps1
 
 audit/cron.log
+
+# nightly-audit runner (audit/runner/nightly_runner.py) runtime artifacts —
+# operational, per-run, machine-local; never committed. Reports and
+# ALERT-*-runner.md failure artifacts are NOT ignored (they are the findings
+# the morning ritual sweeps).
+audit/transcripts/
+audit/manifests/
+audit/snapshots/
+audit/.nightly-runner.lock
+audit/preflight-manifest.json
+audit/broker-snapshot.json
+audit/reports/selftest-*.md

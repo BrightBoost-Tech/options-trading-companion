@@ -18,9 +18,11 @@ reaches the real module the route closed over. The v4 HMAC arm is pinned by
 test_task_signing_v4.py and is not under test here.
 """
 
+import json
 import os
 import sys
 import types
+import uuid as uuid_mod
 from unittest import mock
 
 import pytest
@@ -64,6 +66,16 @@ from packages.quantum.tests.test_shadow_fleet_activation import (  # noqa: E402
     _registrations,
     _stale_submitted_orders,
     _terminal_orders,
+)
+from packages.quantum.jobs.origin import (  # noqa: E402
+    ACTOR_CLASS_HEADER,
+    ORIGIN_HEADER,
+    ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+    ORIGIN_SCHEDULER,
+    REQUEST_ID_HEADER,
+)
+from packages.quantum.tests.test_job_origin_provenance import (  # noqa: E402
+    _pin_real_module,
 )
 
 # The route is 5/minute rate-limited; determinism > exercising slowapi.
@@ -253,3 +265,185 @@ class TestRouteExecutionGates:
         assert len(fake.rpc_calls) == 1
         assert fake.rpc_calls[0]["fn"] == sfa.PROVISION_RPC
         assert fake.writes == []
+
+
+# ---------------------------------------------------------------------------
+# A5-2 origin provenance on the /tasks/shadow-fleet/activation route.
+#
+# This surface acts SYNCHRONOUSLY — it does NOT enqueue_job_run, so there is
+# NO job_runs row to carry payload.origin, and its writes land inside the
+# frozen atomic RPC (no origin argument). The origin contract is therefore
+# asserted at the ENDPOINT SEAM: the endpoint resolves
+# resolve_request_origin(request) and stamps it into the RETURNED receipt
+# (dry-run AND execute). These tests drive the REAL public_tasks router with
+# REAL v4 HMAC verification (pattern: test_job_origin_provenance.signed_app),
+# failure injected at the ORIGIN (the request) and truth asserted at the TOP
+# (the receipt body's origin object / the HTTP status).
+# ---------------------------------------------------------------------------
+
+_ORIGIN_TEST_SECRET = "shadow-fleet-origin-test-secret"
+
+
+@pytest.fixture
+def signed_fleet_app(monkeypatch):
+    """Fresh FastAPI app mounting the REAL public_tasks router with REAL v4
+    HMAC verification. The signing module is pinned real (defeating the
+    poisoned-parent sys.modules leak) so the route's own
+    verify_task_signature closure reads our test secret at call time."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    signing = _pin_real_module(
+        monkeypatch, "packages.quantum.security.task_signing_v4"
+    )
+    public_tasks = _pin_real_module(
+        monkeypatch, "packages.quantum.public_tasks"
+    )
+    monkeypatch.setattr(signing, "SIGNING_KEYS", {})
+    monkeypatch.setattr(signing, "TASK_SIGNING_SECRET", _ORIGIN_TEST_SECRET)
+    monkeypatch.setattr(signing, "TASK_NONCE_PROTECTION", False)
+    monkeypatch.setattr(limiter, "enabled", False)
+
+    signed_app = FastAPI()
+    signed_app.state.limiter = limiter
+    signed_app.include_router(public_tasks.router)
+    return TestClient(signed_app)
+
+
+def _signed_fleet_headers(body_bytes, extra=None):
+    """Real v4 HMAC headers for the activation route (per
+    test_job_origin_provenance._signed_headers). The X-Task-Origin assertion
+    headers ride OUTSIDE the canonical string, so they never affect the
+    signature."""
+    from packages.quantum.security.task_signing_v4 import sign_task_request
+
+    headers = sign_task_request(
+        method="POST", path=ROUTE, body=body_bytes,
+        scope="tasks:shadow_fleet_activation", secret=_ORIGIN_TEST_SECRET,
+    )
+    headers["Content-Type"] = "application/json"
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+class TestRouteOriginProvenance:
+    def test_signed_dry_run_receipt_stamps_operator_origin(
+            self, signed_fleet_app):
+        """A signed operator call WITHOUT an origin assertion header (the
+        historical client shape) → the dry-run receipt carries
+        origin=operator_signed_endpoint, actor class signed_client_unmarked
+        (the 14:09Z lesson: an unmarked signed request never reads as
+        scheduler). Provenance is attribution, not a write: zero writes."""
+        fake = FakeSupabase(orders=_stale_submitted_orders())
+        body = json.dumps({"user_id": USER, "step": "provision"}).encode()
+        with _patched_admin(fake):
+            resp = signed_fleet_app.post(
+                ROUTE, content=body, headers=_signed_fleet_headers(body),
+            )
+        assert resp.status_code == 200
+        receipt = resp.json()
+        assert receipt["mode"] == "dry_run"
+        assert receipt["writes_performed"] == 0
+        origin = receipt["origin"]
+        assert origin["origin"] == ORIGIN_OPERATOR_SIGNED_ENDPOINT
+        assert origin["origin"] != ORIGIN_SCHEDULER
+        assert origin["trigger_actor_class"] == "signed_client_unmarked"
+        assert fake.writes == [] and fake.rpc_calls == []
+
+    def test_cli_asserted_origin_carries_run_signed_task_cli_actor(
+            self, signed_fleet_app):
+        """The run_signed_task.py CLI self-asserts actor class
+        run_signed_task_cli; resolve_request_origin honours it and the
+        endpoint stamps it onto the receipt (honest passthrough)."""
+        rid = str(uuid_mod.uuid4())
+        fake = FakeSupabase(orders=_stale_submitted_orders())
+        body = json.dumps({"user_id": USER, "step": "provision"}).encode()
+        with _patched_admin(fake):
+            resp = signed_fleet_app.post(
+                ROUTE, content=body,
+                headers=_signed_fleet_headers(body, extra={
+                    ORIGIN_HEADER: ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                    ACTOR_CLASS_HEADER: "run_signed_task_cli",
+                    REQUEST_ID_HEADER: rid,
+                }),
+            )
+        assert resp.status_code == 200
+        origin = resp.json()["origin"]
+        assert origin["origin"] == ORIGIN_OPERATOR_SIGNED_ENDPOINT
+        assert origin["trigger_actor_class"] == "run_signed_task_cli"
+        assert origin["trigger_request_id"] == rid
+
+    def test_execute_provision_receipt_also_stamps_origin(
+            self, signed_fleet_app, monkeypatch):
+        """The origin is stamped on the EXECUTE path too (not just dry-run):
+        an authorized single-RPC provision receipt carries the operator
+        origin alongside status=rpc_complete."""
+        monkeypatch.setenv(sfa.AUTHORIZATION_ENV, "1")
+        fake = FakeSupabase(orders=_terminal_orders())
+        body = json.dumps({
+            "user_id": USER, "step": "provision", "execute": True,
+            "confirm": sfa.CONFIRM_LITERAL,
+            "idempotency_key": "origin-exec-key",
+        }).encode()
+        with _patched_admin(fake):
+            resp = signed_fleet_app.post(
+                ROUTE, content=body,
+                headers=_signed_fleet_headers(body, extra={
+                    ORIGIN_HEADER: ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                    ACTOR_CLASS_HEADER: "run_signed_task_cli",
+                }),
+            )
+        assert resp.status_code == 200
+        receipt = resp.json()
+        assert receipt["status"] == "rpc_complete"
+        assert receipt["origin"]["origin"] == ORIGIN_OPERATOR_SIGNED_ENDPOINT
+        assert receipt["origin"]["trigger_actor_class"] == "run_signed_task_cli"
+        assert len(fake.rpc_calls) == 1
+
+    def test_origin_header_cannot_bypass_signature(self, signed_fleet_app):
+        """Provenance is attribution, NEVER authorization: an UNSIGNED request
+        that asserts a scheduler origin is still rejected 401, nothing runs."""
+        fake = FakeSupabase(orders=_stale_submitted_orders())
+        body = json.dumps({"user_id": USER, "step": "provision"}).encode()
+        with _patched_admin(fake):
+            resp = signed_fleet_app.post(
+                ROUTE, content=body,
+                headers={"Content-Type": "application/json",
+                         ORIGIN_HEADER: ORIGIN_SCHEDULER},
+            )
+        assert resp.status_code == 401
+        assert fake.writes == [] and fake.rpc_calls == []
+
+
+class TestRunSignedTaskCliMapping:
+    """scripts/run_signed_task.py: the shadow_fleet_activation task is
+    registered and the CLI origin self-assertion carries actor class
+    run_signed_task_cli (mirrors test_job_origin_provenance's CLI check,
+    scoped to this route)."""
+
+    @pytest.fixture
+    def cli(self):
+        scripts_dir = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "scripts"
+        )
+        sys.path.insert(0, scripts_dir)
+        try:
+            import run_signed_task
+        finally:
+            sys.path.remove(scripts_dir)
+        return run_signed_task
+
+    def test_cli_registers_shadow_fleet_activation_task(self, cli):
+        entry = cli.TASKS["shadow_fleet_activation"]
+        assert entry["path"] == ROUTE
+        assert entry["scope"] == "tasks:shadow_fleet_activation"
+        assert entry.get("skip_time_gate") is True
+
+    def test_cli_origin_headers_carry_operator_actor_class(
+            self, cli, monkeypatch):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        headers = cli._origin_headers()
+        assert headers[ORIGIN_HEADER] == ORIGIN_OPERATOR_SIGNED_ENDPOINT
+        assert headers[ACTOR_CLASS_HEADER] == "run_signed_task_cli"
+        uuid_mod.UUID(headers[REQUEST_ID_HEADER])  # valid uuid

@@ -1229,49 +1229,71 @@ async def task_shadow_fleet_activation(
 
     Both execute steps are single atomic server-side RPC transactions
     (supabase/migrations/20260717090000_shadow_fleet_activation_rpc.sql).
+
+    A5-2 origin provenance: this surface acts SYNCHRONOUSLY — it does NOT
+    ``enqueue_job_run``, so there is no ``job_runs`` row to carry
+    ``payload.origin``, and its writes land inside the frozen atomic RPC
+    (signature takes no origin argument). We still resolve the request origin
+    like every sibling ``/tasks/*`` site via ``resolve_request_origin`` and
+    stamp it into the RETURNED receipt (dry-run AND execute) so the
+    operator-signed provenance is attributable at the ENDPOINT SEAM.
+    Attribution only — never authorization (the HMAC dependency already
+    gated the request).
     """
     from packages.quantum.jobs.handlers.utils import get_admin_client
     from packages.quantum.services import shadow_fleet_activation as sfa
+
+    # Resolve provenance BEFORE dispatch — the request is already
+    # HMAC-authenticated by the verify_task_signature dependency above.
+    origin = resolve_request_origin(request)
 
     supabase = get_admin_client()
     try:
         if not payload.execute:
             if payload.step == "provision":
-                return sfa.plan_provision(
+                result = sfa.plan_provision(
                     supabase, payload.user_id,
                     idempotency_key=payload.idempotency_key,
                 )
-            return sfa.plan_activation(
-                supabase, payload.user_id,
-                idempotency_key=payload.idempotency_key,
-                policy_registrations=payload.policy_registrations,
-                attestation=payload.attestation,
-            )
-
-        if payload.step == "provision":
-            return sfa.execute_provision(
+            else:
+                result = sfa.plan_activation(
+                    supabase, payload.user_id,
+                    idempotency_key=payload.idempotency_key,
+                    policy_registrations=payload.policy_registrations,
+                    attestation=payload.attestation,
+                )
+        elif payload.step == "provision":
+            result = sfa.execute_provision(
                 supabase, payload.user_id,
                 idempotency_key=payload.idempotency_key,
                 confirm=payload.confirm,
             )
-        if payload.policy_registrations is None or payload.attestation is None:
-            raise HTTPException(
-                status_code=422,
-                detail="activate execution requires explicit "
-                       "policy_registrations and attestation payloads",
+        else:
+            if payload.policy_registrations is None or payload.attestation is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="activate execution requires explicit "
+                           "policy_registrations and attestation payloads",
+                )
+            result = sfa.execute_activation(
+                supabase, payload.user_id,
+                idempotency_key=payload.idempotency_key,
+                policy_registrations=payload.policy_registrations,
+                attestation=payload.attestation,
+                confirm=payload.confirm,
             )
-        return sfa.execute_activation(
-            supabase, payload.user_id,
-            idempotency_key=payload.idempotency_key,
-            policy_registrations=payload.policy_registrations,
-            attestation=payload.attestation,
-            confirm=payload.confirm,
-        )
     except sfa.ActivationNotAuthorized as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except sfa.ShadowFleetActivationError as exc:
         # Readiness blocks, missing confirm/idempotency key, bad attestation.
         raise HTTPException(status_code=409, detail=str(exc))
+
+    # Endpoint-seam provenance stamp: the receipt carries the resolved origin
+    # (operator_signed_endpoint for a signed operator call). No job_runs row
+    # exists on this synchronous surface — this IS the attributable record.
+    if isinstance(result, dict):
+        result.setdefault("origin", origin)
+    return result
 
 
 # =============================================================================

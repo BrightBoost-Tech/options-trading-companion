@@ -4269,7 +4269,7 @@ def scan_for_opportunities(
                 "execution_drag_estimate": expected_execution_cost,
                 "execution_drag_samples": cost_details["execution_cost_samples_used"],
                 "execution_drag_source": cost_details["execution_drag_source"],
-                "execution_cost_source_used": cost_details["execution_cost_samples_used"],
+                "execution_cost_source_used": cost_details["execution_cost_source_used"],
                 "execution_cost_samples_used": cost_details["execution_cost_samples_used"],
                 # Multi-basis cost model phase-2 (Lane 3, consumer #2): verbatim
                 # scan-time capture of the scanner's OWN execution-cost numbers

@@ -15,6 +15,13 @@ from packages.quantum.logging_setup import setup_logging
 # the first job after each recycle.
 setup_logging()
 
+# Startup effective-flag echo (P2 §3): same both-workers hook as the logging
+# canary above (covers otc + worker-background; the block lands on the first
+# job after a recycle). Fail-soft — never blocks the worker. The BE/uvicorn
+# hook is in packages.quantum.api.
+from packages.quantum.observability.flag_echo import echo_effective_flags
+echo_effective_flags(process="worker")
+
 logger = logging.getLogger(__name__)
 
 def _fold_alert_write_failures(final_result: Dict[str, Any], before: int) -> Dict[str, Any]:

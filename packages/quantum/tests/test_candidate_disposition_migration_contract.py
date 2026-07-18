@@ -21,7 +21,7 @@ from packages.quantum.services.candidate_disposition import DISPOSITIONS
 MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "supabase" / "migrations"
-    / "20260717090000_candidate_terminal_dispositions.sql"
+    / "20260717100000_candidate_terminal_dispositions.sql"
 )
 
 

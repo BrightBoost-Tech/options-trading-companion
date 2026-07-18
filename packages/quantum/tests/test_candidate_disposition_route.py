@@ -45,6 +45,64 @@ from packages.quantum.tests.test_candidate_disposition_writer import (
     SchemaAbsentFake,
 )
 
+def _pin_real_module(stack, name):
+    """Scoped real-module pinning (the shared CI pollution-class fix — same
+    pattern as ``_pin_real_module`` in test_job_origin_provenance.py on
+    feat/job-origin-provenance, ExitStack form for unittest).
+
+    Why: test_weekly_report_win_rate.py:17 permanently replaces
+    ``sys.modules['packages.quantum.services.sizing_engine']`` with a
+    MagicMock at COLLECTION time and never restores it. The production route
+    driven here re-reads ``sys.modules`` at CALL time — the H7 wire-in in
+    ``run_midday_cycle`` does ``from packages.quantum.services.sizing_engine
+    import estimate_close_bp, DEFAULT_ROUND_TRIP_SAFETY_FACTOR`` inside the
+    function body (workflow_orchestrator.py) — so a full-suite run hands it
+    the leaked mock (CI-only ``'<=' not supported between instances of
+    'MagicMock' and 'float'``), the ACTIVE H7 drop dies non-fatally, and the
+    candidate falls through to the sizing loop's round_trip reason. Local
+    single-file runs have no pollution and pass.
+
+    Pin the GENUINE module into ``sys.modules`` for the drive's duration and
+    restore the ambient entry afterwards — even when that ambient state is
+    another suite's leak (their module-level bindings may depend on it).
+    """
+    import importlib
+    import sys
+    import types
+
+    def _is_real(mod):
+        # A genuine imported module: ModuleType with a ModuleSpec. A leaked
+        # MagicMock fails isinstance; a bare types.ModuleType stub has
+        # __spec__ None.
+        return isinstance(mod, types.ModuleType) and getattr(
+            mod, "__spec__", None
+        ) is not None
+
+    sentinel = object()
+    ambient = sys.modules.get(name, sentinel)
+
+    def _restore():
+        if ambient is sentinel:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = ambient
+
+    stack.callback(_restore)
+
+    mod = ambient if ambient is not sentinel else None
+    if not _is_real(mod):
+        parent_name, _, attr = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        cand = getattr(parent, attr, None) if parent is not None else None
+        if _is_real(cand):
+            mod = cand
+        else:
+            sys.modules.pop(name, None)
+            mod = importlib.import_module(name)
+    sys.modules[name] = mod
+    return mod
+
+
 # The ×0.5 calibration blob that pushes SOFI raw ev 30.73 below
 # MIN_EDGE_AFTER_COSTS at the REAL ranker -> raev -999 (the 07-13 exhibit).
 CAL_BLOB_HALF = {
@@ -122,6 +180,11 @@ class _RouteBase(unittest.TestCase):
 
         blob = cal_blob if cal_blob is not None else {}
         with ExitStack() as stack:
+            # The route's call-time ``from ...sizing_engine import`` must see
+            # the real module, not test_weekly_report_win_rate.py's leaked
+            # collection-time MagicMock (see _pin_real_module).
+            _pin_real_module(
+                stack, "packages.quantum.services.sizing_engine")
             for p in (
                 patch("packages.quantum.risk.staleness_gate."
                       "check_staleness_gate", lambda: _NotStale()),

@@ -8,7 +8,7 @@ selected flag and no candidate fingerprint (only PK unique; verified against
 live pg_indexes 2026-07-17); ``trade_suggestions`` holds only persisted rows;
 ``decision_runs`` manifests are cycle-level. This module writes to the NEW
 ``candidate_terminal_dispositions`` table (migration
-``supabase/migrations/20260717090000_candidate_terminal_dispositions.sql`` —
+``supabase/migrations/20260717100000_candidate_terminal_dispositions.sql`` —
 a FILE only until the operator applies it).
 
 Invariant: every SELECTED candidate reaches EXACTLY ONE final disposition per

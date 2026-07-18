@@ -321,7 +321,12 @@ class TestCurrentDefects(unittest.TestCase):
 
     D1, D4, and correlation-one D5 are inverted by canonical-position PR-2;
     the unclamped linear-stress slice of D5 is inverted by PR-3 (payoff-capped
-    stress). D2 and D3 remain pinned; never delete them.
+    stress). D2 and D3 remain pinned; never delete them. (The D2/D3 fixtures now
+    carry COMPLETE greeks blocks — all four values finite — because check_greeks
+    was made null-safe: it aggregates a leg only when delta/gamma/vega/theta are
+    all present and finite, contributing nothing otherwise, never a fabricated 0.
+    The defects themselves — no side-netting, position-quantity-not-leg-ratio
+    scaling — are unchanged and still asserted verbatim.)
     """
 
     def test_d1_exact_max_loss_replaces_credit_received(self):
@@ -373,13 +378,18 @@ class TestCurrentDefects(unittest.TestCase):
             _pos_risk(naked)
 
     def test_d2_opposing_leg_greeks_add_instead_of_netting(self):
-        """risk_envelope.py:226-233 reads no side, so long+short ADD."""
+        """risk_envelope.py check_greeks reads no side, so long+short ADD."""
         # A delta-neutral-by-construction structure: +0.50 long, -0.50 short.
+        # Complete greeks blocks (all four finite): check_greeks is now null-safe
+        # and only aggregates a leg whose delta/gamma/vega/theta are ALL present
+        # and finite (matching #1259's complete-or-null populate contract and
+        # aggregate_greeks.complete). The D2 defect — no side-netting — is
+        # unchanged and still pinned by the delta==100 assertion below.
         pos = {
             "quantity": 1,
             "legs": [
-                {"action": "buy", "greeks": {"delta": 0.50}},
-                {"action": "sell", "greeks": {"delta": 0.50}},
+                {"action": "buy", "greeks": {"delta": 0.50, "gamma": 0.0, "vega": 0.0, "theta": 0.0}},
+                {"action": "sell", "greeks": {"delta": 0.50, "gamma": 0.0, "vega": 0.0, "theta": 0.0}},
             ],
         }
         _violations, greeks = check_greeks([pos], EnvelopeConfig())
@@ -432,19 +442,22 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertEqual(config.max_portfolio_vega, 0.0)
         self.assertEqual(config.max_portfolio_theta, 0.0)
 
-        huge = {"quantity": 1000, "legs": [{"greeks": {"delta": 9.99}}]}
+        # Complete greeks block (null-safe completeness bar — see D2 netting test).
+        huge = {"quantity": 1000,
+                "legs": [{"greeks": {"delta": 9.99, "gamma": 0.0, "vega": 0.0, "theta": 0.0}}]}
         violations, greeks = check_greeks([huge], config)
         self.assertAlmostEqual(greeks["delta"], 999000.0, places=2)
         self.assertEqual(violations, [])  # no cap => no violation, at any size
 
     def test_d3_leg_ratios_are_ignored(self):
         """The loop scales every leg by the POSITION quantity, not leg quantity."""
-        # A 1x2 ratio: leg quantities 1 and 2.
+        # A 1x2 ratio: leg quantities 1 and 2. Complete greeks blocks (null-safe
+        # completeness bar); D3 ratio-blindness is unchanged and still pinned.
         pos = {
             "quantity": 1,
             "legs": [
-                {"action": "buy", "quantity": 1, "greeks": {"delta": 0.50}},
-                {"action": "buy", "quantity": 2, "greeks": {"delta": 0.50}},
+                {"action": "buy", "quantity": 1, "greeks": {"delta": 0.50, "gamma": 0.0, "vega": 0.0, "theta": 0.0}},
+                {"action": "buy", "quantity": 2, "greeks": {"delta": 0.50, "gamma": 0.0, "vega": 0.0, "theta": 0.0}},
             ],
         }
         _violations, greeks = check_greeks([pos], EnvelopeConfig())
@@ -1398,8 +1411,11 @@ class TestNonInterference(unittest.TestCase):
         self.assertAlmostEqual(
             _pos_risk(_persisted_short_put_vertical()), 760.0, places=2
         )
+        # Complete greeks block (null-safe completeness bar — check_greeks now
+        # aggregates a leg only when all four greeks are present and finite).
         _violations, greeks = check_greeks(
-            [{"quantity": 1, "legs": [{"action": "buy", "greeks": {"delta": 0.5}}]}],
+            [{"quantity": 1, "legs": [
+                {"action": "buy", "greeks": {"delta": 0.5, "gamma": 0.0, "vega": 0.0, "theta": 0.0}}]}],
             EnvelopeConfig(),
         )
         self.assertAlmostEqual(greeks["delta"], 50.0, places=2)

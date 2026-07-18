@@ -1,8 +1,12 @@
 """Canonical typed position representation — the honest defined-risk basis.
 
-PR-1 shipped the typed contract + pure math unwired. Consumer PR-2 now
-migrates exactly one production seam: risk_envelope._pos_risk uses the exact
-payoff-derived max-loss total. Greeks, stress, sizing, reconciliation, ranking,
+PR-1 shipped the typed contract + pure math unwired. Consumer PR-2 migrated
+the first production seam: risk_envelope._pos_risk uses the exact
+payoff-derived max-loss total. Consumer PR-3 migrated the stress seam:
+risk_envelope.compute_stress_scenarios floors every scenario at
+-Σ max_loss_total (clamp_stress_to_payoff semantics applied at book level)
+and types missing greek inputs as unavailable instead of summing silent
+zeros. Greeks aggregation (check_greeks), sizing, reconciliation, ranking,
 and order paths remain unmigrated and retain their separate PR boundaries.
 
 WHY THIS EXISTS (defects reproduced by tests/test_position_model.py, all in
@@ -559,11 +563,12 @@ def clamp_stress_to_payoff(
 ) -> StressClamp:
     """A stress P&L may never be worse than -max_loss_total.
 
-    This is D5's remedy in pure form. risk_envelope.py:522-540 extrapolates
-    delta x shock with no floor and then takes `worst = min(...)` at :540, so
-    the largest-magnitude bug wins by construction. A defined-risk book cannot
-    lose more than the sum of its structures' max losses — that is arithmetic,
-    not a policy choice.
+    This is D5's remedy in pure form. Consumer PR-3 wired the same floor into
+    risk_envelope.compute_stress_scenarios at BOOK level (the sum of
+    per-structure floors is the book floor), so the production
+    `worst = min(...)` can no longer be won by an unfloored delta x shock
+    extrapolation. A defined-risk book cannot lose more than the sum of its
+    structures' max losses — that is arithmetic, not a policy choice.
 
     NOT applicable to a not-defined-risk structure: there is no floor to clamp
     to, and inventing one would fabricate a bound (H9).

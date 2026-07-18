@@ -179,6 +179,17 @@ class EnvelopeCheckResult:
     # remain in stress_results whenever every structure is representable.
     stress_unavailable: Dict[str, Any] = field(default_factory=dict)
 
+    # Greeks-aggregation coverage this pass (H9 null-safety for check_greeks).
+    # {legs_total, legs_with_greeks, complete}: legs_total = leg dicts seen;
+    # legs_with_greeks = legs that contributed a COMPLETE finite greeks set to
+    # the portfolio_greeks sums. When legs_with_greeks < legs_total the
+    # aggregate is PARTIAL — built from a subset — and must not be read as a
+    # whole-book exposure; a leg with missing/None/nonfinite greeks contributes
+    # NOTHING (never a fabricated 0). Empty until check_greeks runs. §8
+    # double-dormancy: production legs carry no greeks today, so legs_with_greeks
+    # is expected 0 until #1259's stage-time greek population ships.
+    greeks_coverage: Dict[str, Any] = field(default_factory=dict)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -197,6 +208,7 @@ class EnvelopeCheckResult:
             "degraded_per_symbol": self.degraded_per_symbol,
             "symbol_loss_stops": self.symbol_loss_stops,
             "stress_unavailable": self.stress_unavailable,
+            "greeks_coverage": self.greeks_coverage,
         }
 
 
@@ -253,13 +265,37 @@ def _pos_risk(pos: Dict) -> float:
 def check_greeks(
     positions: List[Dict],
     config: EnvelopeConfig,
+    coverage_out: Optional[Dict[str, Any]] = None,
 ) -> tuple:
-    """Check portfolio-level Greeks limits."""
+    """Check portfolio-level Greeks limits — null-safe (H9).
+
+    A leg whose greeks are missing / None / partial / nonfinite contributes
+    NOTHING to the portfolio sums. It is NEVER coerced to a fabricated 0 (the
+    pre-fix ``float(greeks.get("delta", 0))`` raised ``TypeError`` when a
+    present greek key held an explicit ``None`` — e.g. #1259's typed-unavailable
+    legs — and silently zeroed a genuinely absent one). A leg counts toward the
+    aggregate only when ALL of delta/gamma/vega/theta are present and finite.
+
+    Coverage is reported via ``coverage_out`` (optional out-param, matching the
+    ``check_loss_envelopes`` ``degraded_out`` idiom): ``{legs_total,
+    legs_with_greeks, complete}`` so a consumer can see the aggregate is PARTIAL
+    rather than trust a sum built from an incomplete book.
+
+    Caps are UNCHANGED: every greek limit still defaults 0 (no-limit) and the
+    ``if limit > 0`` gate is untouched. While the caps are dormant (all 0) this
+    returns exactly the pre-fix ``(violations=[], greeks)`` for every input that
+    did not previously raise — the two shapes that actually occur (every leg
+    greek-less pre-#1259 → all-zero sums; every leg a complete finite dict
+    post-#1259 → identical real sums) are byte-identical to the old aggregation;
+    they diverge only on a partial-value dict, a shape no populate path emits.
+    """
     violations = []
     total_delta = 0.0
     total_gamma = 0.0
     total_vega = 0.0
     total_theta = 0.0
+    legs_total = 0
+    legs_with_greeks = 0
 
     for pos in positions:
         qty = float(_pos_field(pos, "quantity", 0))
@@ -268,16 +304,31 @@ def check_greeks(
         for leg in legs:
             if not isinstance(leg, dict):
                 continue
-            greeks = leg.get("greeks") or pos.get("greeks") or {}
-            d = float(greeks.get("delta", 0)) * abs(qty) * 100
-            g = float(greeks.get("gamma", 0)) * abs(qty) * 100
-            v = float(greeks.get("vega", 0)) * abs(qty) * 100
-            t = float(greeks.get("theta", 0)) * abs(qty) * 100
+            legs_total += 1
+            # Source order matches the legacy `or` chain: leg greeks, else
+            # position-level, else none. #1259 writes a COMPLETE finite dict OR
+            # greeks=None (typed unavailable); a None / empty / absent block
+            # resolves to no usable source here.
+            src = leg.get("greeks")
+            if not (isinstance(src, dict) and src):
+                src = pos.get("greeks")
+            if not (isinstance(src, dict) and src):
+                # No usable greeks for this leg → contributes nothing (H9).
+                continue
+            d = _finite_greek_value(src, "delta")
+            g = _finite_greek_value(src, "gamma")
+            v = _finite_greek_value(src, "vega")
+            t = _finite_greek_value(src, "theta")
+            if d is None or g is None or v is None or t is None:
+                # Partial / nonfinite greeks → never fabricate the missing legs
+                # as 0; the whole leg is typed uncovered and contributes nothing.
+                continue
 
-            total_delta += d
-            total_gamma += g
-            total_vega += v
-            total_theta += t
+            total_delta += d * abs(qty) * 100
+            total_gamma += g * abs(qty) * 100
+            total_vega += v * abs(qty) * 100
+            total_theta += t * abs(qty) * 100
+            legs_with_greeks += 1
 
     greeks = {
         "delta": total_delta,
@@ -285,6 +336,11 @@ def check_greeks(
         "vega": total_vega,
         "theta": total_theta,
     }
+
+    if coverage_out is not None:
+        coverage_out["legs_total"] = legs_total
+        coverage_out["legs_with_greeks"] = legs_with_greeks
+        coverage_out["complete"] = legs_with_greeks == legs_total
 
     # Check limits (0 = no limit)
     for greek, limit_attr in [
@@ -526,13 +582,15 @@ def check_loss_envelopes(
     return violations, force_close_ids, loss_status
 
 
-def _stress_greek_value(greeks: Any, key: str) -> Optional[float]:
-    """Finite greek input for the stress model, or None when MISSING.
+def _finite_greek_value(greeks: Any, key: str) -> Optional[float]:
+    """A single finite greek value, or None when MISSING.
 
     A missing key, None, bool, non-numeric, or non-finite value is a missing
-    INPUT (typed unavailable at the scenario level) — never a silent 0
-    pretending the exposure was measured (H9: reject or flag, never
-    fabricate).
+    INPUT (typed unavailable) — never a silent 0 pretending the exposure was
+    measured (H9: reject or flag, never fabricate). Shared by both greek
+    readers in this module (check_greeks aggregation + the stress model), so
+    an explicit-None or nonfinite greek can never raise out of an envelope
+    evaluation nor be coerced to a fabricated zero.
     """
     if not isinstance(greeks, dict) or key not in greeks:
         return None
@@ -612,8 +670,8 @@ def compute_stress_scenarios(
                 vega_missing_legs += 1
                 continue
             greeks = leg.get("greeks") or pos.get("greeks") or {}
-            delta = _stress_greek_value(greeks, "delta")
-            vega = _stress_greek_value(greeks, "vega")
+            delta = _finite_greek_value(greeks, "delta")
+            vega = _finite_greek_value(greeks, "vega")
             if delta is None:
                 delta_missing_legs += 1
             else:
@@ -739,8 +797,11 @@ def check_all_envelopes(
     result = EnvelopeCheckResult()
     total_risk = sum(_pos_risk(p) for p in positions)
 
-    # 1. Greeks
-    greek_violations, greeks = check_greeks(positions, config)
+    # 1. Greeks (null-safe; coverage typed onto the result — a partial
+    #    aggregate is flagged, never a fabricated whole-book sum)
+    greek_violations, greeks = check_greeks(
+        positions, config, coverage_out=result.greeks_coverage
+    )
     result.portfolio_greeks = greeks
     for v in greek_violations:
         result.add_violation(v)

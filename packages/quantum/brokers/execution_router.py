@@ -75,6 +75,18 @@ def should_submit_to_broker(portfolio_id: str, supabase) -> bool:
         return False
 
 
+def live_enabled() -> bool:
+    """LIVE_ENABLED — the real-money arming gate for alpaca_live.
+
+    Truthy set is ('true', '1') ONLY — historically NOT yes/on. Absent/empty
+    -> False (safe). Extracted 2026-07-16 (startup flag-echo, P2 §3) so the
+    echo reports the SAME parse this router applies at the alpaca_live gate
+    below — reuse, never a reimplementation (the drift-lie guard). Behavior is
+    identical to the prior inline read; ``x not in S`` == ``not (x in S)``.
+    """
+    return os.environ.get("LIVE_ENABLED", "").lower() in ("true", "1")
+
+
 def get_execution_mode() -> ExecutionMode:
     """Determine execution mode from environment."""
     raw = os.environ.get("EXECUTION_MODE", "internal_paper").lower().strip()
@@ -127,7 +139,7 @@ def get_execution_mode() -> ExecutionMode:
 
     # Safety: alpaca_live requires explicit LIVE_ENABLED=true
     if mode == ExecutionMode.ALPACA_LIVE:
-        if os.environ.get("LIVE_ENABLED", "").lower() not in ("true", "1"):
+        if not live_enabled():
             logger.critical(
                 "[EXEC_ROUTER] EXECUTION_MODE=alpaca_live but LIVE_ENABLED is not true. "
                 "Falling back to alpaca_paper."

@@ -369,6 +369,15 @@ SUPABASE_STATUS = {
 # Print configuration summary (single, clean output)
 print_config_summary(supa_config, supa_key_type, supa_validated)
 
+# Startup effective-flag echo (P2 §3): one allowlist-scrubbed INFO block of
+# every behavioral/safety flag's PARSED value + polarity + explicit/default
+# source, so deploy read-back (§2) no longer needs manual Railway inspection.
+# Fail-soft by construction — never blocks BE startup. Mirrors the PR-0
+# logging_setup two-hook pattern (this is the BE/uvicorn hook; runner.py is
+# the both-workers hook).
+from packages.quantum.observability.flag_echo import echo_effective_flags
+echo_effective_flags(process="backend")
+
 if supa_error:
     print(f"❌ Supabase Validation Error:\n{supa_error}")
     # In dev mode, continue with warning. In prod, this is a critical issue.

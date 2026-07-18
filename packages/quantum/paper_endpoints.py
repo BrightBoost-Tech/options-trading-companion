@@ -753,6 +753,40 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                 if bid > 0 and ask > 0:
                     ticket.limit_price = round((bid + ask) / 2, 2)
 
+    # TCM v2 routing-aware dual-run (OBSERVE-ONLY, Lane F). Compute a PROPOSED
+    # routing-aware cost model BESIDE the frozen current TCM and stamp it as a
+    # jsonb-additive sibling key on the same `tcm` dict — every current-model
+    # key (fees_usd, expected_*, tcm_version, missing_quote, used_fallback) is
+    # left byte-identical (this only ADDS `tcm_v2_proposal`, exactly like the
+    # existing marketable_entry sibling). Commission is the only evidenced
+    # change: broker-routed options fills carry $0 REAL Alpaca commission
+    # (#1273; the frozen model over-charges ~0.65$/contract) — internal/shadow
+    # keep the synthetic estimate, labeled. ENABLE_LIVE_TCM_MODEL stays false:
+    # this NEVER feeds a decision. Fail-soft: any error leaves the frozen tcm
+    # stamp untouched.
+    try:
+        if isinstance(tcm_est, dict):
+            from packages.quantum.services.tcm_v2_proposal import (
+                classify_routing as _v2_classify_routing,
+                build_proposal as _v2_build_proposal,
+            )
+            _v2_routing = _v2_classify_routing(
+                exec_mode.value, (portfolio or {}).get("routing_mode")
+            )
+            tcm_est["tcm_v2_proposal"] = _v2_build_proposal(
+                current_tcm=tcm_est,
+                routing=_v2_routing,
+                leg_count=len(ticket.legs or []),
+                quantity=ticket.quantity,
+                entry_or_close=("close" if position_id is not None else "entry"),
+                submit_to_broker=submit_to_broker,
+                dry_run=(os.environ.get("ALPACA_DRY_RUN", "0") == "1"),
+            )
+    except Exception as _v2_err:  # observe-only — never affect staging
+        logger.warning(
+            f"[TCM_V2] dual-run proposal skipped (observe-only): {_v2_err}"
+        )
+
     # Prepare Order
     side = ticket.legs[0].action if ticket.legs else "buy"
 

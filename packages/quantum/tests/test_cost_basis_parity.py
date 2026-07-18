@@ -16,7 +16,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Stub alpaca-py so transitive imports resolve in the test venv (same
 # convention as test_entry_roundtrip_cost_gate.py).
@@ -25,6 +25,49 @@ sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
 sys.modules.setdefault(
     "alpaca.trading.requests", types.ModuleType("alpaca.trading.requests")
 )
+
+
+# ── De-poison guard ─────────────────────────────────────────────────────────
+# Other test files (the test_weekly_report_win_rate class) replace whole
+# production modules in sys.modules with MagicMocks at THEIR import and can
+# leak them; pytest imports every test module during collection, so the leak
+# lands here regardless of which file is collected first. Two exposures, two
+# invocations of the same guard:
+#   1. AT THIS MODULE'S IMPORT (below, before the production imports): a
+#      poisoner collected BEFORE this file would otherwise bind mocks into
+#      this module's direct production references.
+#   2. IN EVERY TEST's setUp (_RealModulesTestCase): the extractors under
+#      test import production modules LAZILY by design (pinned by
+#      test_cost_basis_import_lock's inertness lock), so they resolve
+#      through sys.modules at CALL time — a poisoner collected AFTER this
+#      file (the 2026-07-17 CI failure: float(MagicMock()) == 1.0 read as a
+#      parity value, 5 tests red at full-suite order, green single-file)
+#      poisons the run phase even though this module imported real objects.
+# Never rely on module-load-clean state.
+
+def _depoison_sys_modules() -> None:
+    for _name, _mod in list(sys.modules.items()):
+        if not _name.startswith("packages.quantum"):
+            continue
+        if not isinstance(_mod, MagicMock):
+            continue
+        _parent, _, _child = _name.rpartition(".")
+        _real = (
+            getattr(sys.modules.get(_parent), _child, None) if _parent else None
+        )
+        if isinstance(_real, types.ModuleType) and not isinstance(
+            _real, MagicMock
+        ):
+            # The parent package still holds the real submodule object —
+            # reinstall it without re-executing the module.
+            sys.modules[_name] = _real
+        else:
+            # No surviving real object: force a clean re-import at the next
+            # resolution.
+            del sys.modules[_name]
+
+
+_depoison_sys_modules()
 
 from packages.quantum.analytics.canonical_ranker import (  # noqa: E402
     _estimate_slippage,
@@ -65,9 +108,17 @@ from packages.quantum.services.transaction_cost_model import (  # noqa: E402
 )
 
 
+class _RealModulesTestCase(unittest.TestCase):
+    """Base for every parity case: de-poison sys.modules per-test."""
+
+    def setUp(self):
+        super().setUp()
+        _depoison_sys_modules()
+
+
 # ── Basis 1a: scanner _determine_execution_cost ─────────────────────────────
 
-class TestScannerDragParity(unittest.TestCase):
+class TestScannerDragParity(_RealModulesTestCase):
     def test_proxy_formula_pinned_and_byte_equal(self):
         # Frozen formula: (combo_width_share*0.25 + num_legs*0.0065) * 100
         # = (0.10*0.25 + 2*0.0065) * 100 = (0.025 + 0.013) * 100 = 3.80
@@ -133,7 +184,7 @@ class TestScannerDragParity(unittest.TestCase):
 
 # ── Basis 1b: the scanner's SECOND max() layer (scoring.py:114) ─────────────
 
-class TestScannerUnifiedFinalParity(unittest.TestCase):
+class TestScannerUnifiedFinalParity(_RealModulesTestCase):
     TRADE = {
         "ev": 50.0, "suggested_entry": 1.00, "bid_ask_spread": 0.0,
         "strategy": "bull_call_spread", "max_loss": 200.0,
@@ -209,7 +260,7 @@ def _suggestion(*, legs, contracts=1, ev=100.0, tcm=None, sizing_extra=None):
     return s
 
 
-class TestRankerParity(unittest.TestCase):
+class TestRankerParity(_RealModulesTestCase):
     def test_fees_byte_equal_and_pinned(self):
         for legs, contracts, expected in (
             (2, 1, 2.60), (4, 1, 5.20), (4, 3, 15.60), (2, 5, 13.00),
@@ -274,7 +325,7 @@ def _sofi_legs(qty=SOFI_QTY):
     ]
 
 
-class TestStageCrossParity(unittest.TestCase):
+class TestStageCrossParity(_RealModulesTestCase):
     def test_sofi_fixture_byte_equal(self):
         real = executable_roundtrip_cost(
             legs=_sofi_legs(), leg_quotes=SOFI_QUOTES, quantity=SOFI_QTY,
@@ -310,7 +361,7 @@ class TestStageCrossParity(unittest.TestCase):
         self.assertFalse(bd.component("round_trip_total").available)
 
 
-class TestE2LegacyBasisGateParity(unittest.TestCase):
+class TestE2LegacyBasisGateParity(_RealModulesTestCase):
     """Drive the REAL production stage gate end-to-end at qty>1 and assert
     the typed reconciliation reproduces the gate's own numbers exactly:
     legacy (live, flag OFF) decides on gross_ev - TOTAL; the fixed basis is
@@ -401,7 +452,7 @@ class TestE2LegacyBasisGateParity(unittest.TestCase):
 
 # ── Basis 4a: execution TransactionCostModel.estimate ───────────────────────
 
-class TestExecutionTcmParity(unittest.TestCase):
+class TestExecutionTcmParity(_RealModulesTestCase):
     def _ticket(self, qty=2, limit=1.10):
         return TradeTicket(
             symbol="TST",
@@ -451,7 +502,7 @@ class TestExecutionTcmParity(unittest.TestCase):
 
 # ── Basis 4b: the SECOND (legacy) TransactionCostModel ──────────────────────
 
-class TestLegacyTcmParity(unittest.TestCase):
+class TestLegacyTcmParity(_RealModulesTestCase):
     def test_estimate_costs_byte_equal_and_pinned(self):
         real = LegacyTCM().estimate_costs(price=1.5, quantity=2, side="buy")
         bd = extract_legacy_tcm_estimate(price=1.5, quantity=2)
@@ -479,7 +530,7 @@ class TestLegacyTcmParity(unittest.TestCase):
 
 # ── Basis 5: realized close_fill_gap ────────────────────────────────────────
 
-class TestRealizedParity(unittest.TestCase):
+class TestRealizedParity(_RealModulesTestCase):
     def test_sofi_debit_close_byte_equal(self):
         oj = {"close_fill_gap_cross": 1.31, "close_fill_gap_mid": 1.525}
         cross, mid = read_stamp(oj)

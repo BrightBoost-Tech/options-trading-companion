@@ -10,6 +10,49 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
+## 2026-07-18 — FRIDAY SPRINT MERGED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (sprint closed at `c51f41eb`, all
+services deployed). **MERGED+DEPLOYED (squash SHAs):** #1246 test-honesty
+`1947f97c` · #1247 ⑤ foundation `276f45d4` · #1248 cost-basis `c20f1ae8` ·
+#1250 payoff-capped stress `ce2710cb` · #1251 origin provenance `08e250d9` ·
+#1249 fleet transaction `79790b80` · #1252 candidate dispositions `bb489fdf` ·
+#1253 quote provenance `c51f41eb`. Deployed ≠ naturally exercised — runtime
+falsifiers stay in the ledger pending list.
+
+- **THREE MIGRATIONS UNAPPLIED** (code no-ops typed until applied; apply via
+  bundle operator prompts, market closed, by NAME): `20260717090000_shadow_
+  fleet_activation_rpc` · `20260717100000_candidate_terminal_dispositions` ·
+  `20260717120000_option_quote_provenance`. Never `db push`.
+- **Zero production data writes this sprint.** Operator-gated censuses (bundle
+  `otc-friday-post-close-2026-07-17/`, fingerprints embedded): F-CREDIT-SIGN
+  19 closes (−14,367 realized / −16,971 cash; fp b780271c…) · stale orders 6/6
+  conclusive (fp 04317fc1…) · orphan job rows 5/5 dead (fp 40258ba9…).
+- **Fleet: SCHEMA+CODE READY, ZERO provisioning/activation.** Blockers =
+  **SEVEN rows re-verified post-merge** (6 submitted 04-09 + 1
+  needs_manual_review 05-11) + RPC migration apply + policy preregistration +
+  strict `FLEET_ACTIVATION_AUTHORIZED=1`.
+- **Build slices CLOSED:** test-honesty debt (security module de-skipped) ·
+  ⑤ foundation (observe-only; baseline authority + credit-defect visibility) ·
+  multi-basis foundation (5+ bases parity-locked; 4th estimated basis found
+  in scoring.py) · canonical consumer #3 payoff-capped stress (D5 closed) ·
+  A5-2 origin provenance (14:09Z class attributable; 4th retrigger seam
+  stamped) · candidate terminal disposition (AAPL/IWM fate durable once
+  migration applied) · quote provenance (429/fallback provable once applied).
+- **Test-infra findings:** sys.modules MagicMock poison class — FIXED
+  polluters: `test_weekly_report_win_rate.py`, `test_inbox_ranker_
+  comprehensive.py`; self-defending suites shipped (cost-basis, dispositions,
+  origin); **REMAINING LANDMINE: `test_capital_basis_consistency.py`**
+  (unrestored module-level sys.modules assignment) — P2 tail.
+- **Owner decisions open:** F-BAN A/B · tier-cliff · single-leg · prequential
+  (a/b/c) · sizing-loop disposition taxonomy note (#1252) · fleet
+  activation sequence. **UI: BLOCKED_UI_FILE_OWNERSHIP** (Palette).
+- **Strategic order (post-sprint):** 1 fleet operationalization → APPLY+
+  RECONCILE+ACTIVATE sequence (operator) · 2 ⑤ challenger evidence
+  accumulation (observe) · 3 multi-basis phase-2 consumers · 4 canonical
+  remainder (stage-time greeks next) · 5 funnel: apply dispositions+quote
+  provenance migrations → OI floor · 6 E19-2B (post-fleet-epoch).
+
 ## 2026-07-17 — POST-MERGE RECOVERY STANDING (authoritative; supersedes older queue text)
 
 Main `b3cf45b` (deployed, all services). **MERGED to main:** #1231 (ranking

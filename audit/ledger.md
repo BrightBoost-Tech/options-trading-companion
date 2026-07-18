@@ -4,6 +4,27 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-18 — FRIDAY POST-CLOSE SPRINT MERGED (Fable orchestrator, opus reviews) · status:shipped-code/runtime-pending
+
+Serialized merges w/ per-PR opus adversarial review, per-merge deploy
+verification (GitHub combined status all-services SUCCESS) and broker/alert
+safety checks (flat book, 0 crit/high throughout). Squash SHAs: 1947f97c /
+276f45d4 / c20f1ae8 / ce2710cb / 08e250d9 / 79790b80 / bb489fdf / c51f41eb.
+Three migrations UNAPPLIED (rpc/dispositions/quote-provenance) — bundle
+prompts own the applies. Censuses (read-only, fingerprinted): F-CREDIT-SIGN
+19-close set fp b780271c… (−14,367/−16,971; QQQ canonical to the cent; live
+calibration never contaminated) · stale orders 6/6→cancelled fp 04317fc1… ·
+orphan jobs 5/5 dead fp 40258ba9… (side-finding: 'partial' missing from
+job_runs CHECK — latent HIGH, needs 1-line constraint migration). SEVEN
+activation blockers re-verified post-merge. sys.modules poison class: 2
+polluters fixed, 1 landmine remains (test_capital_basis_consistency.py).
+Pending natural falsifiers: first live-open preflight · first internal credit
+close (post-#1240) · budget_snapshot family truth · disposition/provenance
+writers self-activate at migration apply · #1228 reader · #1229 (09-07).
+No broker write · no unauthorized DB write · no migration applied · no fleet
+row/activation · operator worktree preserved (inventory hash b89a7ca3…
+unchanged start-to-finish).
+
 ## 2026-07-17 — POST-MERGE RECOVERY SPRINT · status:reported/drafts-pending
 
 **07-17 05:xxZ EXECUTION ADDENDUM (operator-instructed):** #1242 repaired

@@ -383,9 +383,15 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   (backlog owns them). F-CREDIT-SIGN (07-15 nightly, HIGH) CONFIRMED at
   `b3cf45b`, fix in draft — internal-fill credit closes overstate realized
   P&L until it merges; treat shadow realized_pl for credit internal fills as
-  suspect (§8-class liar until fixed). Draft PRs are tracked in
-  docs/backlog.md + audit/ledger.md only — this registry lists
-  merged/deployed facts.
+  suspect (§8-class liar until fixed). 07-18: the Friday sprint
+  (#1246-#1253) is MERGED+DEPLOYED at `c51f41eb` — ⑤ foundation, cost-basis
+  parity locks, payoff-capped stress, origin provenance, fleet transaction
+  (dry-run-only; strict =1 gate), dispositions+quote-provenance writers
+  (typed no-op until their UNAPPLIED migrations land: rpc 090000 /
+  dispositions 100000 / quote-provenance 120000 — apply by NAME via bundle
+  prompts). Fleet activation blockers = SEVEN rows. Draft-PR tracking lives
+  in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
+  facts.
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
 flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073,

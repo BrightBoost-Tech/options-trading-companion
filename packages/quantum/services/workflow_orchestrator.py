@@ -1187,6 +1187,16 @@ def build_midday_order_json(
         "legs": leg_orders,
         "underlying": cand.get("symbol"),
         "strategy": cand.get("strategy") or cand.get("strategy_key"),
+        # ⑤ scan-time underlying spot (OBSERVE-ONLY): thread the verbatim
+        # quote-mid the scanner captured at candidate construction
+        # (options_scanner.build_scan_spot_capture) through the PERSISTED
+        # suggestion order_json to the stage seam, where
+        # _populate_stage_entry_spot upgrades entry_underlying_spot to POPULATED
+        # for future challenger scorability. TOP-LEVEL key only —
+        # compute_legs_fingerprint hashes legs, so this leaves the dedup
+        # fingerprint byte-identical; no decision/sizing/ranking path reads it.
+        # None on a candidate without a capture → typed-unavailable at stage.
+        "scan_underlying_spot": cand.get("scan_underlying_spot"),
     }
     return order_json
 
@@ -3710,6 +3720,38 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                                 f"Skipping midday candidate {ticker} {strategy}: fatal quality issues",
                                 extra={"quality_gate": log_payload}
                             )
+                            # Lane 4B (E4 invariant hole): a SELECTED candidate
+                            # dropped here in HARD mode dies BEFORE persist — no
+                            # trade_suggestions row is ever written — so the honest
+                            # terminal bucket is the pre-persist unpriceable /
+                            # non-executable death. h7_dropped is the taxonomy's
+                            # "between selection and persist" family and already
+                            # files the unpriceable-candidate death (a leg the
+                            # quality gate cannot price IS unpriceable). NOT
+                            # persisted_blocked: that value claims a persist seam
+                            # this candidate never reached — in SOFT mode the same
+                            # gate DOES persist a NOT_EXECUTABLE row and correctly
+                            # earns persisted_blocked at the persist seam, so the
+                            # mode divergence is honest, not an inconsistency.
+                            # detail.reason carries the exact cause (E4 vs E5) +
+                            # the gate's measured values.
+                            if _ctd is not None:
+                                _ctd.record_final(cand, "h7_dropped", detail={
+                                    "reason": "quality_gate_e4_fatal",
+                                    # Typed discriminator so capital-fit queries
+                                    # can cleanly exclude marketdata deaths from
+                                    # the overloaded h7_dropped bucket (C2 pkt
+                                    # Option-A) without parsing reason strings.
+                                    "sizing_outcome": "marketdata_quality_gate",
+                                    "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
+                                    "quality_gate_mode": quality_gate_mode,
+                                    "policy": midday_policy,
+                                    "fatal_count": gate_result.get("fatal_count"),
+                                    "warning_count": gate_result.get("warning_count"),
+                                    "min_quality_score": gate_result.get("min_quality_score"),
+                                    "max_freshness_ms": gate_result.get("max_freshness_ms"),
+                                    "blocked_detail": format_blocked_detail(gate_result),
+                                })
                             continue
                         else:
                             # Soft mode: mark NOT_EXECUTABLE but don't skip
@@ -3742,6 +3784,26 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                                 f"Skipping midday candidate {ticker} {strategy}: quality warning (policy=skip)",
                                 extra={"quality_gate": log_payload}
                             )
+                            # Lane 4B (E5 invariant hole): identical rationale to
+                            # E4 — a HARD-mode skip-policy drop dies BEFORE persist,
+                            # so it earns the pre-persist h7_dropped bucket with a
+                            # distinguishing detail.reason, never persisted_blocked.
+                            if _ctd is not None:
+                                _ctd.record_final(cand, "h7_dropped", detail={
+                                    "reason": "quality_gate_e5_skip_policy",
+                                    # Typed discriminator (see E4 above): lets
+                                    # capital-fit queries exclude marketdata
+                                    # deaths from the h7_dropped bucket cleanly.
+                                    "sizing_outcome": "marketdata_quality_gate",
+                                    "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
+                                    "quality_gate_mode": quality_gate_mode,
+                                    "policy": midday_policy,
+                                    "fatal_count": gate_result.get("fatal_count"),
+                                    "warning_count": gate_result.get("warning_count"),
+                                    "min_quality_score": gate_result.get("min_quality_score"),
+                                    "max_freshness_ms": gate_result.get("max_freshness_ms"),
+                                    "blocked_detail": format_blocked_detail(gate_result),
+                                })
                             continue
                         else:
                             # Soft mode: mark NOT_EXECUTABLE but don't skip

@@ -408,6 +408,45 @@ class TestCloseLegsNeverBecomeGeometry:
         assert got == {175.0: False, 180.0: True, 255.0: True, 260.0: False}
 
 
+class TestScanTimeSpotSourceIsScorable:
+    """⑤ scan-time thread: the stage seam upgrades entry_underlying_spot to
+    {value, source='scan_time', status='populated_at_stage'}. The mapper is
+    source-AGNOSTIC (honours status + finite-positive value), so a scan_time
+    spot makes a future outcome challenger-scorable exactly like any other
+    populated source — while a historical row (no capture) still abstains."""
+
+    def _scan_spot_row(self, record_id, pnl, value=95.0):
+        return _future_debit_row(
+            record_id, False, pnl, spot_marker={
+                "value": value, "source": "scan_time",
+                "as_of": "2026-07-18T12:00:00+00:00",
+                "as_of_source": "provider_quote_ts",
+                "status": "populated_at_stage",
+            })
+
+    def test_mapper_reads_scan_time_populated_value(self):
+        frow, _ = to_foundation_row(self._scan_spot_row("s1", 30.0, value=97.5))
+        assert frow["spot"] == 97.5                       # source ignored, value honoured
+
+    def test_challenger_scores_a_scan_time_future_row(self):
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [self._scan_spot_row("s1", 30.0)]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 1 and live.challenger.abstained == 0
+        assert live.adapter.scored == 1
+        assert live.h2h_baseline_challenger.n_joint == 1   # falsifier adjudicable
+
+    def test_scan_time_future_scores_while_historical_abstains(self):
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [self._scan_spot_row("s1", 30.0),
+                            _debit_row("h1", False, 0.6, 50.0, -20.0)]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 1 and live.challenger.abstained == 1
+        chal_abstain = {p.record_id: p.abstain_reason
+                        for p in live.challenger.predictions if not p.scored}
+        assert chal_abstain == {"h1": "missing_spot"}
+
+
 class TestStudySqlStructure:
     """Reviewer 3(a): pin the SQL text semantics so the opens-only linkage and
     the geometry authority can never silently regress (the §9 SQL-path gap)."""

@@ -10,7 +10,42 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-18 SAT NIGHT — SECOND RUN CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-18 SAT EVENING — THIRD RUN CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (closed at `02b2d8b0` + docs; all four
+services deploy-verified per merge). **MERGED+DEPLOYED:** #1274 `e2f91ac2`
+(⑤ scan-time spot — capture COMPLETE: delta+IV+spot) · #1272 `94a4cdb3`
+(E4/E5 invariant; owner must ratify h7_dropped) · #1271 `53e86f53` (source
+mislabel) · #1273 `9cb3876a` (realized cost consumer #3; per-routing
+commission honesty) · #1275 `da70b67e` (drift-summary quirk) · #1276
+`02b2d8b0` (stress D2 residual CLOSED). ZERO migrations/DB/broker/fleet.
+**⚠ Operator pull BLOCKED** (dirty audit/ledger.md +281 overlaps main; patch
++ handoff in bundle) — tonight's nightly runs the OLD flow under new task
+protections. Full record: `docs/review/saturday-evening-results-2026-07-18.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **Operational handoff (runtime, not builds):** operator resolves the
+   ledger conflict + pulls (handoff in Sunday prompt) · Sunday-nightly
+   verification (bundle prompt) · Monday natural-evidence check (bundle
+   prompt, extended).
+2. **Fleet (owner):** registration mechanism + WHICH 50 + env window
+   (3 honest identities vs 50) → provision → separate activate.
+3. **⑤ evidence:** capture complete — accumulate natural scorable outcomes;
+   re-run the study when the first post-07-18 close lands; then model
+   comparison cadence.
+4. **Multi-basis:** consumers #1-#3 shipped; next = densify close_fill_gap
+   stamps naturally; TCM commission over-charge (−1.55 mean) is evidence for
+   a future TCM fee-model correction (owner-reviewed, not tonight).
+5. **Canonical remainder:** stress residual CLOSED; remaining = arm-the-caps
+   owner decision (consumes greeks_coverage) · D3 ratio-blindness lane.
+6. **Funnel:** E4/E5 closed; C2 taxonomy Option-C detail sub-taxonomy for
+   the remaining sites + owner ratifications; natural proof Mon → OI floor.
+7. **E19-2B** (post-fleet-epoch).
+P2 tail: 9-file fork-uncollectable sweep (drift pattern now established) ·
+as_of units tidy in build_scan_spot_capture (LOW) · scheduler/calibration
+strict-flag doc alignment.
+
+## 2026-07-18 SAT NIGHT — SECOND RUN CLOSED (superseded by the Sat-evening standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `76757684` + docs; all four
 services deploy-verified per merge). **MERGED+DEPLOYED:** #1264 `592a267a`

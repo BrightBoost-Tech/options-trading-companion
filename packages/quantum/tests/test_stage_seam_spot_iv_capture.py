@@ -121,6 +121,7 @@ class TestApplyLegIv(unittest.TestCase):
 
 class TestPopulateEntrySpot(unittest.TestCase):
     def test_open_stamps_typed_unavailable_marker(self):
+        # No scan carrier at all → unchanged legacy behavior.
         oj = {"legs": []}
         pe._populate_stage_entry_spot(oj, position_id=None)
         spot = oj["entry_underlying_spot"]
@@ -134,6 +135,63 @@ class TestPopulateEntrySpot(unittest.TestCase):
         oj = {"legs": []}
         pe._populate_stage_entry_spot(oj, position_id="pos-1")
         self.assertNotIn("entry_underlying_spot", oj)
+
+    def test_close_is_exempt_even_with_scan_spot(self):
+        oj = {"legs": []}
+        pe._populate_stage_entry_spot(
+            oj, position_id="pos-1", scan_spot=_scan_spot_marker())
+        self.assertNotIn("entry_underlying_spot", oj)
+
+    # ── ⑤ scan-time POPULATE upgrade ────────────────────────────────────────
+    def test_finite_positive_scan_spot_populates_marker(self):
+        oj = {"legs": []}
+        pe._populate_stage_entry_spot(
+            oj, position_id=None,
+            scan_spot=_scan_spot_marker(value=512.34,
+                                        as_of="2026-07-18T12:00:00+00:00"))
+        spot = oj["entry_underlying_spot"]
+        self.assertEqual(spot["value"], 512.34)
+        self.assertEqual(spot["source"], "scan_time")
+        self.assertEqual(spot["as_of"], "2026-07-18T12:00:00+00:00")
+        self.assertEqual(spot["as_of_source"], "provider_quote_ts")
+        self.assertEqual(spot["status"], "populated_at_stage")
+        # a populated marker never carries an unavailability reason.
+        self.assertNotIn("reason", spot)
+
+    def test_nonpositive_or_nonfinite_scan_value_types_unavailable(self):
+        for bad in (0.0, -1.0, float("nan"), float("inf"), None):
+            with self.subTest(bad=bad):
+                oj = {"legs": []}
+                pe._populate_stage_entry_spot(
+                    oj, position_id=None, scan_spot=_scan_spot_marker(value=bad))
+                spot = oj["entry_underlying_spot"]
+                self.assertIsNone(spot["value"])              # never fabricated
+                self.assertEqual(spot["status"], "unavailable_at_stage")
+                # a carrier arrived but its value was unusable → precise reason.
+                self.assertEqual(spot["reason"], "scan_spot_nonpositive")
+
+    def test_never_downgrades_a_higher_authority_populated_marker(self):
+        # A FUTURE same-fetch source already populated the marker; our lower-
+        # authority scan_time populate must NOT replace it.
+        oj = {"legs": [], "entry_underlying_spot": {
+            "value": 500.0, "source": "same_fetch_equity_snapshot",
+            "as_of": "2026-07-18T12:30:00+00:00", "status": "populated_at_stage"}}
+        pe._populate_stage_entry_spot(
+            oj, position_id=None, scan_spot=_scan_spot_marker(value=512.34))
+        spot = oj["entry_underlying_spot"]
+        self.assertEqual(spot["value"], 500.0)               # untouched
+        self.assertEqual(spot["source"], "same_fetch_equity_snapshot")
+
+    def test_replaces_a_prior_scan_time_or_unavailable_marker(self):
+        # Same-or-lower authority markers (scan_time / unavailable) are ours to
+        # (re)write — idempotent, never a downgrade.
+        oj = {"legs": [], "entry_underlying_spot": {
+            "value": None, "source": None, "as_of": None,
+            "status": "unavailable_at_stage", "reason": "no_same_fetch_spot_source"}}
+        pe._populate_stage_entry_spot(
+            oj, position_id=None, scan_spot=_scan_spot_marker(value=512.34))
+        self.assertEqual(oj["entry_underlying_spot"]["value"], 512.34)
+        self.assertEqual(oj["entry_underlying_spot"]["source"], "scan_time")
 
 
 # ── route wiring: fake supabase + truth stub ────────────────────────────────
@@ -185,12 +243,17 @@ class _Query:
             return _Resp([{}])
         if self.table == "paper_portfolios":
             return _Resp(self.db.portfolio)
+        # ⑤ the stage seam re-fetches the suggestion (single()); serve it so the
+        # scan-time spot on its order_json rides into _populate_stage_entry_spot.
+        if self.table == "trade_suggestions" and self._op == "select":
+            return _Resp(self.db.suggestion)
         return _Resp(None)
 
 
 class _FakeSupabase:
-    def __init__(self, portfolio):
+    def __init__(self, portfolio, suggestion=None):
         self.portfolio = portfolio
+        self.suggestion = suggestion
         self.order_inserts = []
         self.updates = []
 
@@ -224,12 +287,30 @@ def _ticket():
     )
 
 
-def _drive(route, snaps):
-    """Run _stage_order_internal on the given route; return (order_json, fake)."""
+def _scan_spot_marker(value=512.34, as_of="2026-07-18T12:00:00+00:00"):
+    """The shape build_scan_spot_capture stamps onto candidate/order_json."""
+    return {"value": value, "source": "scanner_underlying_quote_mid",
+            "as_of": as_of, "as_of_source": "provider_quote_ts"}
+
+
+def _suggestion_with_scan_spot(scan_spot):
+    """A persisted suggestion whose order_json carries the ⑤ scan-time spot —
+    the honest carrier the stage seam reads off the re-fetched suggestion."""
+    return {"id": "sug-1", "trace_id": "tr-1", "strategy": None,
+            "window": None, "regime": None, "model_version": None,
+            "features_hash": None,
+            "order_json": {"underlying": "SPY", "legs": [],
+                           "scan_underlying_spot": scan_spot}}
+
+
+def _drive(route, snaps, suggestion=None, suggestion_id=None):
+    """Run _stage_order_internal on the given route; return (order_json, fake).
+    ``suggestion``/``suggestion_id`` exercise the ⑤ scan-time carrier read."""
     live_routed = route != "shadow"
     fake = _FakeSupabase({"id": "port-1",
                           "routing_mode": "live_eligible" if live_routed
-                          else "shadow_only"})
+                          else "shadow_only"},
+                         suggestion=suggestion)
     truth = _TruthStub(snaps)
     fake_truth_module = types.SimpleNamespace(
         MarketDataTruthLayer=lambda *a, **k: truth
@@ -273,6 +354,7 @@ def _drive(route, snaps):
         analytics = mock.MagicMock()
         order_id = pe._stage_order_internal(
             fake, analytics, "user-1", _ticket(), portfolio_id_arg="port-1",
+            suggestion_id_override=suggestion_id,
         )
         assert order_id == "order-test-1"
         assert len(fake.order_inserts) == 1
@@ -334,6 +416,77 @@ class TestStageRoutesPersistIvAndSpot(unittest.TestCase):
         self.assertEqual(legs[1]["iv_source"], "polygon")
         # spot still captured (unavailable) — staging never blocked
         self.assertEqual(oj["entry_underlying_spot"]["status"], "unavailable_at_stage")
+
+
+class TestStageRoutesPopulateScanTimeSpot(unittest.TestCase):
+    """The ⑤ upgrade end-to-end: a suggestion whose order_json carries the
+    scanner's scan-time spot rides into _stage_order_internal and the persisted
+    order_json's entry_underlying_spot is POPULATED (source='scan_time') on ALL
+    four routes — population sits before the exec-mode branch."""
+
+    def _snaps(self):
+        return {LONG_CALL: _snap(iv=0.2045, delta=0.60),
+                SHORT_CALL: _snap(iv=0.1830, delta=0.45)}
+
+    def _assert_populated(self, oj):
+        spot = oj["entry_underlying_spot"]
+        self.assertEqual(spot["value"], 512.34)
+        self.assertEqual(spot["source"], "scan_time")
+        self.assertEqual(spot["status"], "populated_at_stage")
+        self.assertEqual(spot["as_of"], "2026-07-18T12:00:00+00:00")
+        # IV/greeks co-capture is unaffected by the spot upgrade.
+        self.assertEqual(oj["legs"][0]["iv"], 0.2045)
+
+    def _drive_populated(self, route):
+        return _drive(
+            route, self._snaps(),
+            suggestion=_suggestion_with_scan_spot(_scan_spot_marker()),
+            suggestion_id="sug-1",
+        )
+
+    def test_internal_paper_route(self):
+        oj, _ = self._drive_populated("internal")
+        self._assert_populated(oj)
+
+    def test_dry_run_route(self):
+        oj, _ = self._drive_populated("dry_run")
+        self._assert_populated(oj)
+
+    def test_shadow_route(self):
+        oj, fake = self._drive_populated("shadow")
+        self._assert_populated(oj)
+        self.assertTrue(
+            any(u[1].get("execution_mode") == "shadow_blocked" for u in fake.updates)
+        )
+
+    def test_broker_live_route(self):
+        oj, _ = self._drive_populated("live")
+        self._assert_populated(oj)
+
+    def test_carrier_present_but_nonpositive_value_types_unavailable(self):
+        # A suggestion carries the marker but with a bad value → typed
+        # unavailable with the precise reason; staging still succeeds.
+        oj, _ = _drive(
+            "internal", self._snaps(),
+            suggestion=_suggestion_with_scan_spot(_scan_spot_marker(value=0.0)),
+            suggestion_id="sug-1",
+        )
+        spot = oj["entry_underlying_spot"]
+        self.assertIsNone(spot["value"])
+        self.assertEqual(spot["status"], "unavailable_at_stage")
+        self.assertEqual(spot["reason"], "scan_spot_nonpositive")
+
+    def test_suggestion_without_scan_spot_stays_typed_unavailable(self):
+        # A suggestion whose order_json has no scan_underlying_spot → the no-
+        # carrier reason (byte-identical to the pre-⑤ behavior).
+        oj, _ = _drive(
+            "internal", self._snaps(),
+            suggestion=_suggestion_with_scan_spot(None),
+            suggestion_id="sug-1",
+        )
+        spot = oj["entry_underlying_spot"]
+        self.assertIsNone(spot["value"])
+        self.assertEqual(spot["reason"], "no_same_fetch_spot_source")
 
 
 if __name__ == "__main__":

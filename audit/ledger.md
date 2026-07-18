@@ -232,7 +232,15 @@ list_variables with values) → deployed flag values labeled NOT-PROVEN.
   `settings.banned_strategies` (production column = untracked drift; table has
   0 rows); reader degrades to `[]` at logger.debug; zero write surface; full
   enforcement machinery live-routed and permanently inert → **F-BAN-INTEGRITY
-  (P2, owner: build-or-remove)**.
+  (P2, owner: build-or-remove)**. **RESOLVED-BY-REMOVAL 07-18 (Lane C, branch
+  `fix/remove-fban-phantom`; owner decision REMOVE_PHANTOM_FEATURE / packet
+  Option B):** whole `banned_strategies` capability deleted from the backend
+  (dead read, `[]` degradation, `StrategyPolicy` module, selector/scanner
+  threading, `strategy_banned` recheck, design-agent ban branches, dead
+  optimizer key); `require_defined_risk` preserved; decision-equivalent
+  (2,268-scenario byte-identical proof) + structural guard `test_fban_removal.py`.
+  DB drift column LEFT (no migration) → drop belongs to the migration-drift
+  allowlist cleanup. Do not re-find. See backlog F-BAN-INTEGRITY entry.
 - H13 CONFIRMED: DTE 25–45 enforced at chain-fetch, target 35, one scan/day;
   `midday_scan.py` is the same cycle (not separately scheduled); no 0DTE path
   exists — 0DTE stays unfiled.

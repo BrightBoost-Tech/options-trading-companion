@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from packages.quantum.risk.position_model import (
     PositionNormalizationError,
     RiskClassification,
+    aggregate_greeks,
     analyze_payoff,
     normalize_position,
 )
@@ -190,6 +191,16 @@ class EnvelopeCheckResult:
     # is expected 0 until #1259's stage-time greek population ships.
     greeks_coverage: Dict[str, Any] = field(default_factory=dict)
 
+    # OBSERVE-ONLY canonical portfolio greeks (aggregate_canonical_greeks): the
+    # SIGNED, ratio- and multiplier-aware aggregate built through the canonical
+    # position model from the persisted stage-time leg greeks (#1259). Sits
+    # ALONGSIDE portfolio_greeks — it modulates NOTHING, arms no cap, and never
+    # feeds a violation. Longs and shorts NET here (canonical aggregate_greeks),
+    # unlike the D2-defective portfolio_greeks. Empty until check_all_envelopes
+    # runs; {delta,gamma,vega,theta} are None (typed unavailable) whenever any
+    # contributing structure is missing that greek — never a fabricated 0 (H9).
+    canonical_greeks: Dict[str, Any] = field(default_factory=dict)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -209,6 +220,7 @@ class EnvelopeCheckResult:
             "symbol_loss_stops": self.symbol_loss_stops,
             "stress_unavailable": self.stress_unavailable,
             "greeks_coverage": self.greeks_coverage,
+            "canonical_greeks": self.canonical_greeks,
         }
 
 
@@ -360,6 +372,79 @@ def check_greeks(
             ))
 
     return violations, greeks
+
+
+def aggregate_canonical_greeks(positions: List[Dict]) -> Dict[str, Any]:
+    """OBSERVE-ONLY signed portfolio greeks via the canonical position model.
+
+    For each position, normalize it (per-contract greeks auto-sourced from the
+    position's own persisted leg jsonb — #1259 stage-time populate) and
+    aggregate via the canonical ``aggregate_greeks``: ``signed_ratio ×
+    structure_quantity × multiplier`` is applied EXACTLY ONCE and a long and a
+    short leg NET (never the D2 unsigned add that ``check_greeks`` still carries).
+
+    Book-level: each greek total is the sum across structures, typed UNAVAILABLE
+    (``None``) the moment ANY contributing structure is missing that greek — a
+    partial book sum is a fabricated total (H9). ``complete`` is True only when
+    every structure normalized and every leg carried a complete finite greek set.
+
+    PURE TELEMETRY. It NEVER raises (a structure that fails to normalize is
+    counted unrepresentable and drops out, the book flagged incomplete), NEVER
+    arms a cap, NEVER gates a decision. It sits ALONGSIDE ``check_greeks`` and
+    does not replace or feed it. Returns a JSON-serializable dict.
+    """
+    names = ("delta", "gamma", "vega", "theta")
+    sums = {n: 0.0 for n in names}
+    missing = {n: False for n in names}
+    legs_total = 0
+    legs_with_greeks = 0
+    sources: List[str] = []
+    as_of: List[str] = []
+    missing_legs: List[str] = []
+    unrepresentable = 0
+
+    for pos in positions:
+        try:
+            canonical = normalize_position(pos, source="risk_envelope_observe")
+        except PositionNormalizationError:
+            # Unrepresentable structure: it cannot contribute an honest greek
+            # basis, so the whole book is flagged incomplete (never silently
+            # dropped as if flat).
+            unrepresentable += 1
+            for n in names:
+                missing[n] = True
+            continue
+        exposure = aggregate_greeks(canonical)
+        legs_total += exposure.legs_total
+        legs_with_greeks += exposure.legs_with_greeks
+        missing_legs.extend(exposure.missing_legs)
+        sources.extend(exposure.sources)
+        as_of.extend(exposure.as_of)
+        for name, value in (
+            ("delta", exposure.delta_dollars_per_underlying_point),
+            ("gamma", exposure.gamma_dollars_per_point_squared),
+            ("vega", exposure.vega_dollars_per_vol_point),
+            ("theta", exposure.theta_dollars_per_day),
+        ):
+            if value is None:
+                missing[name] = True
+            else:
+                sums[name] += value
+
+    complete = unrepresentable == 0 and not any(missing.values())
+    return {
+        "delta": None if missing["delta"] else sums["delta"],
+        "gamma": None if missing["gamma"] else sums["gamma"],
+        "vega": None if missing["vega"] else sums["vega"],
+        "theta": None if missing["theta"] else sums["theta"],
+        "complete": complete,
+        "legs_total": legs_total,
+        "legs_with_greeks": legs_with_greeks,
+        "missing_legs": sorted(set(missing_legs)),
+        "unrepresentable_structures": unrepresentable,
+        "sources": sorted({s for s in sources if s}),
+        "as_of": sorted({a for a in as_of if a}),
+    }
 
 
 def check_concentration(
@@ -805,6 +890,17 @@ def check_all_envelopes(
     result.portfolio_greeks = greeks
     for v in greek_violations:
         result.add_violation(v)
+
+    # 1b. Canonical signed portfolio greeks (OBSERVE-ONLY telemetry, alongside
+    #     the D2-defective portfolio_greeks above). Fail-soft: a computation
+    #     error here must NEVER break the envelope check — it modulates nothing.
+    try:
+        result.canonical_greeks = aggregate_canonical_greeks(positions)
+    except Exception as exc:  # observe-only; never break the envelope check
+        logger.warning(
+            "[CANONICAL_GREEKS] observe-only aggregate failed: %s", exc
+        )
+        result.canonical_greeks = {"complete": False, "error": str(exc)}
 
     # 2. Concentration
     conc_violations, concentration = check_concentration(

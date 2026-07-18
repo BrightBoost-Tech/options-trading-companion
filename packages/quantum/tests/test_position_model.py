@@ -24,6 +24,7 @@ from packages.quantum.risk.risk_envelope import (
     EnvelopeConfig,
     PositionRiskUnavailable,
     _pos_risk,
+    aggregate_canonical_greeks,
     check_all_envelopes,
     check_greeks,
     compute_stress_scenarios,
@@ -47,6 +48,7 @@ from packages.quantum.risk.position_model import (
     entry_cashflow_from_net_premium,
     expiration_pnl,
     intrinsic_value,
+    leg_greeks_from_persisted,
     normalize_position,
     reconcile_legs,
 )
@@ -1419,6 +1421,214 @@ class TestNonInterference(unittest.TestCase):
             EnvelopeConfig(),
         )
         self.assertAlmostEqual(greeks["delta"], 50.0, places=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 4A — persisted stage-time leg greeks wired into the canonical consumer
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _persisted_debit_qty3_with_greeks() -> dict:
+    """_f5 debit call vertical (qty 3, debit) carrying per-leg stage greeks.
+
+    leg0 buy 100C (signed_ratio +1), leg1 sell 105C (signed_ratio -1),
+    full-count leg qty 3.
+    """
+    pos = _persisted_debit_call_vertical(qty=3, premium=1.50)
+    pos["legs"][0]["greeks"] = {"delta": 0.60, "gamma": 0.03, "vega": 0.12, "theta": -0.06}
+    pos["legs"][0]["greeks_source"] = "alpaca_options"
+    pos["legs"][0]["greeks_as_of"] = "2026-07-18T14:30:00Z"
+    pos["legs"][0]["greeks_status"] = "populated_at_stage"
+    pos["legs"][1]["greeks"] = {"delta": 0.40, "gamma": 0.02, "vega": 0.09, "theta": -0.04}
+    pos["legs"][1]["greeks_source"] = "alpaca_options"
+    pos["legs"][1]["greeks_as_of"] = "2026-07-18T14:30:00Z"
+    pos["legs"][1]["greeks_status"] = "populated_at_stage"
+    return pos
+
+
+class TestCanonicalGreeksWiring(unittest.TestCase):
+    """4A: the persisted #1259 stage greeks flow into the canonical consumer,
+    signed EXACTLY ONCE by aggregate_greeks, carried as typed provenance,
+    observe-only — no cap armed, no threshold/monitor change."""
+
+    EQUITY = 100000.0
+
+    # ── normalize_position auto-sources the leg's own jsonb greeks ──────────
+
+    def test_normalize_position_auto_sources_persisted_leg_greeks(self):
+        pos = _persisted_short_put_vertical()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": -0.30, "gamma": 0.02, "vega": 0.10, "theta": -0.05}
+            leg["greeks_source"] = "alpaca_options"
+            leg["greeks_as_of"] = "2026-07-18T14:30:00Z"
+            leg["greeks_status"] = "populated_at_stage"
+
+        canonical = normalize_position(pos)
+        # GREEKS_NOT_PERSISTED cleared because the legs now carry them.
+        self.assertNotIn(
+            IncompletenessReason.GREEKS_NOT_PERSISTED, canonical.completeness.reasons
+        )
+        self.assertEqual(canonical.completeness.missing_greek_legs, ())
+
+        exposure = aggregate_greeks(canonical)
+        self.assertTrue(exposure.complete)
+        self.assertEqual(exposure.legs_total, 2)
+        self.assertEqual(exposure.legs_with_greeks, 2)
+        self.assertEqual(exposure.sources, ("alpaca_options",))
+        self.assertEqual(exposure.as_of, ("2026-07-18T14:30:00Z",))
+
+    def test_leg_greeks_from_persisted_preserves_raw_unsigned(self):
+        """The helper keeps greeks RAW/UNSIGNED — a short leg is NOT pre-signed."""
+        raw = {
+            "symbol": _occ("SPY", "P", 100.0),
+            "action": "sell",  # short
+            "greeks": {"delta": -0.40, "gamma": 0.02, "vega": 0.10, "theta": -0.05},
+            "greeks_source": "alpaca_options",
+            "greeks_as_of": "2026-07-18T14:30:00Z",
+            "greeks_status": "populated_at_stage",
+        }
+        lg = leg_greeks_from_persisted(raw)
+        self.assertIsNotNone(lg)
+        # RAW: the -0.40 is unchanged; the short sign is NOT applied here.
+        self.assertAlmostEqual(lg.delta, -0.40, places=4)
+        self.assertEqual(lg.source, "alpaca_options")
+        self.assertEqual(lg.status, "populated_at_stage")
+
+    def test_partial_persisted_greeks_type_unavailable_not_zero(self):
+        pos = _persisted_short_put_vertical()
+        pos["legs"][0]["greeks"] = {"delta": -0.30}  # gamma/vega/theta absent
+        # leg1 has no greeks at all
+        canonical = normalize_position(pos)
+        exposure = aggregate_greeks(canonical)
+        self.assertFalse(exposure.complete)
+        self.assertIsNone(exposure.delta_dollars_per_underlying_point)
+        self.assertIn(
+            IncompletenessReason.GREEKS_NOT_PERSISTED, canonical.completeness.reasons
+        )
+        self.assertIsNone(leg_greeks_from_persisted(pos["legs"][0]))
+
+    def test_explicit_override_wins_over_persisted_leg_jsonb(self):
+        pos = _persisted_short_put_vertical()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": 9.99, "gamma": 9.99, "vega": 9.99, "theta": 9.99}
+        override = {
+            _occ("SPY", "P", 100.0): _g(delta=-0.30, gamma=0.02, vega=0.10, theta=-0.05),
+            _occ("SPY", "P", 95.0): _g(delta=-0.20, gamma=0.01, vega=0.08, theta=-0.03),
+        }
+        canonical = normalize_position(pos, greeks_by_symbol=override)
+        exposure = aggregate_greeks(canonical)
+        # structure_quantity 2: (-1*2*100*-0.30) + (+1*2*100*-0.20) = 60 - 40 = 20
+        # The 9.99 leg-jsonb values would have given a very different number.
+        self.assertAlmostEqual(exposure.delta_dollars_per_underlying_point, 20.0, places=2)
+
+    # ── end-to-end route through check_all_envelopes → canonical_greeks ─────
+
+    def test_route_vertical_flows_to_signed_canonical_aggregate(self):
+        pos = _persisted_short_put_vertical()  # sell 100P / buy 95P, qty -2
+        pos["legs"][0]["greeks"] = {"delta": -0.40, "gamma": 0.02, "vega": 0.10, "theta": -0.05}
+        pos["legs"][0]["greeks_source"] = "alpaca_options"
+        pos["legs"][0]["greeks_status"] = "populated_at_stage"
+        pos["legs"][1]["greeks"] = {"delta": -0.25, "gamma": 0.01, "vega": 0.08, "theta": -0.03}
+        pos["legs"][1]["greeks_source"] = "alpaca_options"
+        pos["legs"][1]["greeks_status"] = "populated_at_stage"
+
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=_permissive_config())
+        cg = result.canonical_greeks
+
+        # structure_quantity 2; short leg's -0.40 is signed +80, long leg's -0.25 is -50.
+        self.assertAlmostEqual(cg["delta"], 30.0, places=2)
+        self.assertAlmostEqual(cg["gamma"], -2.0, places=2)
+        self.assertAlmostEqual(cg["vega"], -4.0, places=2)
+        self.assertAlmostEqual(cg["theta"], 4.0, places=2)
+        self.assertTrue(cg["complete"])
+        self.assertEqual(cg["legs_with_greeks"], 2)
+        self.assertEqual(cg["sources"], ["alpaca_options"])
+
+    def test_route_sign_applied_exactly_once(self):
+        """qty>1 debit: the signed aggregate is scaled ONCE — not doubled, not
+        unsigned. Any double-qty (180) or unsigned-add (300) would show here."""
+        result = check_all_envelopes(
+            [_persisted_debit_qty3_with_greeks()], equity=self.EQUITY,
+            config=_permissive_config(),
+        )
+        cg = result.canonical_greeks
+        # +1*3*100*0.60 + -1*3*100*0.40 = 180 - 120 = 60
+        self.assertAlmostEqual(cg["delta"], 60.0, places=2)
+        self.assertNotAlmostEqual(cg["delta"], 180.0, places=2)  # double-qty phantom
+        self.assertNotAlmostEqual(cg["delta"], 300.0, places=2)  # unsigned-add phantom
+        self.assertTrue(cg["complete"])
+
+    def test_route_condor_four_legs_signed(self):
+        pos = _persisted_iron_condor()  # sell650P / buy645P / sell765C / buy770C, qty -1
+        deltas = {650.0: -0.40, 645.0: -0.10, 765.0: 0.20, 770.0: 0.05}
+        for leg in pos["legs"]:
+            leg["greeks"] = {
+                "delta": deltas[leg["strike"]],
+                "gamma": 0.01, "vega": 0.05, "theta": -0.02,
+            }
+            leg["greeks_source"] = "alpaca_options"
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=_permissive_config())
+        cg = result.canonical_greeks
+        # (-1*100*-0.40)+(+1*100*-0.10)+(-1*100*0.20)+(+1*100*0.05) = 40-10-20+5 = 15
+        self.assertAlmostEqual(cg["delta"], 15.0, places=2)
+        self.assertTrue(cg["complete"])
+        self.assertEqual(cg["legs_with_greeks"], 4)
+
+    def test_route_greeksless_historical_position_incomplete_and_stress_unchanged(self):
+        """A greeks-less (pre-#1259) position: the canonical aggregate is typed
+        unavailable AND the payoff-capped stress path is byte-identical."""
+        pos = _persisted_short_put_vertical()  # no greeks on legs
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=_permissive_config())
+        cg = result.canonical_greeks
+        self.assertFalse(cg["complete"])
+        self.assertIsNone(cg["delta"])
+        self.assertEqual(cg["legs_with_greeks"], 0)
+        # Stress behavior unchanged: the greek scenarios stay typed-unavailable.
+        self.assertNotIn("spy_down", result.stress_results)
+        self.assertEqual(
+            result.stress_unavailable["spy_down"],
+            {"reason": "greeks_missing", "missing_field": "delta", "legs_missing": 2},
+        )
+
+    def test_route_dark_leg_makes_canonical_aggregate_incomplete(self):
+        """One leg dark (greeks=None, typed unavailable at stage) → complete False."""
+        pos = _persisted_short_put_vertical()
+        pos["legs"][0]["greeks"] = {"delta": -0.40, "gamma": 0.02, "vega": 0.10, "theta": -0.05}
+        pos["legs"][0]["greeks_status"] = "populated_at_stage"
+        pos["legs"][1]["greeks"] = None
+        pos["legs"][1]["greeks_status"] = "unavailable_at_stage"
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=_permissive_config())
+        cg = result.canonical_greeks
+        self.assertFalse(cg["complete"])
+        self.assertIsNone(cg["delta"])
+        self.assertIn(_occ("SPY", "P", 95.0), cg["missing_legs"])
+        self.assertEqual(cg["legs_with_greeks"], 1)
+
+    def test_route_observe_only_no_violation_and_json_serializable(self):
+        """canonical_greeks arms nothing: caps default 0, no greek violation, and
+        the serialized result stays JSON-safe."""
+        import json
+        pos = _persisted_short_put_vertical()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": 9.99, "gamma": 9.99, "vega": 9.99, "theta": 9.99}
+            leg["greeks_source"] = "alpaca_options"
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=_permissive_config())
+        # Huge signed exposure, zero greek violations (caps dormant).
+        self.assertEqual(
+            [v for v in result.violations if v.envelope.startswith("greeks_")], []
+        )
+        as_dict = result.to_dict()
+        self.assertIn("canonical_greeks", as_dict)
+        json.dumps(as_dict)  # must not raise
+
+    def test_aggregate_canonical_greeks_never_raises_on_unrepresentable(self):
+        """A structure that cannot be normalized (no legs) flags the book
+        incomplete — the observe-only aggregate never raises."""
+        malformed = {"id": "no-legs", "quantity": -2, "avg_entry_price": 1.20}
+        cg = aggregate_canonical_greeks([malformed])
+        self.assertFalse(cg["complete"])
+        self.assertIsNone(cg["delta"])
+        self.assertEqual(cg["unrepresentable_structures"], 1)
 
 
 if __name__ == "__main__":

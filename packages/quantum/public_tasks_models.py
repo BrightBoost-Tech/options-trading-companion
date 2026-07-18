@@ -13,7 +13,7 @@ Usage:
         ...
 """
 
-from typing import Optional, Literal
+from typing import Any, Dict, Optional, Literal
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
@@ -565,6 +565,71 @@ class PaperMarkToMarketPayload(TaskPayloadBase):
         return v
 
 
+class ShadowFleetActivationPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/shadow-fleet/activation (F-SHADOW-CAPITAL-PARITY, 3A).
+
+    OPERATOR-ONLY surface for the 50 x $2,000 small_tier_v1 shadow fleet.
+    Never scheduled; invoked exclusively via the signed-task pattern with an
+    explicit payload (there is no default payload — `step` is required).
+
+    Default action is DRY-RUN (execute=False): full plan + readiness, zero
+    writes. Execution additionally requires ALL of: execute=true, the
+    confirm literal, an idempotency_key, the FLEET_ACTIVATION_AUTHORIZED=1
+    env opt-in on the running process, and — for the activate step — the
+    50-slot policy_registrations map plus the attestation payload
+    referencing the stale-order reconciliation receipt (validated in
+    services/shadow_fleet_activation.py; never invented or defaulted).
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+    step: Literal["provision", "activate"] = Field(
+        ...,  # Required — no default step; the surface is explicit-only
+        description="Which fleet step to plan/execute"
+    )
+    execute: bool = Field(
+        default=False,
+        description="False (default) = dry-run plan with zero writes; "
+                    "True = attempt execution (further gated in the service)"
+    )
+    confirm: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="Must equal the explicit operator confirm literal "
+                    "('EXECUTE-SHADOW-FLEET') when execute=true"
+    )
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Operator-chosen idempotency key; required when "
+                    "execute=true, recorded in the audit receipt"
+    )
+    policy_registrations: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Activate step: map of slot number (as string '1'..'50') "
+                    "to a unique pre-registered policy id. Never defaulted."
+    )
+    attestation: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Activate step: operator attestation with "
+                    "stale_order_reconciliation_receipt, "
+                    "legacy_terminal_verified_at (tz-aware ISO), attested_by"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
 # =============================================================================
 # Scope Constants
 # =============================================================================
@@ -592,6 +657,7 @@ TASK_SCOPES = {
     "/tasks/paper/exit-evaluate": "tasks:paper_exit_evaluate",
     "/tasks/paper/mark-to-market": "tasks:paper_mark_to_market",
     "/tasks/paper/learning-ingest": "tasks:paper_learning_ingest",
+    "/tasks/shadow-fleet/activation": "tasks:shadow_fleet_activation",
 }
 
 

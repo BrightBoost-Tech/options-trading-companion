@@ -116,14 +116,23 @@ operator procedures `docs/runbooks/browser-verification.md`.
   CLOSE_REARM_ENABLED, INTRADAY_COHORT_STOP_ENABLED,
   CALIBRATION_STALENESS_TTL_ENABLED, ENTRY_QUOTE_SOURCE_ALIGNED.
 - **Behavioral/loosening changes: explicit opt-in.** Requires exactly `=1`
-  (lenient variants accept `1/true/yes/on` — check the parser); absent/empty
+  (SOME variants are lenient `1/true/yes/on` — ALWAYS check the parser;
+  07-18 audit: `RISK_UTILIZATION_GATE_ENABLED` is STRICT `=="1"`, and so are
+  the global trio `CALIBRATION_ENABLED` / `SCHEDULER_ENABLED` /
+  `RISK_ENVELOPE_ENFORCE` — setting `CALIBRATION_ENABLED=true` DISABLES
+  calibration; `IV_RANK_NONE_ROUTING_ENABLED` accepts 1/true/yes but NOT
+  `on`; `LIVE_ENABLED` accepts true/1 only, no strip); absent/empty
   → the stricter legacy behavior, so an env regression fails SAFE. A
   non-empty non-truthy value logs an explicit WARNING.
   Canonical: RISK_UTILIZATION_GATE_ENABLED (threshold
   RISK_MAX_UTILIZATION_PCT has NO implicit default — enabled-but-unset fails
   closed), EXIT_MARK_SANITY_ENFORCE_ENABLED, GTC_PROFIT_EXIT_ENABLED.
 - **Flags must be read-back-confirmed** on the running process, not assumed
-  from the dashboard. Some legacy flags strict-parse `== "1"`
+  from the dashboard — since 07-18 (#1268) every process start logs a
+  `[FLAG_ECHO]` block with each behavioral flag's EFFECTIVE parsed value via
+  its real parser (packages/quantum/flag_echo.py, allowlist-only, 27 flags):
+  read the echo in the deploy logs instead of guessing. Some legacy flags
+  strict-parse `== "1"`
   (INTRADAY_TARGET_PROFIT_ENABLED) — check the parse before trusting a
   `true`. Startup flag-echo is backlogged (P2).
 
@@ -407,6 +416,15 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   264b720d pending the docs-merge redeploy). Fleet:
   BLOCKED_FLEET_PROVISION (env gate + no 50 policy ids; owner manifest in
   bundle). Zero fleet provisioning/activation; zero broker writes.
+  **07-18 SAT NIGHT run** (`docs/review/saturday-night-results-2026-07-18.md`):
+  #1264 592a267a nightly-runner reliability (wrapper + fresh audit worktree +
+  scrubbed broker snapshot + completion contract; LOCAL Task Scheduler task
+  re-registered, backup+rollback in bundle; operator pull needed before Sun
+  00:00 CT) · #1265 35836cdc scanner cost bases · #1263 a558de7e canonical
+  greeks wiring · #1269 fdcaf644 D2 signed aggregate FIXED · #1266 851416a0
+  ⑤ IV capture + typed-unavailable spot (open-order STUDY_SQL linkage) ·
+  #1268 76757684 startup flag echo (27 flags, real parsers). Zero
+  migrations/production-DB/broker/fleet actions.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -578,13 +596,16 @@ unscheduled operator-triggered `replay_integrity_check` → `background`
 - **The greeks exposure envelope is SINGLE-dormant since 07-18** (was
   DOUBLE-dormant, verified 07-02): #1259 populates per-leg greeks at stage
   time going forward (complete-finite dict or typed `greeks=None` +
-  `greeks_status` — never partial, never fabricated zeros), and #1261 made
-  check_greeks null-safe with a typed `greeks_coverage` field. BUT all four
-  caps still default 0 = no-limit, so it is STILL NOT live protection — and
-  the reported `portfolio_greeks` aggregate now shows non-zero values
-  computed with the D2-defective unsigned add (a lying display; the honest
-  consumer is `aggregate_greeks`). Arming caps is a separate owner decision
-  and must consume `greeks_coverage`; historical legs remain greeks-less.
+  `greeks_status` — never partial, never fabricated zeros), #1261 made
+  check_greeks null-safe with typed `greeks_coverage`, #1263 wires persisted
+  greeks into the canonical `normalize_position`/`aggregate_greeks` path
+  (sign applied exactly once), and #1269 FIXED D2 in check_greeks — the
+  reported `portfolio_greeks` is now the honest SIGNED net (no longer a
+  lying display). BUT all four caps still default 0 = no-limit, so it is
+  STILL NOT live protection. Residual D2-pattern: `compute_stress_scenarios`
+  still sums unsigned — payoff-clamped so bounded-safe, future stress lane.
+  Arming caps is a separate owner decision and must consume
+  `greeks_coverage`; historical legs remain greeks-less.
 - **Shadow-cohort ledgers are partly fiction** (quantified 07-02,
   `docs/specs/shadow_fill_realism.md`): shadows fill 100% by construction
   at 5–17× live size; live fill rate ≈1/3 (10 of ~54 orders died
@@ -838,7 +859,7 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-18 weekend run)
+## Current overnight standing (2026-07-16; updated through the 07-18 Sat-night run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch

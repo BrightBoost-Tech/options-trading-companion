@@ -10,7 +10,40 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-18 SAT — WEEKEND RUN CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-18 SAT NIGHT — SECOND RUN CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (closed at `76757684` + docs; all four
+services deploy-verified per merge). **MERGED+DEPLOYED:** #1264 `592a267a`
+(nightly runner; **local task re-registered, rollback in bundle; ⚠ operator
+pull before Sun 00:00 CT**) · #1265 `35836cdc` (scanner cost bases) · #1263
+`a558de7e` (canonical greeks wiring) · #1269 `fdcaf644` (D2 signed aggregate
+FIXED; supersedes #1267) · #1266 `851416a0` (⑤ IV capture + typed-unavailable
+spot; STUDY_SQL open-order linkage) · #1268 `76757684` (27-flag startup echo).
+ZERO migrations created/applied · ZERO production-DB/broker/fleet actions.
+Full record: `docs/review/saturday-night-results-2026-07-18.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **Operational handoff:** operator `git pull` before Sun 00:00 CT (wrapper
+   flow) · watch Sunday's nightly under the new task config · Monday
+   natural-evidence check (bundle prompt) — runtime checks, not build slots.
+2. **Fleet (owner decisions):** registration mechanism choice (table vs
+   config; packet) + WHICH 50 policy parameterizations (3 exist, gap 47) →
+   env window → provision → separate activate.
+3. **⑤ evidence:** thread scan-time `current_price` into the stage capture
+   (reviewer-endorsed lane) → challenger scorable; frozen adapter scorable
+   already on future rows; Monday+ accumulation.
+4. **Multi-basis:** consumer #3 = realized close-cost comparison (needs
+   broker fills; read-only report shape).
+5. **Canonical remainder:** stress-model D2 residual lane · arm-the-caps
+   owner decision (consumes greeks_coverage) · E4/E5 disposition hole fix +
+   taxonomy Option-C detail sub-taxonomy (owner packet).
+6. **Funnel natural proof Mon → OI floor** (blocked until rows reviewed).
+7. **E19-2B** (post-fleet-epoch).
+P2 tail: options_scanner.py:4213 source_used mislabel · scheduler/calibration
+strict-flag doc alignment (echo now surfaces them) · drift-summary local-Windows
+collection quirk.
+
+## 2026-07-18 SAT (morning) — WEEKEND RUN CLOSED (superseded by the Sat-night standing above)
 
 Main pointer: verify on Railway/GitHub (weekend closed at `e0a1584` + docs;
 ⚠ BE deploy FAILED at e0a1584 on a clean start — BE serves `264b720d` until

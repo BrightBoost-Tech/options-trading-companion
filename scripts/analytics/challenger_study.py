@@ -24,19 +24,28 @@ DATA CONTRACT (one row per closed historical outcome, deduped by suggestion):
     record_id, is_paper, strategy (DB vocab), regime, known_at (ISO-8601 as-of),
     realized_pnl (CORRECTED live value), pop_pred, ev_pred (stored production
     predictions, may be null), net_premium (>0), contracts,
-    legs [{side|action, symbol (OCC), quantity, +optional iv, greeks{delta,…}}],
-    corrected (bool), +optional entry_underlying_spot {value, status, …}.
+    legs [{side|action, symbol (OCC), quantity}]  (the DECISION-record suggestion
+        legs — the GEOMETRY authority; NEVER the order legs),
+    corrected (bool),
+    captured_legs [{symbol (OCC), iv, greeks{delta,…}, …}] | null  (per-leg
+        stage-seam capture from the OPEN order only; merged onto geometry BY
+        OCC SYMBOL),
+    entry_underlying_spot {value, status, …} | null  (stage-level capture, OPEN
+        order only).
 
-⑤ FUTURE SCORABILITY (stage-seam capture, PRs #1259 + entry-spot/IV): a row
-whose trade was staged AFTER the capture landed carries per-leg ``iv`` +
-``greeks.delta`` on its legs and a stage-level ``entry_underlying_spot`` marker
-(SQL sources these from the stage-populated ``paper_orders.order_json``). The
-mapper below consumes them NATURALLY: the frozen adapter scores once per-leg
-delta is present; the lognormal challenger scores once spot AND per-leg IV are
-BOTH present. HISTORICAL rows captured none of these → the fields are absent →
-the models abstain (missing_delta / missing_spot / missing_iv), COUNTED not
-scored. Per H9 nothing is ever backfilled or defaulted: an absent field stays
-absent and the model abstains, never a fabricated spot/IV/delta.
+⑤ FUTURE SCORABILITY (stage-seam capture, PRs #1259 + entry-spot/IV): geometry
+ALWAYS comes from the suggestion legs; the CAPTURED market inputs (per-leg iv +
+greeks.delta, and the entry spot marker) come ONLY from the OPENING order,
+identified by the capture marker ``order_json ? 'entry_underlying_spot'`` which
+is written EXCLUSIVELY on the OPEN path (closes are capture-exempt — no exit-side
+iv can ever leak in). The mapper merges captured per-leg fields onto the
+suggestion geometry BY OCC SYMBOL: the frozen adapter scores once per-leg delta
+is present; the lognormal challenger scores once spot AND per-leg IV are BOTH
+present. HISTORICAL rows (staged before the capture) have captured_legs=null and
+entry_underlying_spot=null → the fields are absent → the models abstain
+(missing_delta / missing_spot / missing_iv), COUNTED not scored. Per H9 nothing
+is ever backfilled or defaulted: an absent field stays absent and the model
+abstains, never a fabricated spot/IV/delta.
 """
 
 from __future__ import annotations
@@ -105,29 +114,33 @@ FROM (
     round((ts.order_json->>'limit_price')::numeric,4) AS net_premium,
     COALESCE((ts.order_json->>'contracts')::int,1) AS contracts,
     (l.suggestion_id IS NOT NULL) AS corrected,
-    -- queue-5: prefer the STAGE-POPULATED legs (per-leg iv + greeks.delta
-    -- captured at the stage seam, PRs #1259 + entry-spot/IV); fall back to the
-    -- decision-record suggestion legs for any suggestion with no captured order
-    -- (older rows -> no iv/delta -> the models abstain, never defaulted). Same
-    -- OCC symbols/geometry either way; the mapper reads side|action.
-    COALESCE(po.order_json->'legs', ts.order_json->'legs') AS legs,
-    -- queue-5: stage-level entry underlying spot (typed marker). NULL for
-    -- suggestions staged before the capture; {status:'unavailable_at_stage'}
-    -- until an honest same-fetch spot source is wired -- either way the
-    -- challenger abstains missing_spot, never on a fabricated value.
-    po.order_json->'entry_underlying_spot' AS entry_underlying_spot
+    -- GEOMETRY is ALWAYS the decision-record suggestion legs (the authority).
+    -- NEVER the order legs: a CLOSE order carries reversed/partial legs (e.g. a
+    -- 1-leg buy-to-close vs the 4-leg condor open) and would corrupt the
+    -- structure (40/82 scored outcomes have open/close leg-count differences).
+    ts.order_json->'legs' AS legs,
+    -- queue-5 CAPTURED market inputs come ONLY from the OPEN order, identified
+    -- by the stage-seam capture marker itself: `order_json ? 'entry_underlying_
+    -- spot'` is written EXCLUSIVELY on the OPEN path (position_id IS NULL at
+    -- stage); CLOSES are capture-exempt and never carry it, so this can never
+    -- read exit-side iv/greeks. `staged_at ASC` picks the opening order.
+    -- captured_legs carries per-leg {iv, greeks.delta}; the mapper merges it
+    -- onto the suggestion geometry BY OCC SYMBOL. NULL for every pre-capture
+    -- (historical) row -> the models abstain, never defaulted (H9).
+    open_po.order_json->'legs' AS captured_legs,
+    open_po.order_json->'entry_underlying_spot' AS entry_underlying_spot
   FROM ded d
   JOIN trade_suggestions ts ON ts.id = d.suggestion_id
   LEFT JOIN LATERAL (
-    -- latest staged/filled order carrying the stage-populated legs for this
-    -- suggestion (observe-only read; DISTINCT-latest is enough for the study).
+    -- The OPENING order for this suggestion: earliest-staged order that ran the
+    -- stage-seam capture (marker present == OPEN by construction). Read-only.
     SELECT po.order_json
     FROM paper_orders po
     WHERE po.suggestion_id = d.suggestion_id
-      AND po.order_json ? 'legs'
-    ORDER BY po.staged_at DESC NULLS LAST
+      AND po.order_json ? 'entry_underlying_spot'
+    ORDER BY po.staged_at ASC NULLS LAST
     LIMIT 1
-  ) po ON true
+  ) open_po ON true
   LEFT JOIN LATERAL (
     SELECT lfl.suggestion_id FROM learning_feedback_loops lfl
     WHERE lfl.suggestion_id = d.suggestion_id
@@ -240,6 +253,26 @@ def _entry_spot(raw: Any) -> Optional[float]:
     return v if (v is not None and v > 0) else None
 
 
+def _captured_leg_index(captured_legs: Any) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+    """Build an OCC-symbol -> (iv, delta) map from the OPEN order's stage-seam
+    captured legs. Keyed by symbol so it merges onto the suggestion GEOMETRY by
+    identity — never by position, never replacing the geometry. A symbol that is
+    not in the captured set (or a captured leg with dark iv/greeks) contributes
+    nothing → that leg stays uncaptured → the model abstains (H9). Absent /
+    non-list captured_legs (every historical row) → empty map."""
+    idx: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+    if not isinstance(captured_legs, list):
+        return idx
+    for leg in captured_legs:
+        if not isinstance(leg, dict):
+            continue
+        sym = leg.get("symbol") or leg.get("occ_symbol")
+        if not sym:
+            continue
+        idx[sym] = (_leg_iv(leg), _leg_delta(leg))
+    return idx
+
+
 # --- DB row -> foundation row-dict + stored-prediction side map -------------
 def to_foundation_row(db_row: Dict[str, Any]) -> Tuple[Dict[str, Any], Tuple[Optional[float], Optional[float], float, float]]:
     """Map ONE db row to the ``records_from_rows`` schema and extract the stored
@@ -250,24 +283,33 @@ def to_foundation_row(db_row: Dict[str, Any]) -> Tuple[Dict[str, Any], Tuple[Opt
     if strategy is None:
         raise ValueError(f"unmapped strategy {db_row['strategy']!r}")
 
+    # GEOMETRY authority: the DECISION-record suggestion legs, ALWAYS. Captured
+    # market inputs (iv/delta) merge on top BY OCC SYMBOL from the OPEN order —
+    # the close-order legs (reversed/partial) can NEVER become the geometry.
+    captured = _captured_leg_index(db_row.get("captured_legs"))
     legs: List[Dict[str, Any]] = []
     strikes: List[float] = []
     expiries: List[date] = []
     for leg in db_row["legs"]:
-        option_type, strike, expiry = parse_occ(leg["symbol"])
-        # Suggestion legs use 'side'; stage-populated (paper_orders/positions)
-        # legs use 'action' — accept either.
+        sym = leg["symbol"]
+        option_type, strike, expiry = parse_occ(sym)
+        # Suggestion legs use 'side' (accept 'action' defensively).
         fleg: Dict[str, Any] = {
             "action": leg.get("side") or leg.get("action"),
             "option_type": option_type,
             "strike": strike,
         }
-        # ⑤ captured market inputs flow through ONLY when present (H9): a
-        # historical leg omits both and the models abstain, never defaulted.
-        iv = _leg_iv(leg)
+        # ⑤ captured iv/delta from the OPEN order, matched to THIS geometry leg
+        # by symbol. Prefer the captured_legs payload (the corrected SQL shape);
+        # when there is no captured_legs at all, fall back to iv/delta carried
+        # on the leg itself (a flat synthetic/test row). Absent either way → the
+        # field is omitted and the model abstains, never defaulted (H9).
+        if captured:
+            iv, delta = captured.get(sym, (None, None))
+        else:
+            iv, delta = _leg_iv(leg), _leg_delta(leg)
         if iv is not None:
             fleg["iv"] = iv
-        delta = _leg_delta(leg)
         if delta is not None:
             fleg["delta"] = delta
         legs.append(fleg)

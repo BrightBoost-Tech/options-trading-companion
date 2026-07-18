@@ -19,7 +19,6 @@ Coverage, per the build charter:
 string / getsource assertion) and asserts on the OUTPUT (the call fired / the
 block was logged).
 """
-import importlib
 import logging
 import os
 import sys
@@ -254,64 +253,75 @@ class TestEchoLoggingAndIdempotence(unittest.TestCase):
         self.assertEqual(second.get("skipped"), "already_echoed")
 
 
+import subprocess  # noqa: E402
+
+
+_REPO_ROOT = Path(flag_echo.__file__).resolve().parents[3]  # -> repo root
+
+
+def _import_route_stdout(module: str, extra_env=None):
+    """Drive the REAL production import route in a FRESH subprocess and return
+    its combined stdout+stderr.
+
+    Why a subprocess and not an in-process import/reload: the wiring fires at
+    MODULE IMPORT. Popping + re-importing api/runner in-process mutates the
+    shared sys.modules a whole test session depends on — that pollution broke
+    the rebalance contract tests when this file ran before them. A fresh
+    process drives the exact production route (`import <module>`) with ZERO
+    in-process side effects, and asserts on the real logged OUTPUT (§9: drive
+    the route, assert the output — never a source-string / getsource pin).
+
+    PYTHONUTF8=1 so api.py's emoji startup prints don't UnicodeError on a
+    Windows cp1252 stdout (Linux CI stdout is already UTF-8). The echo line at
+    api.py module scope fires BEFORE the later router imports, so its block is
+    captured even if a downstream import (e.g. the Windows 'fork' class) then
+    crashes — proving the wiring regardless of full-import success.
+    """
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.setdefault("PYTHONPATH", str(_REPO_ROOT))
+    # Placeholders so api's startup config validation reaches the echo line.
+    for k, v in {
+        "SUPABASE_JWT_SECRET": "test-secret",
+        "NEXT_PUBLIC_SUPABASE_URL": "http://localhost:54321",
+        "SUPABASE_ANON_KEY": "test-anon-key",
+        "SUPABASE_SERVICE_ROLE_KEY": "test-service-key",
+        "ENCRYPTION_KEY": "ke2AXS883XK_QFY9uLNGUiQlce1MifOaZNmmn06eoC8=",
+        "TASK_SIGNING_SECRET": "test-task-secret",
+        "POLYGON_API_KEY": "test-polygon-key",
+    }.items():
+        env.setdefault(k, v)
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(_REPO_ROOT), env=env, timeout=180,
+    )
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
 class TestWorkerWiringRoute(unittest.TestCase):
-    """DRIVE the real worker import route and assert the echo fired — not a
-    source-string assertion (§9 #1126 costume). jobs.runner's module-level call
-    is the both-workers hook."""
+    """DRIVE the real both-workers import route (jobs.runner module-level call)
+    in a fresh process; assert the echo block was emitted with process=worker."""
 
     def test_runner_import_fires_echo(self):
-        sys.modules.pop("packages.quantum.jobs.runner", None)
-        with mock.patch(
-            "packages.quantum.observability.flag_echo.echo_effective_flags"
-        ) as spy:
-            try:
-                importlib.import_module("packages.quantum.jobs.runner")
-            except ImportError as e:  # transitive dep missing in this env, not a wiring bug
-                self.skipTest(f"runner import deps unavailable: {e}")
-        self.assertTrue(spy.called, "runner import did not fire the flag echo")
-        self.assertEqual(spy.call_args.kwargs.get("process"), "worker")
+        out = _import_route_stdout("packages.quantum.jobs.runner")
+        self.assertIn("[FLAG_ECHO]", out, f"no echo block on worker route:\n{out[-2000:]}")
+        self.assertIn("process=worker", out)
 
 
 class TestBackendWiringRoute(unittest.TestCase):
-    """DRIVE the real BE import route (api module-level call). Heavy import —
-    needs env + a mocked supabase client; SKIPS cleanly if the bare env can't
-    construct the app (runs green in CI where deps resolve)."""
+    """DRIVE the real BE import route (api module-level call) in a fresh
+    process; assert the echo block was emitted with process=backend. The echo
+    fires before router imports, so a later Windows-only 'fork' crash does not
+    hide it."""
 
     def test_api_import_fires_echo(self):
-        for k, v in {
-            "SUPABASE_JWT_SECRET": "test-secret",
-            "NEXT_PUBLIC_SUPABASE_URL": "https://test.supabase.co",
-            "SUPABASE_ANON_KEY": "test-anon-key",
-            "SUPABASE_SERVICE_ROLE_KEY": "test-service-key",
-            "ENCRYPTION_KEY": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
-            "POLYGON_API_KEY": "test-polygon-key",
-            "TASK_SIGNING_SECRET": "test-task-secret",
-        }.items():
-            os.environ.setdefault(k, v)
-        sys.modules.pop("packages.quantum.api", None)
-        # Spy the echo on its SOURCE module BEFORE importing api (api does
-        # `from ...flag_echo import echo_effective_flags`, which reads the
-        # patched attr). Patch supabase at the library + config level so no
-        # real client is built — never patch `packages.quantum.api.*`, which
-        # would force an early un-spied import.
-        import_error = None
-        with mock.patch("packages.quantum.observability.flag_echo.echo_effective_flags") as spy, \
-             mock.patch("supabase.create_client", return_value=mock.MagicMock()), \
-             mock.patch("packages.quantum.security.supabase_config.create_client",
-                        return_value=mock.MagicMock()):
-            try:
-                importlib.import_module("packages.quantum.api")
-            except Exception as e:  # noqa: BLE001
-                import_error = e
-            fired = spy.called
-            process = spy.call_args.kwargs.get("process") if spy.call_args else None
-        # The echo call is at module scope BEFORE router registration. If import
-        # fails LATER (e.g. Windows-only 'fork' context in a router module, absent
-        # in Linux CI), the echo already fired — that still proves the wiring. Only
-        # skip if the failure preempted the echo line entirely.
-        if not fired:
-            self.skipTest(f"api import preempted the echo line in this env: {import_error!r}")
-        self.assertEqual(process, "backend")
+        out = _import_route_stdout("packages.quantum.api")
+        self.assertIn("[FLAG_ECHO]", out, f"no echo block on BE route:\n{out[-2000:]}")
+        self.assertIn("process=backend", out)
 
 
 if __name__ == "__main__":

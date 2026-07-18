@@ -1,430 +1,368 @@
-"""Tests for #101 — Issue B: CSX close-order sign convention +
-diagnostic instrumentation.
+"""CSX #101 incident coverage — the parts no other suite owns, driven
+through the REAL seams (rewritten 2026-07-17, Lane 4A test-honesty).
 
-Background: CSX position opened 2026-05-05 at $2.16 debit produced 22
-close orders rejected by Alpaca over 36+ hours (2026-05-07 → 2026-05-09).
-Root cause: paper_exit_evaluator sent positive limit_price for SELL-to-
-close on a long debit-opened spread, but Alpaca's mleg parent
-limit_price is signed — positive = net debit (you pay), negative = net
-credit (you receive). For a SELL-to-close debit spread the close
-produces credit, so positive limit_price is rejected as economically
-incoherent within ~4-9ms at the gateway.
+HISTORY. The original file mixed real translator tests with SOURCE-STRING
+assertions (``self.src.find("def _close_limit_and_direction")`` + ``assertIn``)
+— the #1126 costume in test form. The 07-15 nightly caught it: the string
+pins stayed green for 34 days while the active internal-fill route walked
+past the function they referenced (F-CREDIT-SIGN). Every costume class was
+removed; every behavior it CLAIMED to pin is owned by a route-driving suite:
 
-Plus 3 diagnostic instrumentation gaps that obscured the failure for
-~36 hours:
-- 22 broker rejections produced ZERO order_rejected risk_alerts
-- cancelled_at + cancelled_reason were NULL on every cancelled row
-- broker_response did not capture Alpaca's rejection text
+  - is_credit_close marker computation + ticket plumbing + the internal-fill
+    sign contract → test_credit_close_sign_contract.py (drives
+    ``PaperExitEvaluator._close_position`` end-to-end) and
+    test_close_limit_sign.py (``_close_limit_and_direction`` unit + handler
+    guards).
+  - credit-close sign flip at the broker translator (±1.86) →
+    test_close_limit_sign.py (flip + refuse-unmarked-negative) and
+    test_submit_option_order_credit_seam.py (the exact CSX 2026-05-08
+    payload through build_alpaca_order_request AND submit_option_order).
+  - watchdog-cancel cancelled_at/cancelled_reason →
+    test_watchdog_cancel_only.py (drives poll_pending_orders).
 
-This file exercises:
-- Component 1: is_credit_close marker upstream → sign-flip downstream
-- Component 2: sign-preserving worthless-spread clamp
-- Component 3: order_rejected_by_broker alert with throttle
-- Component 4: rejection-reason capture in cancelled_reason
+WHAT LIVES HERE (distinct, behavior-driven):
+
+  Part A — build_alpaca_order_request edge cases nothing else pins:
+    entry orders ignore a stray is_credit_close marker; close legs carry
+    position_intent; sub-penny prices land at the ±0.01 minimum with sign
+    per direction; unpriceable (zero) closes REJECT loudly (H9).
+
+  Part B — #101 Components 3+4, rewritten from source-string pins to
+    DRIVING ``poll_pending_orders`` with the failure injected at the broker
+    payload (its origin) and truth asserted on the writes:
+    a broker rejection populates cancelled_reason from leg status_text and
+    cancelled_at from the BROKER timestamp, and inserts one critical
+    ``order_rejected_by_broker`` risk_alert (throttled 1/hour; alert-path
+    failure never breaks the poll; a plain user cancel is NOT a rejection).
+    Pre-fix, 22 CSX close rejections over 36+ hours produced ZERO alerts
+    and NULL cancelled_at/cancelled_reason on every row.
 """
 
 import sys
 import types
 import unittest
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock
 
-# Stub alpaca-py + supabase surfaces so the broker module imports
-# cleanly when those libs aren't installed in the test venv.
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+# Stub alpaca-py surfaces so the broker module imports cleanly when the
+# lib isn't installed in the test venv (setdefault: no-op when it is).
+sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
+sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
+sys.modules.setdefault(
+    "alpaca.trading.requests", types.ModuleType("alpaca.trading.requests")
+)
 
-
-REPO_ROOT = Path(__file__).parent.parent
-HANDLER_PATH = REPO_ROOT / "brokers" / "alpaca_order_handler.py"
-EVALUATOR_PATH = REPO_ROOT / "services" / "paper_exit_evaluator.py"
-MODELS_PATH = REPO_ROOT / "models.py"
+from packages.quantum.brokers.alpaca_order_handler import (  # noqa: E402
+    build_alpaca_order_request,
+    poll_pending_orders,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Component 1 — sign-flip via is_credit_close marker
+# Part A — translator edge cases (real function, real payload shapes)
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestIsCreditCloseMarkerOnTradeTicket(unittest.TestCase):
-    """The TradeTicket model must declare the credit-close marker so
-    it survives the model_dump → order_json round-trip used at staging.
-
-    Source-level rather than import-based: prior tests in the same
-    pytest run can sys.modules-stub packages.quantum.models with a
-    MagicMock (CI contamination observed 2026-05-10), which would
-    cause an import-based check here to assert against a mock rather
-    than the real Pydantic model.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.src = MODELS_PATH.read_text(encoding="utf-8")
-
-    def test_field_declared_on_trade_ticket(self):
-        # Field must appear in the TradeTicket class body (not in some
-        # other class that happens to share the file).
-        idx = self.src.find("class TradeTicket")
-        self.assertGreater(idx, 0)
-        # Body extends until the next top-level class.
-        end = self.src.find("\nclass ", idx + 1)
-        body = self.src[idx:end if end > 0 else len(self.src)]
-        self.assertIn("is_credit_close", body)
-
-    def test_field_is_optional_bool_default_none(self):
-        # The field default must be None so existing call sites that
-        # construct TradeTicket without the kwarg keep working.
-        idx = self.src.find("is_credit_close")
-        self.assertGreater(idx, 0)
-        block = self.src[idx:idx + 80]
-        self.assertIn("Optional[bool]", block)
-        self.assertIn("None", block)
+def _csx_close_order(requested_price=1.86, is_credit_close=True):
+    """Shape mirrors the actual CSX close order_json captured 2026-05-08."""
+    return {
+        "id": "test-csx-close-1",
+        "position_id": "1f77f6af-b536-46a3-9975-88dfef41f855",
+        "side": "sell",
+        "requested_qty": 1,
+        "requested_price": requested_price,
+        "order_json": {
+            "symbol": "CSX",
+            "is_credit_close": is_credit_close,
+            "legs": [
+                {"symbol": "O:CSX260605C00043000", "action": "sell",
+                 "type": "call", "strike": 43, "quantity": 1},
+                {"symbol": "O:CSX260605C00047000", "action": "buy",
+                 "type": "call", "strike": 47, "quantity": 1},
+            ],
+        },
+    }
 
 
-class TestPaperExitEvaluatorSetsMarker(unittest.TestCase):
-    """paper_exit_evaluator must compute is_credit_close from qty
-    sign + leg count and pass it to TradeTicket."""
+class TestTranslatorCloseEdges(unittest.TestCase):
+    """Distinct build_alpaca_order_request behaviors: entry exemption,
+    close intents, sub-penny minimums, zero-price rejection."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.src = EVALUATOR_PATH.read_text(encoding="utf-8")
-
-    def test_marker_computed_from_qty_and_leg_count(self):
-        # Source-level: rule must reference both qty sign and leg count.
-        # 06-11 refactor: the computation moved into _close_limit_and_direction
-        # (unsigned limit + direction at one seam — the signed-mark close-limit
-        # fix); the SEMANTIC pinned here is unchanged: direction derives from
-        # qty > 0 plus multi-leg, and _close_position feeds it len(close_legs).
-        idx = self.src.find("def _close_limit_and_direction")
-        self.assertGreater(
-            idx, 0, "_close_limit_and_direction missing from "
-            "paper_exit_evaluator.py — Component 1 regressed",
-        )
-        block = self.src[idx:self.src.find("def ", idx + 10)]
-        self.assertIn("(float(qty or 0) > 0) and (n_legs >= 2)", block)
-        # the call site passes the actual close-leg count
-        self.assertIn("qty, len(close_legs)", self.src)
-
-    def test_marker_passed_to_ticket(self):
-        # The TradeTicket(...) construction call must include
-        # is_credit_close=is_credit_close as a kwarg.
-        idx = self.src.find("ticket = TradeTicket(")
-        self.assertGreater(idx, 0)
-        block = self.src[idx:idx + 600]
-        self.assertIn("is_credit_close=is_credit_close", block)
-
-
-class TestBuildAlpacaOrderRequestSignFlip(unittest.TestCase):
-    """build_alpaca_order_request must negate limit_price when
-    order_json.is_credit_close=True. CSX-class regression guard."""
-
-    def setUp(self):
-        from packages.quantum.brokers.alpaca_order_handler import (
-            build_alpaca_order_request,
-        )
-        self.build = build_alpaca_order_request
-
-    def _csx_close_order(self, requested_price=1.86, is_credit_close=True):
-        """Shape mirrors the actual CSX order_json captured 2026-05-08."""
-        return {
-            "id": "test-csx-close-1",
-            "position_id": "1f77f6af-b536-46a3-9975-88dfef41f855",
-            "side": "sell",
-            "requested_qty": 1,
-            "requested_price": requested_price,
-            "order_json": {
-                "symbol": "CSX",
-                "limit_price": requested_price,
-                "is_credit_close": is_credit_close,
-                "legs": [
-                    {
-                        "symbol": "O:CSX260605C00043000",
-                        "action": "sell",
-                        "type": "call",
-                        "strike": 43,
-                        "quantity": 1,
-                    },
-                    {
-                        "symbol": "O:CSX260605C00047000",
-                        "action": "buy",
-                        "type": "call",
-                        "strike": 47,
-                        "quantity": 1,
-                    },
-                ],
-            },
-        }
-
-    def test_credit_close_negates_limit_price(self):
-        req = self.build(self._csx_close_order(requested_price=1.86))
-        # Should be -1.86, not +1.86 — Alpaca mleg credit convention
-        self.assertEqual(req["limit_price"], -1.86)
-
-    def test_non_credit_close_keeps_positive(self):
-        # Same shape but is_credit_close=False (e.g., closing a credit
-        # spread by buying it back — that's a debit, positive).
-        req = self.build(self._csx_close_order(is_credit_close=False))
-        self.assertEqual(req["limit_price"], 1.86)
-
-    def test_open_order_unaffected_even_with_no_position_id(self):
-        # Entry order: no position_id, no marker. Must stay positive
-        # regardless of order_json contents.
-        order = self._csx_close_order()
+    def test_entry_order_ignores_stray_credit_close_marker(self):
+        # No position_id → not a close: is_credit_close in order_json must
+        # be inert (stays +1.86) and no position_intent is stamped. Guards
+        # the add-to-position seam (§8): close semantics key on position_id.
+        order = _csx_close_order()
         order.pop("position_id")
-        # Mark would be ignored because is_close_order=False
-        req = self.build(order)
+        req = build_alpaca_order_request(order)
         self.assertEqual(req["limit_price"], 1.86)
+        for leg in req["legs"]:
+            self.assertNotIn("position_intent", leg)
 
-    def test_legs_carry_position_intent_for_close(self):
-        # Sanity check that we didn't break the existing intent logic
-        req = self.build(self._csx_close_order())
-        intents = sorted(leg.get("position_intent") for leg in req["legs"])
-        self.assertEqual(intents, ["buy_to_close", "sell_to_close"])
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Component 2 — sign-preserving worthless-spread clamp
-# ─────────────────────────────────────────────────────────────────────
-
-
-class TestSignPreservingClamp(unittest.TestCase):
-    """The 2026-04-10 clamp at alpaca_order_handler.py:86-93 used to
-    flip negative→+0.01, which masked the credit-close convention.
-    Sign-preserving variant clamps the magnitude only."""
-
-    def setUp(self):
-        from packages.quantum.brokers.alpaca_order_handler import (
-            build_alpaca_order_request,
-        )
-        self.build = build_alpaca_order_request
-
-    def _close(self, requested_price, is_credit_close=False):
-        return {
-            "id": "test-clamp",
-            "position_id": "pos-clamp",
-            "side": "sell",
-            "requested_qty": 1,
-            "requested_price": requested_price,
-            "order_json": {
-                "symbol": "X",
-                "is_credit_close": is_credit_close,
-                "legs": [
-                    {"symbol": "X-LONG",  "action": "sell", "quantity": 1},
-                    {"symbol": "X-SHORT", "action": "buy",  "quantity": 1},
-                ],
-            },
+    def test_close_legs_carry_position_intents(self):
+        # Alpaca infers buy_to_OPEN without explicit close intents — the
+        # translator must stamp them per leg side.
+        req = build_alpaca_order_request(_csx_close_order())
+        intents = {
+            leg["symbol"]: leg.get("position_intent") for leg in req["legs"]
         }
+        self.assertEqual(intents["CSX260605C00043000"], "sell_to_close")
+        self.assertEqual(intents["CSX260605C00047000"], "buy_to_close")
 
-    def test_legitimate_negative_credit_close_passes_through(self):
-        # Pre-fix this would clamp to +0.01 and reject at Alpaca; the
-        # sign-flip path delivers -1.86 which must NOT trip the clamp.
-        req = self.build(self._close(1.86, is_credit_close=True))
-        self.assertEqual(req["limit_price"], -1.86)
-
-    def test_near_worthless_negative_clamps_to_negative_penny(self):
-        # Worthless credit close: signed price would be ~-0.005 → must
-        # clamp to -0.01 (preserving sign so Alpaca still sees credit).
-        # We simulate by sending requested_price=0.005 with credit marker.
-        # After sign-flip: -0.005, |x| < 0.01 → -0.01.
-        req = self.build(self._close(0.005, is_credit_close=True))
+    def test_sub_penny_credit_close_lands_at_negative_penny(self):
+        # Near-worthless credit close: 0.005 → the broker request must be
+        # exactly -0.01 (a penny credit, sign preserved). Pre-2026-05-10 the
+        # clamp forced any negative to +0.01, masking the credit convention.
+        req = build_alpaca_order_request(
+            _csx_close_order(requested_price=0.005)
+        )
         self.assertEqual(req["limit_price"], -0.01)
 
-    def test_near_worthless_positive_clamps_to_positive_penny(self):
-        # Original 2026-04-10 case: debit-direction close near zero →
-        # +0.01 (paying a penny to close).
-        req = self.build(self._close(0.005, is_credit_close=False))
+    def test_sub_penny_debit_close_lands_at_positive_penny(self):
+        # The original 2026-04-10 case: near-worthless debit-direction close
+        # → +0.01 (paying a penny to close).
+        req = build_alpaca_order_request(
+            _csx_close_order(requested_price=0.005, is_credit_close=False)
+        )
         self.assertEqual(req["limit_price"], 0.01)
 
-    def test_zero_limit_price_raises(self):
-        # Magnitude check, not sign. requested_price=0 stays 0, raises.
+    def test_zero_price_close_raises_never_fabricates(self):
+        # H9: an unpriceable close REJECTS loudly — no fabricated penny.
         with self.assertRaises(ValueError):
-            self.build(self._close(0, is_credit_close=False))
+            build_alpaca_order_request(
+                _csx_close_order(requested_price=0, is_credit_close=False)
+            )
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Component 3 — order_rejected_by_broker alert (source-level)
-# ─────────────────────────────────────────────────────────────────────
-
-
-class TestBrokerRejectionAlertWired(unittest.TestCase):
-    """Source-level checks: alert is wired into poll_pending_orders,
-    has critical severity, and is throttled to prevent retry-storm
-    flooding."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.src = HANDLER_PATH.read_text(encoding="utf-8")
-
-    def test_alert_type_present(self):
-        self.assertIn(
-            "order_rejected_by_broker", self.src,
-            "Component 3 alert_type missing — broker rejections will "
-            "regress to silent failure (CSX 22-cascade class).",
-        )
-
-    def test_alert_is_critical_severity(self):
-        idx = self.src.find('alert_type="order_rejected_by_broker"')
-        self.assertGreater(idx, 0)
-        block = self.src[max(0, idx - 200):idx + 800]
-        self.assertTrue(
-            'severity="critical"' in block,
-            "order_rejected_by_broker must be severity='critical' — "
-            "matches paper_order_marked_needs_manual_review precedent.",
-        )
-
-    def test_throttle_query_present(self):
-        # Must check risk_alerts before inserting to prevent retry-storm
-        idx = self.src.find('alert_type="order_rejected_by_broker"')
-        block = self.src[max(0, idx - 1500):idx + 300]
-        self.assertIn(
-            'order_rejected_by_broker', block,
-        )
-        self.assertIn("risk_alerts", block)
-        self.assertIn("hours=1", block)
-
-    def test_alert_path_failure_does_not_break_poll(self):
-        # The alert must be wrapped in try/except so a failure to write
-        # an alert never derails the poll loop's primary work.
-        idx = self.src.find('alert_type="order_rejected_by_broker"')
-        block = self.src[max(0, idx - 1500):idx + 3500]
-        self.assertIn("except Exception", block)
-
-    def test_alert_metadata_includes_diagnostic_fields(self):
-        # Future investigators need: alpaca_order_id, leg_structure,
-        # rejection_reason, limit_price.
-        idx = self.src.find('alert_type="order_rejected_by_broker"')
-        block = self.src[max(0, idx - 200):idx + 2000]
-        for field in (
-            "alpaca_order_id", "leg_structure", "rejection_reason",
-            "limit_price", "consequence",
-        ):
-            self.assertIn(
-                field, block,
-                f"order_rejected_by_broker alert metadata missing "
-                f"field: {field}",
+    def test_rounds_to_zero_close_raises_never_fabricates(self):
+        # 0.004 rounds to 0.00 at the translator entry — same rejection.
+        with self.assertRaises(ValueError):
+            build_alpaca_order_request(
+                _csx_close_order(requested_price=0.004, is_credit_close=False)
             )
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Component 4 — rejection reason capture in cancelled_reason
+# Part B — Components 3+4 driven through poll_pending_orders
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestRejectionReasonCaptureWired(unittest.TestCase):
-    """Source-level: cancelled_reason + cancelled_at must populate on
-    rejection paths (Alpaca-side AND watchdog)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.src = HANDLER_PATH.read_text(encoding="utf-8")
-
-    def test_status_text_extracted_from_legs(self):
-        # Alpaca surfaces rejection text on legs[i].status_text for mleg
-        self.assertIn("status_text", self.src)
-
-    def test_cancelled_reason_written_on_alpaca_rejection(self):
-        # The rejection-capture block must write cancelled_reason
-        idx = self.src.find("is_broker_rejection")
-        self.assertGreater(idx, 0)
-        block = self.src[idx:idx + 1500]
-        self.assertIn('"cancelled_reason"', block)
-        self.assertIn('"cancelled_at"', block)
-
-    def test_cancelled_at_uses_broker_timestamp_when_present(self):
-        # Should prefer broker_failed_at / broker_canceled_at over now()
-        idx = self.src.find("is_broker_rejection")
-        block = self.src[idx:idx + 1500]
-        self.assertIn("broker_failed_at", block)
-        self.assertIn("broker_canceled_at", block)
-
-    def test_watchdog_path_also_writes_cancelled_fields(self):
-        # The 90s idle-watchdog branch must also populate the
-        # column-level transition fields, not just nest under
-        # broker_response.watchdog.
-        idx = self.src.find('"broker_status": "watchdog_cancelled"')
-        self.assertGreater(idx, 0)
-        block = self.src[idx:idx + 600]
-        self.assertIn('"cancelled_at"', block)
-        self.assertIn('"cancelled_reason"', block)
-        self.assertIn("watchdog_idle_timeout", block)
+class _Result:
+    def __init__(self, data):
+        self.data = data
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Cross-component: CSX scenario reproduction
-# ─────────────────────────────────────────────────────────────────────
+class _Query:
+    def __init__(self, sb, table):
+        self._sb = sb
+        self._table = table
+        self._op = "select"
+        self._payload = None
+        self._eq = {}
+
+    def select(self, *a, **k):
+        self._op = "select"
+        return self
+
+    def update(self, payload):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def insert(self, payload):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def eq(self, col, val):
+        self._eq[col] = val
+        return self
+
+    def gte(self, *a, **k):
+        return self
+
+    def in_(self, *a, **k):
+        return self
+
+    def is_(self, *a, **k):
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def execute(self):
+        return self._sb._execute(self)
 
 
-class TestCSXIncidentReproduction(unittest.TestCase):
-    """End-to-end: feeding the actual CSX close payload through the
-    broker translator must produce the corrected request shape."""
+class _CapturingSupabase:
+    """Just enough of the client for poll_pending_orders' call graph."""
 
-    def test_csx_friday_close_attempt_reproduces_correctly(self):
-        from packages.quantum.brokers.alpaca_order_handler import (
-            build_alpaca_order_request,
-        )
+    def __init__(self, order_row, recent_alert_rows=(),
+                 alert_select_raises=False):
+        self.order_row = order_row
+        self.recent_alert_rows = list(recent_alert_rows)
+        self.alert_select_raises = alert_select_raises
+        self.order_updates = []  # (eq_filters, payload)
+        self.alert_inserts = []
 
-        # Reconstruct the order shape captured from paper_orders for
-        # the 2026-05-08 19:45 UTC attempt that Alpaca rejected.
-        order = {
-            "id": "ac8d1cb6-2908-4c9c-b06e-751a693c7ac8",
-            "position_id": "1f77f6af-b536-46a3-9975-88dfef41f855",
-            "side": "sell",
-            "requested_qty": 1,
-            "requested_price": 1.86,
-            "order_json": {
-                "symbol": "CSX",
-                "quantity": 1,
-                "order_type": "limit",
-                "limit_price": 1.86,
-                "is_credit_close": True,  # set by post-fix evaluator
-                "strategy_type": "custom",
-                "source_engine": "paper_exit_evaluator",
-                "legs": [
-                    {
-                        "type": "call",
-                        "action": "sell",
-                        "expiry": "2026-06-05",
-                        "strike": 43,
-                        "symbol": "O:CSX260605C00043000",
-                        "quantity": 1,
-                    },
-                    {
-                        "type": "call",
-                        "action": "buy",
-                        "expiry": "2026-06-05",
-                        "strike": 47,
-                        "symbol": "O:CSX260605C00047000",
-                        "quantity": 1,
-                    },
-                ],
-            },
-        }
+    def table(self, name):
+        return _Query(self, name)
 
-        req = build_alpaca_order_request(order)
+    def _execute(self, q):
+        if q._table == "paper_portfolios":
+            return _Result([{"id": "port-1"}])
+        if q._table == "paper_orders":
+            if q._op == "select":
+                return _Result([dict(self.order_row)])
+            if q._op == "update":
+                self.order_updates.append((dict(q._eq), q._payload))
+                return _Result(None)
+        if q._table == "risk_alerts":
+            if q._op == "select":
+                if self.alert_select_raises:
+                    raise RuntimeError("risk_alerts read unavailable")
+                return _Result(list(self.recent_alert_rows))
+            if q._op == "insert":
+                self.alert_inserts.append(q._payload)
+                return _Result([{"id": "alert-row-1"}])
+        return _Result([])
 
-        # The fix: limit_price now signed negative for the credit close.
-        # Pre-fix this was +1.86 → Alpaca instant-rejected in 4-9ms.
-        self.assertEqual(req["limit_price"], -1.86)
-        self.assertEqual(req["order_type"], "limit")
-        self.assertEqual(req["time_in_force"], "day")
-        self.assertEqual(req["qty"], 1)
 
-        # Both legs carry their close intents (unchanged by this PR).
-        intents = {
-            leg["symbol"]: leg["position_intent"]
-            for leg in req["legs"]
-        }
+_FAILED_AT = "2026-05-08T19:45:09.123456Z"
+_CANCELED_AT = "2026-05-08T20:00:00.000000Z"
+_REJECT_TEXT = "cost basis must not exceed order cost basis"
+
+
+def _db_order_row():
+    return {
+        "id": "order-1",
+        "alpaca_order_id": "alp-1",
+        "status": "submitted",
+        "submitted_at": None,  # watchdog not under test here
+        "broker_status": "submitted",
+        "position_id": "pos-1",
+        "side": "sell",
+        "order_json": {
+            "symbol": "CSX",
+            "time_in_force": "day",
+            "legs": _csx_close_order()["order_json"]["legs"],
+        },
+    }
+
+
+def _rejected_alpaca_order():
+    """Broker truth for the CSX class: mleg reject with leg-level
+    status_text and a broker-side failed_at timestamp."""
+    return {
+        "id": "alp-1",
+        "status": "rejected",
+        "failed_at": _FAILED_AT,
+        "canceled_at": None,
+        "filled_qty": "0",
+        "limit_price": "1.86",
+        "legs": [
+            {"symbol": "CSX260605C00043000", "side": "sell",
+             "position_intent": "sell_to_close",
+             "status_text": _REJECT_TEXT},
+            {"symbol": "CSX260605C00047000", "side": "buy",
+             "position_intent": "buy_to_close"},
+        ],
+    }
+
+
+def _poll(supabase, alpaca_order):
+    alpaca = MagicMock()
+    alpaca.get_order.return_value = alpaca_order
+    return poll_pending_orders(alpaca, supabase, "user-1")
+
+
+class TestBrokerRejectionCaptureAndAlert(unittest.TestCase):
+    """#101 Components 3+4 as behavior: drive the poll with a rejected
+    broker payload, assert the DB writes and the alert row."""
+
+    def test_rejection_captures_reason_timestamp_and_alerts(self):
+        sb = _CapturingSupabase(_db_order_row())
+        result = _poll(sb, _rejected_alpaca_order())
+
+        self.assertEqual(result["synced"], 1)
+        self.assertEqual(result["cancels"], 1)
+        self.assertEqual(result["errors"], [])
+
+        # Component 4: forensic fields populated from BROKER truth.
+        self.assertEqual(len(sb.order_updates), 1)
+        eq_filters, upd = sb.order_updates[0]
+        self.assertEqual(eq_filters.get("id"), "order-1")
+        self.assertEqual(upd["status"], "cancelled")
+        self.assertEqual(upd["broker_status"], "rejected")
+        self.assertIn(_REJECT_TEXT, upd["cancelled_reason"])
+        # cancelled_at is the broker's failed_at, never a local now().
+        self.assertEqual(upd["cancelled_at"], _FAILED_AT)
+
+        # Component 3: exactly one critical alert, diagnostics attached.
+        self.assertEqual(len(sb.alert_inserts), 1)
+        row = sb.alert_inserts[0]
+        self.assertEqual(row["alert_type"], "order_rejected_by_broker")
+        self.assertEqual(row["severity"], "critical")
+        self.assertIn("CSX", row["message"])
+        self.assertIn(_REJECT_TEXT, row["message"])
+        self.assertEqual(row["position_id"], "pos-1")
+        self.assertEqual(row["user_id"], "user-1")
+        meta = row["metadata"]
+        self.assertEqual(meta["alpaca_order_id"], "alp-1")
+        self.assertEqual(meta["internal_order_id"], "order-1")
+        self.assertEqual(meta["rejection_reason"], _REJECT_TEXT)
+        self.assertEqual(meta["limit_price"], "1.86")
+        self.assertIn("consequence", meta)
         self.assertEqual(
-            intents.get("CSX260605C00043000"), "sell_to_close",
+            [leg["position_intent"] for leg in meta["leg_structure"]],
+            ["sell_to_close", "buy_to_close"],
         )
-        self.assertEqual(
-            intents.get("CSX260605C00047000"), "buy_to_close",
+
+    def test_alert_throttled_when_recent_alert_exists(self):
+        # A retry storm must produce ONE alert per hour, not one per
+        # attempt (the CSX cascade was 22 rejections in 36 hours).
+        sb = _CapturingSupabase(
+            _db_order_row(), recent_alert_rows=[{"id": "existing-alert"}]
         )
+        result = _poll(sb, _rejected_alpaca_order())
+        self.assertEqual(result["synced"], 1)
+        self.assertEqual(sb.alert_inserts, [])
+        # The forensic capture still happens regardless of the throttle.
+        _, upd = sb.order_updates[0]
+        self.assertEqual(upd["cancelled_at"], _FAILED_AT)
+
+    def test_alert_path_failure_never_breaks_the_poll(self):
+        # The throttle query exploding must not derail the sync: the order
+        # row is still reconciled and the poll reports no error.
+        sb = _CapturingSupabase(_db_order_row(), alert_select_raises=True)
+        result = _poll(sb, _rejected_alpaca_order())
+        self.assertEqual(result["synced"], 1)
+        self.assertEqual(result["cancels"], 1)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(sb.alert_inserts, [])
+        _, upd = sb.order_updates[0]
+        self.assertEqual(upd["status"], "cancelled")
+
+    def test_plain_cancel_is_not_a_rejection(self):
+        # A user/watchdog cancel (no failed_at) still captures forensic
+        # fields — cancelled_at from the broker's canceled_at, reason
+        # falls back to the status code — but raises NO critical alert.
+        cancelled = _rejected_alpaca_order()
+        cancelled["status"] = "canceled"
+        cancelled["failed_at"] = None
+        cancelled["canceled_at"] = _CANCELED_AT
+        for leg in cancelled["legs"]:
+            leg.pop("status_text", None)
+        sb = _CapturingSupabase(_db_order_row())
+        result = _poll(sb, cancelled)
+        self.assertEqual(result["cancels"], 1)
+        self.assertEqual(sb.alert_inserts, [])
+        _, upd = sb.order_updates[0]
+        self.assertEqual(upd["status"], "cancelled")
+        self.assertEqual(upd["cancelled_at"], _CANCELED_AT)
+        self.assertEqual(upd["cancelled_reason"], "alpaca_status=canceled")
 
 
 if __name__ == "__main__":

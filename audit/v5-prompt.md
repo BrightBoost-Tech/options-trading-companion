@@ -109,6 +109,24 @@ recent FULL scorecard — verdict deltas only.
   scheduled session. Broker-dependent claims must be DB-corroborated and
   DOWNGRADED to hypothesis where broker truth is the only arbiter; say so in
   the run-limitation header. Never fabricate an equity number.
+- **Runner preflight artifacts (read them FIRST, this run's cwd):** the
+  reliability runner (audit/runner/nightly_runner.py) writes two files into
+  this worktree before you start:
+  - `audit/preflight-manifest.json` — the capability manifest: the exact
+    origin/main SHA this session is auditing (`workspace.short_sha`), whether
+    the fresh-code fetch succeeded (`workspace.stale` — if TRUE, you may be
+    reading OLD code; say so and downgrade code claims), the commit subjects
+    since the prior report (`workspace.commit_subjects_since_prior_report` —
+    name the movers from here), and the MCP expectation
+    (`mcp.expected_headless_broker: absent`). Ground STEP 0 / H8 against this.
+  - `audit/broker-snapshot.json` — a read-only, GET-only broker capture
+    (account status/equity/OBP/options-level, clock, calendar, positions,
+    recent orders; account id masked). **Trust: SECONDARY to the Alpaca MCP.**
+    Use it ONLY when the MCP is absent (the headless norm). It is a static
+    point-in-time snapshot — if `available:false`, treat broker as blind and
+    label broker claims hypotheses exactly as before; if `available:true`, it
+    is broker truth for corroboration but still verify against MCP when MCP is
+    present. Never fabricate past it.
 - **The breaker ritual is DESIGNED — and after #1135 (edge-trigger) a nightly
   re-trip is NO LONGER expected.** entries_paused=TRUE with the streak reason
   after a losing-close day is normal; a STANDING already-reviewed window

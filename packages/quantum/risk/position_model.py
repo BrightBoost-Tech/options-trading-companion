@@ -168,6 +168,20 @@ def _finite_float(value: Any, name: str) -> float:
     return out
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    """float(value) when finite, else None — the NON-raising sibling of
+    _finite_float. None / bool / non-numeric / NaN / inf all resolve to None
+    (a MISSING input), never a fabricated 0 (H9). Used to type an
+    optional/persisted greek block whose absence must flag, not reject."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _exact_int(value: Any, name: str) -> int:
     """Contract counts are integers. 2.5 contracts is a rejection, not a round."""
     out = _finite_float(value, name)
@@ -241,12 +255,23 @@ class LegGreeks:
 
     Unscaled: no ratio, no structure quantity, no multiplier applied.
     aggregate_greeks() performs the one and only scaling.
+
+    RAW and UNSIGNED by direction — a call delta is +, a put delta is −, EXACTLY
+    as the snapshot reports it. The long/short sign is applied downstream by
+    aggregate_greeks via signed_ratio; pre-signing here would double-negate.
     """
 
     delta: Optional[float] = None
     gamma: Optional[float] = None
     vega: Optional[float] = None
     theta: Optional[float] = None
+    # Provenance (observe-only; NOT part of the value math, never scaled, never
+    # validated as a number). Carried verbatim from the #1259 stage-time populate
+    # (greeks_source / greeks_as_of / greeks_status) so a canonical consumer can
+    # see WHERE and WHEN the per-contract greeks were measured.
+    source: Optional[str] = None
+    as_of: Optional[str] = None
+    status: Optional[str] = None
 
     def __post_init__(self) -> None:
         for name in ("delta", "gamma", "vega", "theta"):
@@ -616,6 +641,13 @@ class GreekExposure:
     complete: bool
     missing_legs: Tuple[str, ...] = ()
     missing_detail: Tuple[str, ...] = ()
+    # Coverage + provenance (observe-only, typed). legs_with_greeks counts legs
+    # that contributed a COMPLETE finite greeks set; sources/as_of carry the
+    # distinct #1259 stage-populate provenance across the contributing legs.
+    legs_total: int = 0
+    legs_with_greeks: int = 0
+    sources: Tuple[str, ...] = ()
+    as_of: Tuple[str, ...] = ()
 
 
 def aggregate_greeks(position: CanonicalPosition) -> GreekExposure:
@@ -632,6 +664,9 @@ def aggregate_greeks(position: CanonicalPosition) -> GreekExposure:
     missing_legs: List[str] = []
     missing_detail: List[str] = []
     missing_names: set = set()
+    legs_with_greeks = 0
+    sources: List[str] = []
+    as_of: List[str] = []
 
     for leg in position.legs:
         scale = leg.signed_ratio * position.structure_quantity * leg.multiplier
@@ -645,6 +680,12 @@ def aggregate_greeks(position: CanonicalPosition) -> GreekExposure:
             missing_legs.append(leg.occ_symbol)
             missing_detail.append(f"{leg.occ_symbol}: missing {', '.join(absent)}")
             missing_names.update(absent)
+        else:
+            legs_with_greeks += 1
+        if leg.greeks.source:
+            sources.append(leg.greeks.source)
+        if leg.greeks.as_of:
+            as_of.append(leg.greeks.as_of)
         for name in sums:
             value = getattr(leg.greeks, name)
             if value is not None:
@@ -661,6 +702,10 @@ def aggregate_greeks(position: CanonicalPosition) -> GreekExposure:
         complete=not missing_legs,
         missing_legs=tuple(dict.fromkeys(missing_legs)),
         missing_detail=tuple(missing_detail),
+        legs_total=len(position.legs),
+        legs_with_greeks=legs_with_greeks,
+        sources=tuple(dict.fromkeys(sources)),
+        as_of=tuple(dict.fromkeys(as_of)),
     )
 
 
@@ -862,6 +907,45 @@ def _leg_symbol(raw: Mapping[str, Any]) -> str:
     return str(raw.get("occ_symbol") or raw.get("symbol") or "").strip()
 
 
+def leg_greeks_from_persisted(raw: Mapping[str, Any]) -> Optional[LegGreeks]:
+    """Source RAW per-contract greeks from a persisted leg's own jsonb.
+
+    This reads the #1259 stage-time populate written onto each option leg
+    (paper_endpoints._apply_leg_greeks): a ``greeks`` block of
+    {delta, gamma, vega, theta} plus provenance keys ``greeks_source`` /
+    ``greeks_as_of`` / ``greeks_status``. Identity is by CONSTRUCTION — the
+    greeks live on the very leg dict being normalized, so there is no
+    symbol/index mapping to get wrong.
+
+    Returns a LegGreeks ONLY when the block is a COMPLETE finite dict (all four
+    of delta/gamma/vega/theta present AND finite — the exact shape #1259 writes
+    on a full populate). A None / partial / absent / typed-unavailable
+    (greeks=None + greeks_status='unavailable_at_stage') block returns None: the
+    leg is typed greeks-unavailable, never a fabricated zero (H9). Greeks are
+    kept RAW and UNSIGNED — signing and ×qty×multiplier scaling are
+    aggregate_greeks' single responsibility."""
+    if not isinstance(raw, Mapping):
+        return None
+    block = raw.get("greeks")
+    if not isinstance(block, Mapping):
+        return None
+    values: Dict[str, float] = {}
+    for name in ("delta", "gamma", "vega", "theta"):
+        fv = _finite_or_none(block.get(name))
+        if fv is None:
+            return None  # partial / nonfinite → typed unavailable, not a 0
+        values[name] = fv
+    return LegGreeks(
+        delta=values["delta"],
+        gamma=values["gamma"],
+        vega=values["vega"],
+        theta=values["theta"],
+        source=(str(raw["greeks_source"]) if raw.get("greeks_source") else None),
+        as_of=(str(raw["greeks_as_of"]) if raw.get("greeks_as_of") else None),
+        status=(str(raw["greeks_status"]) if raw.get("greeks_status") else None),
+    )
+
+
 def normalize_leg(
     raw: Mapping[str, Any],
     structure_quantity: int,
@@ -957,6 +1041,14 @@ def normalize_leg(
             raise PositionNormalizationError(
                 RejectReason.NON_POSITIVE_MULTIPLIER, f"{occ}: multiplier={raw_multiplier!r}"
             )
+
+    # Auto-source per-leg greeks from the leg's OWN persisted jsonb (#1259
+    # stage-time populate) when the caller did not supply an explicit override.
+    # Precedence: an explicit greeks_by_symbol entry (passed as `greeks`) WINS;
+    # otherwise read the leg's own block. Identity is by construction (same leg
+    # dict), never index-guessed.
+    if greeks is None:
+        greeks = leg_greeks_from_persisted(raw)
 
     if greeks is None:
         incomplete.append(IncompletenessReason.GREEKS_NOT_PERSISTED)

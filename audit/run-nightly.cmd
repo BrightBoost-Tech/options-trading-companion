@@ -1,28 +1,37 @@
 @echo off
-rem nightly-audit runner — invoked by Windows Task Scheduler at 00:00 local daily.
-rem READ-ONLY audit; permission scope pinned by audit\nightly-settings.json
-rem (file writes only under audit\, no shell, no deploy/migration/order tools).
+rem ====================================================================
+rem nightly-audit shim — invoked by Windows Task Scheduler at 00:00 local.
+rem
+rem This is now a THIN SHIM. All reliability logic lives in the Python
+rem wrapper audit\runner\nightly_runner.py, which:
+rem   - holds a wake lock so the laptop cannot sleep mid-run (the 07-16/07-17
+rem     silent-death fix),
+rem   - fetches origin/main into a dedicated audit worktree and runs the audit
+rem     against the RUNNING code (never the operator checkout),
+rem   - drops a read-only broker snapshot + capability manifest for the
+rem     headless (MCP-absent) audit,
+rem   - streams a per-run transcript + heartbeats to cron.log,
+rem   - enforces a hard timeout, writes an UNCONDITIONAL end marker, and
+rem   - only pings the dead-man when the completion contract is met.
+rem
+rem The shim's only jobs: locate a Python 3.11 interpreter and launch the
+rem wrapper, capturing any python-level traceback into cron.log as a last
+rem resort. The wrapper writes its own start/heartbeat/end markers directly.
+rem ====================================================================
 cd /d C:\options-trading-companion
-echo ==================================================================== >> audit\cron.log
-echo ==== %DATE% %TIME% nightly-audit start ==== >> audit\cron.log
-claude -p "Execute audit/v5-prompt.md in NIGHTLY mode (FULL on Sundays)." --settings audit\nightly-settings.json --max-turns 200 >> audit\cron.log 2>&1
-echo ==== %DATE% %TIME% nightly-audit end (exit %ERRORLEVEL%) ==== >> audit\cron.log
 
-rem ── Dead-man ping (2026-07-08, meta-audit gap #8): ping healthchecks ONLY
-rem after the dated report file exists. A run that launches but writes no
-rem report sends NO ping, so the DOWN email fires — the 06-13/06-14/06-20
-rem silent-empty class becomes visible. NOTE: %DATE% on this machine is
-rem locale-formatted ("Wed 07/08/2026") and would NEVER match the YYYY-MM-DD
-rem report filenames — the date MUST come from PowerShell. Unset ping URL =
-rem logged no-op (this block can never fail the run).
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set RDATE=%%i
-if not exist "audit\reports\%RDATE%.md" (
-  echo ==== %DATE% %TIME% REPORT MISSING for %RDATE% — ping WITHHELD ==== >> audit\cron.log
-  goto :eof
+set "PYCMD="
+where py >nul 2>&1 && set "PYCMD=py -3.11"
+if not defined PYCMD (
+  where python >nul 2>&1 && set "PYCMD=python"
 )
-if "%NIGHTLY_AUDIT_PING_URL%"=="" (
-  echo ==== %DATE% %TIME% report %RDATE%.md exists; NIGHTLY_AUDIT_PING_URL unset — ping skipped ==== >> audit\cron.log
-  goto :eof
+if not defined PYCMD (
+  echo ==== %DATE% %TIME% nightly-audit SHIM ERROR: no python interpreter found ==== >> audit\cron.log
+  exit /b 9
 )
-curl -fsS -m 10 "%NIGHTLY_AUDIT_PING_URL%" >nul 2>&1
-echo ==== %DATE% %TIME% report %RDATE%.md exists; ping sent (curl exit %ERRORLEVEL%) ==== >> audit\cron.log
+
+echo ==== %DATE% %TIME% shim launching runner (%PYCMD%) ==== >> audit\cron.log
+%PYCMD% "C:\options-trading-companion\audit\runner\nightly_runner.py" >> audit\cron.log 2>&1
+set RC=%ERRORLEVEL%
+if not "%RC%"=="0" echo ==== %DATE% %TIME% shim: runner exited %RC% ==== >> audit\cron.log
+exit /b %RC%

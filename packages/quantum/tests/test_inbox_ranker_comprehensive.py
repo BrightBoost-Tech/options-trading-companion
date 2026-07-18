@@ -2,18 +2,36 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-# Mock dependencies before import
+# Stub dependencies ONLY around the ranker import, then RESTORE sys.modules.
+# Leaving these MagicMocks in sys.modules permanently poisons every later
+# lazy import suite-wide (the test_weekly_report_win_rate class of pollution;
+# see the 2026-07-17 CI test_cost_basis_parity failure — the
+# execution.transaction_cost_model mock leaked here was only masked by
+# test_tcm_shadow_fill_realism popping it at ITS collection).
 import sys
-sys.modules["packages.quantum.security"] = MagicMock()
-sys.modules["packages.quantum.services.journal_service"] = MagicMock()
-sys.modules["packages.quantum.analytics.progress_engine"] = MagicMock()
-sys.modules["packages.quantum.market_data"] = MagicMock()
-sys.modules["packages.quantum.execution.transaction_cost_model"] = MagicMock()
-sys.modules["supabase"] = MagicMock()
-sys.modules["postgrest.exceptions"] = MagicMock()
-
-# Import ranker directly
-from packages.quantum.inbox.ranker import rank_suggestions, calculate_yield_on_risk
+_STUB_KEYS = (
+    "packages.quantum.security",
+    "packages.quantum.services.journal_service",
+    "packages.quantum.analytics.progress_engine",
+    "packages.quantum.market_data",
+    "packages.quantum.execution.transaction_cost_model",
+    "supabase",
+    "postgrest.exceptions",
+)
+_saved = {_k: sys.modules.get(_k) for _k in _STUB_KEYS}
+for _k in _STUB_KEYS:
+    if _saved[_k] is None:  # never shadow an already-imported real module
+        sys.modules[_k] = MagicMock()
+try:
+    # Import ranker directly
+    from packages.quantum.inbox.ranker import rank_suggestions, calculate_yield_on_risk
+finally:
+    for _k in _STUB_KEYS:
+        if _saved[_k] is None:
+            sys.modules.pop(_k, None)
+        else:
+            sys.modules[_k] = _saved[_k]
+del _saved
 
 class TestInboxRanker(unittest.TestCase):
     def test_calculate_yield_on_risk(self):

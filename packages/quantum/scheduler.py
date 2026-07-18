@@ -133,14 +133,30 @@ SCHEDULES = [
 ]
 
 
-def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
+def _format_schedule_slot(cron_kwargs: dict) -> str:
+    """Deterministic slot string for origin provenance, from the SCHEDULES
+    cron kwargs (e.g. 'cron:hour=11,minute=0;tz=America/Chicago;days=mon-fri').
+    Attribution metadata only — never parsed back into a trigger."""
+    fields = ",".join(f"{k}={v}" for k, v in sorted(cron_kwargs.items()))
+    return f"cron:{fields};tz={CHICAGO_TZ};days=mon-fri"
+
+
+def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None,
+               schedule_slot: str = None):
     """
     Fire a signed HTTP request to the given task endpoint.
 
     Uses the same sign_task_request() function as run_signed_task.py
     so the HMAC signature matches exactly.
+
+    A5-2 origin provenance: asserts X-Task-Origin: scheduler (+ schedule
+    id/slot + a per-fire request id) so the enqueue seam can attribute the
+    row. The origin headers are OUTSIDE the HMAC canonical string
+    (v4:{ts}:{nonce}:{method}:{path}:{body_hash}:{scope}) — adding them
+    changes neither the signature nor any schedule/trigger behavior.
     """
     import json
+    import uuid
 
     base_url = _BASE_URL.rstrip("/")
     url = f"{base_url}{endpoint}"
@@ -178,6 +194,23 @@ def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
         return
 
     headers["Content-Type"] = "application/json"
+
+    # A5-2 origin provenance assertion (read by resolve_request_origin AFTER
+    # the endpoint's signature verification passes).
+    from packages.quantum.jobs.origin import (
+        ORIGIN_HEADER,
+        ORIGIN_SCHEDULER,
+        ACTOR_CLASS_HEADER,
+        REQUEST_ID_HEADER,
+        SCHEDULE_ID_HEADER,
+        SCHEDULE_SLOT_HEADER,
+    )
+    headers[ORIGIN_HEADER] = ORIGIN_SCHEDULER
+    headers[ACTOR_CLASS_HEADER] = "apscheduler_in_process"
+    headers[REQUEST_ID_HEADER] = str(uuid.uuid4())
+    headers[SCHEDULE_ID_HEADER] = job_id
+    if schedule_slot:
+        headers[SCHEDULE_SLOT_HEADER] = schedule_slot
 
     try:
         resp = httpx.post(url, content=body, headers=headers, timeout=30.0)
@@ -261,7 +294,8 @@ def start_scheduler():
         _scheduler.add_job(
             _fire_task,
             trigger=trigger,
-            args=[endpoint, scope, job_id, job_user_id],
+            args=[endpoint, scope, job_id, job_user_id,
+                  _format_schedule_slot(cron_kwargs)],
             id=job_id,
             name=description,
             replace_existing=True,
@@ -304,9 +338,10 @@ def _retry_failed_jobs():
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
 
         # --- Retry eligible jobs (attempt < 2) ---
+        # (payload selected for the A5-2 internal_retry provenance stamp)
         rows = (
             client.table("job_runs")
-            .select("id, job_name, attempt")
+            .select("id, job_name, attempt, payload")
             .eq("status", "failed_retryable")
             .gte("finished_at", cutoff)
             .lt("attempt", 2)
@@ -317,12 +352,34 @@ def _retry_failed_jobs():
         for row in rows:
             job_id = row["id"]
             try:
-                client.table("job_runs").update({
+                update_fields = {
                     "status": "queued",
                     "attempt": (row.get("attempt") or 0) + 1,
                     "locked_by": None,
                     "locked_at": None,
-                }).eq("id", job_id).execute()
+                }
+                # A5-2 origin provenance: the auto-retry re-queues the SAME
+                # row, so the retry event is APPENDED to
+                # payload.origin_retries (payload.origin — the creator —
+                # stays immutable; parent_job_run_id is the row's own id by
+                # construction). A stamp failure must never block the retry.
+                try:
+                    from packages.quantum.jobs.origin import (
+                        ORIGIN_INTERNAL_RETRY,
+                        append_retry_origin,
+                    )
+                    update_fields["payload"] = append_retry_origin(
+                        row.get("payload"),
+                        origin=ORIGIN_INTERNAL_RETRY,
+                        trigger_actor_class="scheduler_auto_retry",
+                        parent_job_run_id=job_id,
+                    )
+                except Exception as stamp_err:
+                    logger.warning(
+                        f"[AUTO_RETRY] origin stamp failed (non-fatal) "
+                        f"for {job_id}: {stamp_err}"
+                    )
+                client.table("job_runs").update(update_fields).eq("id", job_id).execute()
 
                 logger.info(
                     f"[AUTO_RETRY] Re-queued {row['job_name']} "

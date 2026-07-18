@@ -7,6 +7,7 @@ from packages.quantum.jobs.db import (
     dead_letter_job_run,
     _to_jsonable,
 )
+from packages.quantum.jobs.origin import coerce_origin
 
 class JobRunStore:
     def __init__(self):
@@ -28,10 +29,23 @@ class JobRunStore:
         # If data is a dict (shouldn't happen with limit(1), but handle gracefully)
         return data
 
-    def create_or_get(self, job_name: str, idempotency_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def create_or_get(
+        self,
+        job_name: str,
+        idempotency_key: str,
+        payload: Dict[str, Any],
+        origin: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Creates a new job run if it doesn't exist (based on job_name + idempotency_key).
         Returns the job run record.
+
+        A5-2 origin provenance: the typed origin object is stamped into
+        ``payload.origin`` AT INSERT TIME (never post-hoc in result), so
+        provenance exists even if the run never executes. ``origin=None``
+        (an un-threaded caller) coerces to ``unknown_legacy`` — see
+        ``packages/quantum/jobs/origin.py``. An EXISTING row is returned
+        as-is: first-writer provenance wins (the row creator is the origin).
         """
         # Try to find existing first (use limit(1) to avoid 204 crash from maybe_single)
         existing = self.client.table("job_runs")\
@@ -50,7 +64,7 @@ class JobRunStore:
             data = {
                 "job_name": job_name,
                 "idempotency_key": idempotency_key,
-                "payload": payload,
+                "payload": {**payload, "origin": coerce_origin(origin)},
                 "status": "queued"
             }
             # upsert with ignore_duplicates=True will do nothing if conflict
@@ -193,7 +207,8 @@ class JobRunStore:
         idempotency_key: str,
         payload: Dict[str, Any],
         cancelled_reason: str,
-        cancelled_detail: Optional[str] = None
+        cancelled_detail: Optional[str] = None,
+        origin: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Creates a cancelled job run if it doesn't exist (based on job_name + idempotency_key).
@@ -224,10 +239,14 @@ class JobRunStore:
         # Create new cancelled record
         try:
             # Merge cancelled metadata into payload
+            # A5-2: cancelled-at-gate rows carry origin provenance too — a
+            # blocked attempt is exactly the kind of row that needs to be
+            # attributable afterwards.
             payload_with_meta = {
                 **payload,
                 "cancelled_reason": cancelled_reason,
                 "cancelled_detail": cancelled_detail,
+                "origin": coerce_origin(origin),
             }
 
             data = {

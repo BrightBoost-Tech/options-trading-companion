@@ -33,11 +33,18 @@ def smoke_test():
     print(f"Payload: {{'user_id': '{test_user_id}'}}")
 
     try:
+        # A5-2 origin provenance: direct-DB enqueue from a local shell.
+        from packages.quantum.jobs.origin import ORIGIN_MANUAL_CLI, build_origin
+
         job_id = enqueue_idempotent(
             client=client,
             job_name=job_name,
             idempotency_key=key,
-            payload={"user_id": test_user_id}
+            payload={"user_id": test_user_id},
+            origin=build_origin(
+                ORIGIN_MANUAL_CLI,
+                trigger_actor_class="rq_smoke_morning_brief_script",
+            ),
         )
         print(f"Success! Job ID: {job_id}")
         print("The worker (if running) should pick this up and execute 'packages.quantum.jobs.handlers.morning_brief.run'.")

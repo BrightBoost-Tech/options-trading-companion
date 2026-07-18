@@ -1,148 +1,251 @@
+"""Security contract: endpoint exceptions must NOT leak internal detail
+(secrets, connection strings, stack context) in production error payloads.
+
+REBUILT 2026-07-17 (Lane 4A test-honesty; was module-skipped in the #774
+cluster since the PR #1 triage). The original file mocked AROUND the
+pre-#1242 rebalance breakage ("Patch RiskBudgetEngine to avoid TypeError in
+current broken code") and injected a fake ``calculate_dynamic_target`` into
+the optimizer module to paper over a then-broken import — both stale, both
+gone. #1242 repaired the routes; this rebuild drives the REAL routes:
+
+  - failure injected at its ORIGIN (the optimizer callee / the service the
+    endpoint delegates to), truth asserted at the TOP (the HTTP payload);
+  - every leak assertion asserts against the WHOLE response body, plus a
+    call-count proof the injected failure actually reached the route (the
+    masked 500 cannot be produced by anything upstream of the injection);
+  - dependency overrides are resolved from the LIVE route objects
+    (test_rebalance_endpoint_contract.py pattern — CI proved module-level
+    imported symbols can be stale after collection-time patch leakage);
+    resolution walks THROUGH router wrappers: fastapi >= 0.139 makes
+    ``include_router`` lazy — it appends a single ``_IncludedRouter``
+    wrapper (no ``path``, no ``dependant``) to ``app.routes`` instead of
+    flattening APIRoutes, so a flat path scan finds app-direct routes
+    (/rebalance/*, defined in api.py) but NOTHING router-included
+    (/analytics/behavior, /validation/run) — exactly the CI job
+    88019921698 failure split. The real APIRoutes live on
+    ``wrapper.original_router.routes`` with full prefixed paths; the
+    resolver recurses into them and the app object is re-resolved from the
+    module attr at test time, never captured at import;
+  - the rebalance harness is IMPORTED from
+    test_rebalance_endpoint_contract.py rather than re-implemented, so one
+    wiring owns that route's boundary fakes;
+  - APP_ENV=production is scoped per-request via mock.patch.dict — the old
+    module-level ``os.environ["APP_ENV"] = "production"`` bled into every
+    later test module in the session.
+
+Original security assertions preserved (none diluted):
+  1. /rebalance/preview — optimizer exception text absent; typed
+     "Optimization failed" message.
+  2. /analytics/behavior — service exception text absent; 500 with
+     "Internal Server Error".
+  3. /validation/run (mode=paper) — service exception text absent; 500
+     with "Internal Server Error".
+"""
+
+import contextlib
 import os
-import pytest
-from unittest.mock import patch, MagicMock
-from fastapi.testclient import TestClient
+import sys
+import types
+from unittest import mock
 
-# 1. Setup Environment Variables for Validation
-os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
-os.environ["NEXT_PUBLIC_SUPABASE_URL"] = "http://localhost:54321"
-os.environ["SUPABASE_ANON_KEY"] = "test-anon-key"
-os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "test-service-key"
-os.environ["ENCRYPTION_KEY"] = "ke2AXS883XK_QFY9uLNGUiQlce1MifOaZNmmn06eoC8="
-os.environ["TASK_SIGNING_SECRET"] = "test-task-secret"
-os.environ["POLYGON_API_KEY"] = "test-polygon-key"
-os.environ["APP_ENV"] = "production" # Simulate production to ensure we mask errors
-
-# 2. Import App
-from packages.quantum.api import app
-from packages.quantum.security import get_current_user, get_supabase_user_client
-import packages.quantum.optimizer as optimizer_module
-
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster M] long tail
-# Tracked in #774 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster M] long tail; tracked in #774',
+# ---------------------------------------------------------------------------
+# Environment BEFORE importing the app module (setdefault — never bleed).
+# ---------------------------------------------------------------------------
+os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret")
+os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321")
+os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-key")
+os.environ.setdefault(
+    "ENCRYPTION_KEY", "ke2AXS883XK_QFY9uLNGUiQlce1MifOaZNmmn06eoC8="
 )
+os.environ.setdefault("TASK_SIGNING_SECRET", "test-task-secret")
+os.environ.setdefault("POLYGON_API_KEY", "test-polygon-key")
 
-# Mock the missing function calculate_dynamic_target in optimizer module
-# This fixes the ImportError in the broken api.py code, allowing us to test the leak.
-optimizer_module.calculate_dynamic_target = MagicMock(return_value=0.1)
+# Windows-local shim: rq's import raises where no 'fork' context exists, so
+# packages.quantum.api is unimportable locally (the known 9-file fork
+# class). CI (Linux) imports the real rq; the shim only engages where rq
+# itself cannot load. Same pattern as test_rebalance_endpoint_contract.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from packages.quantum.api import app  # noqa: E402
+from packages.quantum.core.rate_limiter import limiter  # noqa: E402
+
+# The rebalance route is 5/minute rate-limited and this module plus the
+# contract module drive it repeatedly in one session. Not under test here.
+limiter.enabled = False
 
 client = TestClient(app)
 
-# 3. Mocks
-@pytest.fixture
-def mock_auth():
-    async def mock_get_user():
-        return "test_user_id"
+USER_ID = "test-user-security"
+_PROD = {"APP_ENV": "production"}
 
-    app.dependency_overrides[get_current_user] = mock_get_user
-    yield
-    app.dependency_overrides = {}
 
-@pytest.fixture
-def mock_supabase():
-    mock = MagicMock()
+# ---------------------------------------------------------------------------
+# Route-resolved dependency overrides (immune to import/patch timing).
+# ---------------------------------------------------------------------------
+_AUTH_QUALNAMES = ("get_current_user", "get_supabase_user_client")
 
-    def mock_get_client():
-        return mock
 
-    app.dependency_overrides[get_supabase_user_client] = mock_get_client
-    return mock
+def _current_app():
+    """The app object as of NOW, from the live module attr — never the
+    import-time capture (an earlier module reloading api would desync a
+    captured binding from the routes actually served)."""
+    import packages.quantum.api as _api
 
-def test_preview_rebalance_leak(mock_auth, mock_supabase):
-    sensitive_info = "SECRET_KEY_PREVIEW_123"
+    return _api.app
 
-    with patch("packages.quantum.optimizer._compute_portfolio_weights") as mock_opt:
-        mock_opt.side_effect = Exception(f"Optimizer failed: {sensitive_info}")
 
-        # Mock supabase response for positions
-        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [
-            {"symbol": "SPY", "quantity": 10, "current_value": 1000, "user_id": "test_user_id"}
-        ]
+def _iter_api_routes(routes):
+    """Yield path-bearing dependant routes, recursing through router
+    wrappers. fastapi >= 0.139: ``include_router`` appends a lazy
+    ``_IncludedRouter`` (no path/dependant) whose ``original_router.routes``
+    holds the real APIRoutes with full prefixed paths. Older fastapi
+    flattens APIRoutes directly into ``app.routes`` — both shapes resolve
+    here (mechanism proven against fastapi 0.139.2/starlette 1.3.1, the CI
+    resolver-blindness pair, and 0.135.1 local)."""
+    for r in routes:
+        if getattr(r, "path", None) and hasattr(r, "dependant"):
+            yield r
+        inner = getattr(r, "original_router", None)
+        if inner is not None:
+            yield from _iter_api_routes(inner.routes)
+        elif not hasattr(r, "dependant") and getattr(r, "routes", None):
+            # Other containers (mounts, plain sub-routers).
+            yield from _iter_api_routes(r.routes)
 
-        # Patch RiskBudgetEngine to avoid TypeError in current broken code (and ensure we hit the optimizer)
-        with patch("packages.quantum.api.RiskBudgetEngine") as MockRiskEngine:
-            MockRiskEngine.return_value.compute.return_value = MagicMock()
 
-            # Ensure group_spread_positions returns something so we don't exit early
-            with patch("packages.quantum.api.group_spread_positions") as mock_group:
-                mock_spread = MagicMock()
-                mock_spread.ticker = "SPY"
-                mock_spread.current_value = 1000
-                mock_spread.spread_type = "vertical"
-                mock_spread.underlying = "SPY"
-                mock_spread.legs = []
-                mock_spread.quantity = 1
-                mock_spread.net_cost = 100
-                mock_spread.delta = 0.5
-                mock_spread.gamma = 0.05
-                mock_spread.vega = 0.1
-                mock_spread.theta = -0.1
-                # Mock dict method for model conversion if needed
-                mock_spread.dict.return_value = {
-                    "ticker": "SPY", "current_value": 1000, "spread_type": "vertical",
-                    "underlying": "SPY", "legs": [], "quantity": 1, "net_cost": 100,
-                    "delta": 0.5, "gamma": 0.05, "vega": 0.1, "theta": -0.1
-                }
+def _route_dep_targets(paths):
+    targets = set()
+    for r in _iter_api_routes(_current_app().routes):
+        if r.path in paths:
+            for d in r.dependant.dependencies:
+                if getattr(d.call, "__qualname__", "") in _AUTH_QUALNAMES:
+                    targets.add(d.call)
+    return targets
 
-                # We need it to be convertible to Spread(**s)
-                # But group_spread_positions returns a list of DICTS usually.
-                mock_group.return_value = [{
-                    "id": "test-spread-id",
-                    "user_id": "test_user_id",
-                    "ticker": "SPY",
-                    "spread_type": "vertical",
-                    "underlying": "SPY",
-                    "legs": [],
-                    "quantity": 1,
-                    "net_cost": 100,
-                    "current_value": 1000,
-                    "delta": 0.5,
-                    "gamma": 0.05,
-                    "vega": 0.1,
-                    "theta": -0.1
-                }]
 
-                response = client.post("/rebalance/preview")
+@contextlib.contextmanager
+def _authed(*paths):
+    """Override auth + user-scoped supabase for the given route paths."""
+    fake_sb = mock.MagicMock()
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["status"] == "error"
+    async def _fake_user():
+        return USER_ID
 
-            # ASSERT SECURE BEHAVIOR: Sensitive info should NOT be present in production
-            assert sensitive_info not in data["message"], f"Leaked sensitive info in production! Got: {data['message']}"
-            assert data["message"] == "Optimization failed" or data["message"] == "Internal Server Error"
+    targets = _route_dep_targets(paths)
+    assert targets, f"no auth dependencies resolved for {paths!r}"
+    # Override dicts: the freshly resolved app AND the module-bound one the
+    # TestClient drives (the same object unless api was reloaded mid-session
+    # — keying both keeps client and resolver coherent either way).
+    override_dicts = {
+        id(d): d
+        for d in (_current_app().dependency_overrides, app.dependency_overrides)
+    }.values()
+    added = []
+    for call in targets:
+        if call.__qualname__ == "get_current_user":
+            for d in override_dicts:
+                d[call] = _fake_user
+        else:
+            for d in override_dicts:
+                d[call] = lambda: fake_sb
+        added.append(call)
+    # Belt-and-braces: also key the module-imported symbols (harmless
+    # duplicates when identical to the route-resolved callables).
+    from packages.quantum.security import (
+        get_current_user,
+        get_supabase_user_client,
+    )
 
-def test_analytics_behavior_leak(mock_auth, mock_supabase):
-    sensitive_info = "SECRET_KEY_ANALYTICS_456"
+    for d in override_dicts:
+        d[get_current_user] = _fake_user
+        d[get_supabase_user_client] = lambda: fake_sb
+    added += [get_current_user, get_supabase_user_client]
+    try:
+        yield fake_sb
+    finally:
+        for k in added:
+            for d in override_dicts:
+                d.pop(k, None)
 
-    with patch("packages.quantum.analytics_endpoints.BehaviorAnalysisService") as MockService:
-        instance = MockService.return_value
-        instance.get_behavior_summary.side_effect = Exception(sensitive_info)
 
-        response = client.get("/analytics/behavior?window=7d")
+# ===========================================================================
+# 1. /rebalance/preview — optimizer failure (deepest callee the route
+#    reaches) must surface as the typed message, never the exception text.
+#    Boundary wiring imported from the authoritative rebalance harness.
+# ===========================================================================
+def test_rebalance_preview_masks_optimizer_detail_in_production():
+    from packages.quantum.tests.test_rebalance_endpoint_contract import (
+        FakeSupabase,
+        _book_rows,
+        _wired,
+    )
 
-        assert response.status_code == 500
-        # ASSERT SECURE BEHAVIOR
-        assert sensitive_info not in response.text, "Leaked sensitive info in analytics endpoint!"
-        assert "Internal Server Error" in response.json()["detail"]
+    sensitive = "SECRET_KEY_PREVIEW_123"
+    fake_sb = FakeSupabase(_book_rows())
+    with _wired(fake_sb, opt_exc=RuntimeError(f"Optimizer failed: {sensitive}")) as handles:
+        with mock.patch.dict(os.environ, _PROD):
+            resp = client.post("/rebalance/preview")
 
-def test_validation_run_leak(mock_auth, mock_supabase):
-    sensitive_info = "SECRET_KEY_VALIDATION_789"
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "error"
+    # Whole-payload leak check, stronger than the original message-only one.
+    assert sensitive not in resp.text
+    assert body["message"] == "Optimization failed"
+    # Non-vacuous: the exploding optimizer was actually reached.
+    assert handles["opt"].call_count == 1
 
-    payload = {
-        "mode": "paper"
-    }
 
-    with patch("packages.quantum.validation_endpoints.GoLiveValidationService") as MockService:
-        instance = MockService.return_value
-        instance.eval_paper_forward_checkpoint.side_effect = Exception(sensitive_info)
+# ===========================================================================
+# 2. /analytics/behavior — service failure at its origin must yield a
+#    masked 500 in production.
+# ===========================================================================
+def test_analytics_behavior_masks_service_detail_in_production():
+    sensitive = "SECRET_KEY_ANALYTICS_456"
+    with _authed("/analytics/behavior"):
+        with mock.patch(
+            "packages.quantum.analytics_endpoints.BehaviorAnalysisService"
+        ) as MockService:
+            MockService.return_value.get_behavior_summary.side_effect = (
+                Exception(f"db=postgres://svc:hunter2@10.0.0.9 {sensitive}")
+            )
+            with mock.patch.dict(os.environ, _PROD):
+                resp = client.get("/analytics/behavior?window=7d")
 
-        response = client.post("/validation/run", json=payload)
+    assert resp.status_code == 500
+    assert sensitive not in resp.text
+    assert "hunter2" not in resp.text
+    assert resp.json()["detail"] == "Internal Server Error"
+    # Non-vacuous: the injected failure is what produced the 500.
+    MockService.return_value.get_behavior_summary.assert_called_once()
 
-        assert response.status_code == 500
-        # ASSERT SECURE BEHAVIOR
-        assert sensitive_info not in response.text, "Leaked sensitive info in validation endpoint!"
-        assert "Internal Server Error" in response.json()["detail"]
+
+# ===========================================================================
+# 3. /validation/run — checkpoint-evaluation failure at its origin must
+#    yield a masked 500 in production.
+# ===========================================================================
+def test_validation_run_masks_service_detail_in_production():
+    sensitive = "SECRET_KEY_VALIDATION_789"
+    with _authed("/validation/run"):
+        with mock.patch(
+            "packages.quantum.validation_endpoints.GoLiveValidationService"
+        ) as MockService:
+            MockService.return_value.eval_paper_forward_checkpoint.side_effect = (
+                Exception(sensitive)
+            )
+            with mock.patch.dict(os.environ, _PROD):
+                resp = client.post("/validation/run", json={"mode": "paper"})
+
+    assert resp.status_code == 500
+    assert sensitive not in resp.text
+    assert resp.json()["detail"] == "Internal Server Error"
+    # Non-vacuous: the injected failure is what produced the 500.
+    MockService.return_value.eval_paper_forward_checkpoint.assert_called_once()

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from packages.quantum.observability.canonical import canonical_json_bytes
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent, BACKGROUND_QUEUE
 from packages.quantum.jobs.job_runs import JobRunStore
+from packages.quantum.jobs.origin import resolve_request_origin
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
 from packages.quantum.core.rate_limiter import limiter
@@ -164,9 +165,16 @@ def _suggestions_idempotency_key(
 def enqueue_job_run(
     job_name: str, idempotency_key: str, payload: Dict[str, Any],
     queue_name: str = "otc", force_rerun: bool = False,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
+
+    A5-2 origin provenance: ``origin`` (built via
+    ``packages.quantum.jobs.origin``) is stamped into the row's
+    ``payload.origin`` at create time — including the cancelled-at-gate
+    paths — so every attempted run is attributable. ``None`` coerces to
+    ``unknown_legacy`` at the store seam (for callers not yet threaded).
 
     v4-L5 Ops Console: Enforces pause gate - blocks enqueue when trading is paused.
 
@@ -196,7 +204,8 @@ def enqueue_job_run(
             idempotency_key=idempotency_key,
             payload=payload,
             cancelled_reason="global_ops_pause",
-            cancelled_detail=pause_reason
+            cancelled_detail=pause_reason,
+            origin=origin,
         )
 
         return {
@@ -221,7 +230,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="go_live_gate",
-                cancelled_detail="missing_user_id_for_gate"
+                cancelled_detail="missing_user_id_for_gate",
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -250,7 +260,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="go_live_gate",
-                cancelled_detail=decision.reason
+                cancelled_detail=decision.reason,
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -269,7 +280,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="manual_approval_required",
-                cancelled_detail=decision.reason
+                cancelled_detail=decision.reason,
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -294,7 +306,9 @@ def enqueue_job_run(
     print(f"[DISPATCH_DEBUG] {job_name}: idempotency_key={idempotency_key}")
 
     # Normal flow: create job run and enqueue
-    job_run = store.create_or_get(job_name, idempotency_key, payload)
+    # A5-2: origin stamped at create time (payload.origin) — provenance
+    # exists even if no worker ever claims the row (queued-orphan lesson).
+    job_run = store.create_or_get(job_name, idempotency_key, payload, origin=origin)
     print(f"[DISPATCH_DEBUG] {job_name}: create_or_get returned id={job_run.get('id', '?')[:12]} status={job_run.get('status')}")
 
     # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
@@ -350,6 +364,7 @@ async def task_universe_sync(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/morning-brief", status_code=202)
@@ -372,6 +387,7 @@ async def task_morning_brief(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/midday-scan", status_code=202)
@@ -394,6 +410,7 @@ async def task_midday_scan(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/weekly-report", status_code=202)
@@ -417,6 +434,7 @@ async def task_weekly_report(
         idempotency_key=week,
         payload={"week": week},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/validation/eval", status_code=202)
@@ -455,6 +473,7 @@ async def task_validation_eval(
         idempotency_key=key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -511,6 +530,7 @@ async def task_suggestions_close(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -562,6 +582,7 @@ async def task_suggestions_open(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -602,6 +623,7 @@ async def task_learning_ingest(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -648,6 +670,7 @@ async def task_policy_lab_eval(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -692,6 +715,7 @@ async def task_paper_learning_ingest(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -733,6 +757,7 @@ async def task_strategy_autotune(
         idempotency_key=f"{week}-autotune",
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -798,6 +823,7 @@ async def task_ops_health_check(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -915,6 +941,7 @@ async def task_paper_auto_execute(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -970,6 +997,7 @@ async def task_paper_auto_close(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1405,6 +1433,7 @@ async def task_validation_init_window(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1453,6 +1482,7 @@ async def task_paper_exit_evaluate(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1495,5 +1525,6 @@ async def task_paper_mark_to_market(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 

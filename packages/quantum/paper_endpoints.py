@@ -762,6 +762,11 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # dry-run) and the paper_positions.legs the fill copies these into carry a
     # typed, source-attributed greek basis. OPEN-only (closes exempt inside).
     _populate_stage_leg_greeks(order_json.get("legs"), position_id=position_id)
+    # Stage-level entry underlying spot (⑤ future scorability; observe-only).
+    # Same order_json, same OPEN-only close-exemption, same fail-soft. Captured
+    # as typed-unavailable (no honest same-fetch source at this seam — see
+    # _populate_stage_entry_spot); NEVER adds a market-data fetch, NEVER blocks.
+    _populate_stage_entry_spot(order_json, position_id=position_id)
 
     order_payload = {
         "user_id": user_id,
@@ -1130,6 +1135,33 @@ _GREEKS_STATUS_UNAVAILABLE = "unavailable_at_stage"
 # non-standard (adjusted) deliverable is standard.
 _STAGE_GREEKS_MULTIPLIER = 100
 
+# ── Stage-time per-leg IV + entry-underlying-spot capture (⑤ future
+# scorability; observe-only). The #1260 challenger study abstained
+# INSUFFICIENT_EVIDENCE because a closed outcome carried no per-leg IV and no
+# entry spot: the lognormal challenger abstains missing_iv / missing_spot. The
+# SAME truth-layer option snapshot the greeks populate already fetched (cache-
+# coherent, zero extra provider call) ALSO carries the leg's implied volatility
+# — Alpaca `impliedVolatility` / Polygon `implied_volatility`, surfaced as the
+# canonical `iv` key (market_data_truth_layer.py:1321 + :1505). We capture it
+# ALONGSIDE greeks, INDEPENDENTLY of greeks completeness (a leg may carry one
+# without the other). Status vocabulary reuses the greeks markers.
+_IV_STATUS_POPULATED = _GREEKS_STATUS_POPULATED
+_IV_STATUS_UNAVAILABLE = _GREEKS_STATUS_UNAVAILABLE
+# Entry underlying spot: there is NO honest SAME-FETCH source at the stage seam
+# (verified 2026-07-18). The per-contract option snapshot the stage already
+# fetched carries impliedVolatility + greeks but NOT the underlying price
+# (Alpaca /v1beta1/options/snapshots per-contract payload omits it, and the
+# truth-layer parse never surfaces it); the suggestion/order_json carries only
+# the underlying SYMBOL (order_json.underlying), never a price; and the stage
+# flow issues no equities snapshot for the underlying. Rather than add a market-
+# data request (out of ⑤ scope; H9 forbids fabricating a spot from option
+# prices), we stamp a TYPED-UNAVAILABLE marker with the reason — a wired slot a
+# future lane can fill from an honest same-fetch source. Until then the
+# challenger abstains missing_spot, never on a fabricated value.
+_SPOT_STATUS_POPULATED = _GREEKS_STATUS_POPULATED
+_SPOT_STATUS_UNAVAILABLE = _GREEKS_STATUS_UNAVAILABLE
+_SPOT_REASON_NO_SAME_FETCH = "no_same_fetch_spot_source"
+
 
 def _is_occ_symbol(sym) -> bool:
     """True when sym looks like an OCC option contract (O:-prefixed or the bare
@@ -1149,6 +1181,15 @@ def _finite_float_or_none(v) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def _finite_pos_float_or_none(v) -> Optional[float]:
+    """float(v) when finite AND strictly > 0, else None. Used for implied
+    volatility: a zero/negative IV is not honest market vol (a degenerate/absent
+    reading), so it is typed unavailable rather than stored as if real — H9, the
+    exact ``iv or 0.30`` default the dormant scorer used and this refuses."""
+    f = _finite_float_or_none(v)
+    return f if (f is not None and f > 0) else None
+
+
 def _stage_leg_greeks_snapshot(sym: str) -> Optional[Dict[str, Any]]:
     """One leg's option snapshot via the truth layer (Alpaca options snapshots
     primary → Polygon fallback) — the SAME source set _aligned_leg_quote_fetch
@@ -1162,8 +1203,37 @@ def _stage_leg_greeks_snapshot(sym: str) -> Optional[Dict[str, Any]]:
     return snaps.get(sym) or (next(iter(snaps.values())) if snaps else None)
 
 
+def _apply_leg_iv(leg: Dict[str, Any], snap: Optional[Dict[str, Any]]) -> None:
+    """Stamp one leg dict with a typed implied-volatility block from the SAME
+    stage-time snapshot the greeks come from (⑤ future scorability).
+
+    INDEPENDENT of greeks completeness: a snapshot may carry a valid IV while a
+    greek is missing, or vice versa, so IV is decided on its own. The value is
+    the canonical truth-layer ``iv`` key (Alpaca ``impliedVolatility`` / Polygon
+    ``implied_volatility``), an ANNUALIZED DECIMAL (0.20 = 20%) stored RAW — no
+    percent-vs-decimal rescale, no plausibility re-interpretation (the downstream
+    challenger owns the >3.0 percent-guard abstention; capture stays honest).
+    Finite and strictly > 0 → populate; missing/nonfinite/non-positive/feed-
+    fallback-without-iv → typed unavailable marker, NEVER a fabricated default
+    IV (H9). Mutates the leg in place."""
+    source = (snap or {}).get("source") if isinstance(snap, dict) else None
+    iv = _finite_pos_float_or_none((snap or {}).get("iv")) if isinstance(snap, dict) else None
+    if iv is not None:
+        leg["iv"] = iv
+        leg["iv_status"] = _IV_STATUS_POPULATED
+        leg["iv_source"] = source or "unknown"
+        leg["iv_as_of"] = (snap or {}).get("retrieved_ts")
+    else:
+        leg["iv"] = None
+        leg["iv_status"] = _IV_STATUS_UNAVAILABLE
+        if source:
+            leg["iv_source"] = source
+
+
 def _apply_leg_greeks(leg: Dict[str, Any], snap: Optional[Dict[str, Any]]) -> None:
-    """Stamp one leg dict with a typed greeks block from its stage-time snapshot.
+    """Stamp one leg dict with a typed greeks block AND a typed IV block from its
+    stage-time snapshot (IV via _apply_leg_iv — same snapshot, decided
+    independently).
 
     SIGN CONVENTION — RAW per-contract greeks, EXACTLY as the snapshot reports
     them (a call delta is +, a put delta is −), UNSIGNED by leg direction. This
@@ -1207,17 +1277,21 @@ def _apply_leg_greeks(leg: Dict[str, Any], snap: Optional[Dict[str, Any]]) -> No
         if source:
             leg["greeks_source"] = source
 
+    # Per-leg IV from the SAME snapshot, decided independently of greeks (⑤).
+    _apply_leg_iv(leg, snap)
+
 
 def _populate_stage_leg_greeks(
     legs, *, position_id=None, snapshot_fetch=None,
 ) -> None:
-    """OBSERVE-ONLY: stamp per-leg greeks onto the staged order's leg jsonb from
-    the stage-time market snapshot, so a later consumer — and the
-    paper_positions.legs the fill copies these into — can read a real,
-    source-attributed greek basis. The ledgered populate side of the
-    double-dormant greeks envelope (CLAUDE.md §8): NEVER activates a cap, NEVER
-    rejects, NEVER blocks staging. A dark-greeks leg stages normally with
-    greeks=None + greeks_status='unavailable_at_stage'.
+    """OBSERVE-ONLY: stamp per-leg greeks AND per-leg implied volatility (⑤)
+    onto the staged order's leg jsonb from the stage-time market snapshot, so a
+    later consumer — the #1260 challenger study, and the paper_positions.legs the
+    fill copies these into — can read a real, source-attributed greek + IV basis.
+    The ledgered populate side of the double-dormant greeks envelope (CLAUDE.md
+    §8): NEVER activates a cap, NEVER rejects, NEVER blocks staging. A dark leg
+    stages normally with greeks=None/greeks_status + iv=None/iv_status typed
+    'unavailable_at_stage'.
 
     OPEN-only: a CLOSE (position_id set) creates no new position legs and is
     exempt (mirrors _validate_entry_quotes' close exemption; the exit path is
@@ -1233,9 +1307,11 @@ def _populate_stage_leg_greeks(
             continue
         sym = leg.get("symbol") or leg.get("occ_symbol")
         if not _is_occ_symbol(sym):
-            # Non-option leg (e.g. a stock leg) — no option greeks to source.
+            # Non-option leg (e.g. a stock leg) — no option greeks / IV to source.
             leg["greeks"] = None
             leg["greeks_status"] = _GREEKS_STATUS_UNAVAILABLE
+            leg["iv"] = None
+            leg["iv_status"] = _IV_STATUS_UNAVAILABLE
             continue
         snap = None
         try:
@@ -1247,6 +1323,46 @@ def _populate_stage_leg_greeks(
             )
             snap = None
         _apply_leg_greeks(leg, snap)
+
+
+def _populate_stage_entry_spot(order_json, *, position_id=None) -> None:
+    """OBSERVE-ONLY (⑤): stamp a typed stage-level ``entry_underlying_spot``
+    marker onto the built order_json so a later consumer (the #1260 challenger
+    study, which abstains ``missing_spot`` without one) has an HONEST entry-spot
+    slot with provenance. Runs on the SAME order_json the greeks populate mutates
+    — every route (internal / live / shadow / dry-run) persists it identically.
+
+    There is NO honest SAME-FETCH spot source at the stage seam (see
+    ``_SPOT_REASON_NO_SAME_FETCH``): the per-contract option snapshots the stage
+    already fetched carry IV + greeks but not the underlying price, and the flow
+    issues no equities snapshot. Per H9 (and the ⑤ 'no extra network fetch'
+    charter) we do NOT add a market-data request and NEVER fabricate a spot from
+    option prices — we record a typed-unavailable marker
+    {value=None, source=None, as_of=None, status='unavailable_at_stage',
+    reason='no_same_fetch_spot_source'}, a wired slot a future lane can fill from
+    an honest source. When such a source lands, populate value + source + as_of
+    and set status='populated_at_stage' — the study mapper already consumes it.
+
+    OPEN-only: a CLOSE (position_id set) is exempt (mirrors the greeks step).
+    Fail-soft — never raises, never blocks staging. Mutates order_json in place."""
+    if position_id is not None:
+        return  # CLOSE order — exempt
+    if not isinstance(order_json, dict):
+        return
+    try:
+        # No honest same-fetch source today → typed unavailable with reason.
+        order_json["entry_underlying_spot"] = {
+            "value": None,
+            "source": None,
+            "as_of": None,
+            "status": _SPOT_STATUS_UNAVAILABLE,
+            "reason": _SPOT_REASON_NO_SAME_FETCH,
+        }
+    except Exception as exc:  # fail-soft — spot capture never blocks staging
+        logger.warning(
+            f"[STAGE_SPOT] entry_underlying_spot capture failed: {exc} "
+            f"(staging proceeds)"
+        )
 
 
 def _leg_symbol(leg) -> Optional[str]:

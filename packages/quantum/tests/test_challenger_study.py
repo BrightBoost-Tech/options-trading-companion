@@ -228,3 +228,103 @@ class TestRender:
         assert "Cohort: LIVE" in md and "Cohort: SHADOW" in md
         assert "missing_delta" in md and "missing_spot" in md
         assert "UNADJUDICABLE" in md
+
+
+# --- 10. ⑤ future scorability: captured spot/iv/delta -> models SCORE ---------
+def _future_debit_row(record_id, is_paper, pnl, spot=95.0, iv_long=0.20,
+                      iv_short=0.18, delta_long=0.60, delta_short=0.45,
+                      known_at="2026-03-19T15:19:13Z"):
+    """A row shaped like a FUTURE outcome: staged AFTER the ⑤ capture landed, so
+    its legs carry per-leg iv + greeks.delta (stage-populated shape, 'action'
+    key) and it carries a typed-POPULATED entry_underlying_spot. Same geometry
+    as _debit_row (buy 90C / sell 100C, premium 4.55, expiry 2026-04-17)."""
+    return {
+        "record_id": record_id,
+        "is_paper": is_paper,
+        "strategy": "LONG_CALL_DEBIT_SPREAD",
+        "regime": "normal",
+        "known_at": known_at,
+        "realized_pnl": pnl,
+        "pop_pred": 0.55,
+        "ev_pred": 42.0,
+        "net_premium": 4.55,
+        "contracts": 1,
+        "corrected": False,
+        "legs": [
+            {"action": "buy", "symbol": "O:XYZ260417C00090000", "quantity": 1,
+             "iv": iv_long, "iv_status": "populated_at_stage", "iv_source": "alpaca",
+             "greeks": {"delta": delta_long, "gamma": 0.02, "theta": -0.03, "vega": 0.10},
+             "greeks_status": "populated_at_stage"},
+            {"action": "sell", "symbol": "O:XYZ260417C00100000", "quantity": 1,
+             "iv": iv_short, "iv_status": "populated_at_stage", "iv_source": "alpaca",
+             "greeks": {"delta": delta_short, "gamma": 0.02, "theta": -0.03, "vega": 0.10},
+             "greeks_status": "populated_at_stage"},
+        ],
+        "entry_underlying_spot": {
+            "value": spot, "source": "alpaca", "as_of": known_at,
+            "status": "populated_at_stage",
+        },
+    }
+
+
+class TestFutureCapturedRowIsScorable:
+    def test_mapper_wires_captured_inputs_onto_foundation_row(self):
+        frow, _ = to_foundation_row(_future_debit_row("f1", False, 30.0))
+        assert frow["spot"] == 95.0                       # captured entry spot
+        # per-leg iv + delta flow through onto the foundation legs
+        ivs = sorted(l["iv"] for l in frow["legs"])
+        assert ivs == [0.18, 0.20]
+        deltas = sorted(l["delta"] for l in frow["legs"])
+        assert deltas == [0.45, 0.60]
+
+    def test_challenger_and_adapter_SCORE_the_future_row(self):
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [_future_debit_row("f1", False, 30.0)]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        # The lognormal challenger EMITS A PREDICTION (no longer missing_spot/iv).
+        assert live.challenger.scored == 1
+        assert live.challenger.abstained == 0
+        # The frozen adapter scores too (per-leg delta now present).
+        assert live.adapter.scored == 1
+        # Baseline (stored pop/ev) scores → the head-to-head joint set is
+        # non-empty → the charter falsifier is now ADJUDICABLE for this row
+        # (the exact gap the 07-18 INSUFFICIENT_EVIDENCE run reported).
+        assert live.h2h_baseline_challenger.n_joint == 1
+
+    def test_historical_row_still_abstains_alongside_a_future_row(self):
+        # Mixed cohort: one FUTURE-shaped row (scores) + one HISTORICAL-shaped
+        # row (no capture → abstains). Never backfilled/fabricated (H9).
+        payload = {"generated_at": "2026-07-18", "source": "synthetic",
+                   "rows": [
+                       _future_debit_row("f1", False, 30.0),
+                       _debit_row("h1", False, 0.6, 50.0, -20.0),  # historical shape
+                   ]}
+        live = next(c for c in build_study(payload).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 1 and live.challenger.abstained == 1
+        assert live.adapter.scored == 1 and live.adapter.abstained == 1
+        # the historical row is the one that abstains, on the honest reasons
+        chal_abstain = {p.record_id: p.abstain_reason
+                        for p in live.challenger.predictions if not p.scored}
+        assert chal_abstain == {"h1": "missing_spot"}
+        adapt_abstain = {p.record_id: p.abstain_reason
+                         for p in live.adapter.predictions if not p.scored}
+        assert adapt_abstain == {"h1": "missing_delta"}
+
+    def test_typed_unavailable_spot_marker_keeps_challenger_abstaining(self):
+        # A CURRENT production row: legs carry captured iv/delta, but the entry
+        # spot is the typed-UNAVAILABLE marker (no honest same-fetch source yet).
+        # The challenger must still abstain missing_spot — never on a fabricated
+        # spot — while the delta-only frozen adapter DOES score.
+        row = _future_debit_row("u1", False, 10.0)
+        row["entry_underlying_spot"] = {
+            "value": None, "source": None, "as_of": None,
+            "status": "unavailable_at_stage", "reason": "no_same_fetch_spot_source",
+        }
+        frow, _ = to_foundation_row(row)
+        assert frow["spot"] is None
+        live = next(c for c in build_study(
+            {"generated_at": "x", "source": "s", "rows": [row]}
+        ).cohorts if c.cohort == "live")
+        assert live.challenger.scored == 0
+        assert {p.abstain_reason for p in live.challenger.predictions} == {"missing_spot"}
+        assert live.adapter.scored == 1        # delta present → adapter scores

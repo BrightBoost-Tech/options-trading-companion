@@ -17,27 +17,53 @@ exercise the new contract:
 """
 
 import asyncio
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
 
-# Persist module-level mocks
-_mock_ops_module = MagicMock()
-_mock_supabase_module = MagicMock()
-
-_MODULE_PATCHES = {
-    "supabase": _mock_supabase_module,
-    "packages.quantum.check_version": MagicMock(),
-    "packages.quantum.ops_endpoints": _mock_ops_module,
-}
-
-for _k, _v in _MODULE_PATCHES.items():
-    sys.modules[_k] = _v
-
-from packages.quantum.services.cash_service import CashService  # noqa: E402
-from packages.quantum.services.equity_state import (  # noqa: E402
-    _reset_caches_for_testing,
+# --- sys.modules isolation: stub-only-if-absent + GUARANTEED restore ---------
+# Stub heavy dependencies ONLY around the module-level import below, then
+# RESTORE sys.modules immediately. The PRE-FIX version assigned these into
+# sys.modules at module level and NEVER restored them, so it PERMANENTLY
+# shadowed the REAL modules for every later-collected test in the same CI shard
+# (pytest imports ALL test modules at COLLECTION time before running any test —
+# an un-restored stub is live for that whole phase). Concretely:
+# test_entries_only_halt.py does `import packages.quantum.ops_endpoints` at its
+# module level, and the leaked MagicMock made `logging.getLogger(<MagicMock>)`
+# raise "A logger name must be a string" (4 spurious failures — green
+# single-file, red at full-suite collection order). This is the 2026-07-17
+# sys.modules poison class; identical fix to test_weekly_report_win_rate.py and
+# test_inbox_ranker_comprehensive.py.
+#
+# The restore MUST be immediate (try/finally), NOT a module-scoped
+# tearDownModule: teardown fires only after THIS module's tests run, i.e. after
+# every other module has already been collected against the leaked stub.
+#
+# ops_endpoints is imported lazily at CALL time inside CashService._is_paper_mode
+# / _paper_baseline_fallback; both call sites are `try/except Exception`-guarded
+# and fall back to the live (non-paper) branch, so the tests below stay correct
+# when the real module is resolved at call time.
+_STUB_KEYS = (
+    "supabase",
+    "packages.quantum.check_version",
+    "packages.quantum.ops_endpoints",
 )
+_saved_modules = {_k: sys.modules.get(_k) for _k in _STUB_KEYS}
+for _k in _STUB_KEYS:
+    if _saved_modules[_k] is None:  # never shadow an already-imported real module
+        sys.modules[_k] = MagicMock()
+try:
+    from packages.quantum.services.cash_service import CashService  # noqa: E402
+    from packages.quantum.services.equity_state import (  # noqa: E402
+        _reset_caches_for_testing,
+    )
+finally:
+    for _k in _STUB_KEYS:
+        if _saved_modules[_k] is None:
+            sys.modules.pop(_k, None)
+        else:
+            sys.modules[_k] = _saved_modules[_k]
+del _saved_modules
 
 USER_ID = "test-user-capital-consistency"
 

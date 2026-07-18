@@ -57,6 +57,55 @@ def _ensure_rq_importable():
 
 _ensure_rq_importable()
 
+
+def _pin_real_module(monkeypatch, name):
+    """Return the GENUINE module for ``name`` and pin it into ``sys.modules``
+    for this test's duration (monkeypatch-scoped — ambient state is restored
+    afterwards, even if that ambient state is another suite's leak).
+
+    Why: earlier-collected suites permanently replace some app modules in
+    ``sys.modules`` with MagicMocks at COLLECTION time (e.g.
+    test_capital_basis_consistency.py assigns
+    ``sys.modules["packages.quantum.ops_endpoints"] = MagicMock()`` at module
+    level and never restores it). Python then diverges by import form:
+    ``import a.b.c as x`` binds the PARENT-PACKAGE ATTRIBUTE (the real module,
+    set at first genuine import) while a call-time ``from a.b.c import f`` —
+    the form ``enqueue_job_run`` uses for ``is_trading_paused`` — reads
+    ``sys.modules`` and gets the leaked mock. A fixture that patched the real
+    module via ``import ... as`` never touches what production reads: the
+    mock's auto-created ``is_trading_paused()`` returns a MagicMock, which
+    unpacks as 0 values (the CI-only ``ValueError: not enough values to
+    unpack (expected 2, got 0)``; local single-file runs have no pollution).
+    Pinning the real module into ``sys.modules`` makes both import forms
+    resolve to the SAME object, so seam patches land where the production
+    call path actually looks.
+    """
+    import importlib
+    import sys
+    import types
+
+    def _is_real(mod):
+        # A genuine imported module: ModuleType with a ModuleSpec. A leaked
+        # MagicMock fails isinstance; a bare types.ModuleType stub has
+        # __spec__ None.
+        return isinstance(mod, types.ModuleType) and getattr(
+            mod, "__spec__", None
+        ) is not None
+
+    mod = sys.modules.get(name)
+    if not _is_real(mod):
+        parent_name, _, attr = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        cand = getattr(parent, attr, None) if parent is not None else None
+        if _is_real(cand):
+            mod = cand
+        else:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+            mod = importlib.import_module(name)
+    monkeypatch.setitem(sys.modules, name, mod)
+    return mod
+
+
 from packages.quantum.jobs import origin as origin_mod
 from packages.quantum.jobs.origin import (
     ACTOR_CLASS_HEADER,
@@ -438,9 +487,18 @@ class _FakeStore:
 
 @pytest.fixture
 def enqueue_env(monkeypatch):
-    """Patch the seam collaborators around the REAL enqueue_job_run."""
-    import packages.quantum.ops_endpoints as ops_endpoints
-    import packages.quantum.public_tasks as public_tasks
+    """Patch the seam collaborators around the REAL enqueue_job_run.
+
+    Modules are resolved via ``_pin_real_module`` so the objects we patch are
+    the SAME objects the production call path resolves at call time — robust
+    to earlier suites' leaked ``sys.modules`` stubs (CI collection order).
+    """
+    ops_endpoints = _pin_real_module(
+        monkeypatch, "packages.quantum.ops_endpoints"
+    )
+    public_tasks = _pin_real_module(
+        monkeypatch, "packages.quantum.public_tasks"
+    )
 
     fake_store = _FakeStore()
     rq_calls = []
@@ -496,7 +554,9 @@ class TestEnqueueJobRunThreading:
         assert rq_calls[0]["queue_name"] == "background"
 
     def test_paused_gate_cancelled_row_gets_origin(self, enqueue_env, monkeypatch):
-        import packages.quantum.ops_endpoints as ops_endpoints
+        ops_endpoints = _pin_real_module(
+            monkeypatch, "packages.quantum.ops_endpoints"
+        )
 
         public_tasks, fake_store, rq_calls = enqueue_env
         monkeypatch.setattr(
@@ -530,7 +590,9 @@ def signed_app(monkeypatch, enqueue_env):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    import packages.quantum.security.task_signing_v4 as signing
+    signing = _pin_real_module(
+        monkeypatch, "packages.quantum.security.task_signing_v4"
+    )
     from packages.quantum.core.rate_limiter import limiter
 
     public_tasks, fake_store, rq_calls = enqueue_env
@@ -636,8 +698,12 @@ class TestOffScheduleAttribution:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        import packages.quantum.internal_tasks as internal_tasks
-        import packages.quantum.security.task_signing_v4 as signing
+        internal_tasks = _pin_real_module(
+            monkeypatch, "packages.quantum.internal_tasks"
+        )
+        signing = _pin_real_module(
+            monkeypatch, "packages.quantum.security.task_signing_v4"
+        )
 
         _, fake_store, _ = enqueue_env
         monkeypatch.setattr(signing, "SIGNING_KEYS", {})

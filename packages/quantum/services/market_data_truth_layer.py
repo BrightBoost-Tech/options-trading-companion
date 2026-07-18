@@ -753,6 +753,18 @@ class MarketDataTruthLayer:
         self.ttl_option_chain = int(os.environ.get("OPTION_CHAIN_CACHE_TTL", "300"))
         self.ttl_daily_bars = 43200  # 12 hours
 
+        # Lane 4C (2026-07-17): optional per-cycle quote-provenance recorder
+        # (services.quote_provenance.QuoteProvenanceRecorder). Attached by the
+        # cycle owner (scan_for_opportunities) — instance state, never a
+        # module global. None → zero-overhead no-op on every boundary.
+        # OBSERVE-ONLY: recording never changes routing, fallback, or
+        # returned data.
+        self._provenance_recorder = None
+
+    def set_provenance_recorder(self, recorder) -> None:
+        """Attach a per-cycle QuoteProvenanceRecorder (observe-only)."""
+        self._provenance_recorder = recorder
+
     def _get_headers(self):
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
@@ -859,11 +871,29 @@ class MarketDataTruthLayer:
         # 2. Check Cache
         results = {}
         missing_tickers = []
+        _prov = self._provenance_recorder
 
         for ticker in unique_tickers:
             cached = self.cache.get("snapshot_many", ticker)
             if cached:
                 results[ticker] = cached
+                # Lane 4C: note cache-served option quotes so leg-set rows can
+                # still attribute a source (observe-only, fail-soft).
+                if _prov is not None and ticker.startswith("O:"):
+                    try:
+                        _q = (cached.get("quote") or {})
+                        _prov.note_quote(
+                            ticker,
+                            source=str(cached.get("source") or "unknown"),
+                            bid=_q.get("bid"), ask=_q.get("ask"),
+                            mid=_q.get("mid"),
+                            quote_ts=cached.get("provider_ts"),
+                            stale_age_ms=cached.get("staleness_ms"),
+                            from_cache=True,
+                        )
+                    except Exception:
+                        logger.debug("[PROVENANCE] cache note failed",
+                                     exc_info=True)
             else:
                 missing_tickers.append(ticker)
 
@@ -878,13 +908,23 @@ class MarketDataTruthLayer:
         # 4a. Options → Alpaca primary
         if missing_options:
             logger.info(f"[SNAPSHOT] Fetching {len(missing_options)} option(s) via Alpaca primary")
-            alpaca_snaps = self._fetch_alpaca_options_snapshots(missing_options)
+            # Lane 4C: capture per-request evidence (statuses, timestamps)
+            # only when a recorder is attached — None keeps the legacy path
+            # byte-identical with zero overhead.
+            _prov_meta = {"requests": []} if _prov is not None else None
+            _prov_requested_at = (
+                datetime.utcnow().isoformat() if _prov is not None else None
+            )
+            alpaca_snaps = self._fetch_alpaca_options_snapshots(
+                missing_options, fetch_meta=_prov_meta
+            )
             for ticker, snap in alpaca_snaps.items():
                 self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
                 results[ticker] = snap
 
             # Fallback: options that Alpaca missed → try Polygon
             alpaca_misses = [t for t in missing_options if t not in results]
+            polygon_accepted: Dict[str, Dict] = {}
             if alpaca_misses:
                 logger.info(
                     f"[SNAPSHOT] Alpaca missed {len(alpaca_misses)} option(s), "
@@ -896,6 +936,27 @@ class MarketDataTruthLayer:
                     if (q.get("bid") or 0) > 0 or (q.get("ask") or 0) > 0:
                         self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
                         results[ticker] = snap
+                        polygon_accepted[ticker] = snap
+
+            # Lane 4C: durable provenance for THIS boundary — source served,
+            # fallback reason (429|miss|error), statuses, dark contracts.
+            # Observe-only; a recording failure never touches the results.
+            if _prov is not None:
+                try:
+                    _prov.record_snapshot_boundary(
+                        requested_options=missing_options,
+                        alpaca_snaps=alpaca_snaps,
+                        polygon_snaps=polygon_accepted,
+                        dark=[t for t in missing_options if t not in results],
+                        fetch_meta=_prov_meta,
+                        requested_at=_prov_requested_at,
+                        received_at=datetime.utcnow().isoformat(),
+                    )
+                except Exception:
+                    logger.debug(
+                        "[PROVENANCE] snapshot boundary record failed",
+                        exc_info=True,
+                    )
 
         # 4b. Equities → Alpaca primary, Polygon fallback
         if missing_equities:
@@ -1296,7 +1357,11 @@ class MarketDataTruthLayer:
         except (ValueError, TypeError):
             return None
 
-    def _fetch_alpaca_options_snapshots(self, occ_symbols: List[str]) -> Dict[str, Dict]:
+    def _fetch_alpaca_options_snapshots(
+        self,
+        occ_symbols: List[str],
+        fetch_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Dict]:
         """
         Fetch option snapshots from Alpaca's indicative options feed.
         Primary source for options pricing (Phase 1).
@@ -1305,6 +1370,12 @@ class MarketDataTruthLayer:
         Auth: ALPACA_API_KEY + ALPACA_SECRET_KEY headers
 
         Returns dict keyed by O:-prefixed OCC symbol in our canonical format.
+
+        Lane 4C: when ``fetch_meta`` is provided (a per-call dict, never
+        shared state — thread-safe by construction), per-chunk request
+        evidence is appended to ``fetch_meta["requests"]``: HTTP status,
+        rate-limit headers where visible, requested/received timestamps,
+        error CLASS names. Never keys, never headers we sent.
         """
         logger.info(
             f"[MTM] _fetch_alpaca_options_snapshots called with "
@@ -1336,6 +1407,7 @@ class MarketDataTruthLayer:
                 "APCA-API-SECRET-KEY": alpaca_secret,
             }
 
+            _req_started = datetime.utcnow().isoformat()
             try:
                 resp = self.session.get(
                     "https://data.alpaca.markets/v1beta1/options/snapshots",
@@ -1343,6 +1415,20 @@ class MarketDataTruthLayer:
                     headers=headers,
                     timeout=10,
                 )
+                if fetch_meta is not None:
+                    _entry = {
+                        "boundary": "alpaca_options_snapshots",
+                        "status": resp.status_code,
+                        "symbols_count": len(chunk),
+                        "requested_at": _req_started,
+                        "received_at": datetime.utcnow().isoformat(),
+                    }
+                    for _h in ("X-RateLimit-Remaining", "X-RateLimit-Reset",
+                               "Retry-After"):
+                        _v = resp.headers.get(_h)
+                        if _v is not None:
+                            _entry[_h.lower().replace("-", "_")] = str(_v)
+                    fetch_meta.setdefault("requests", []).append(_entry)
                 if resp.status_code != 200:
                     logger.warning(
                         f"[MTM] Alpaca options snapshot returned {resp.status_code}: "
@@ -1425,6 +1511,17 @@ class MarketDataTruthLayer:
                     }
 
             except requests.exceptions.RequestException as e:
+                if fetch_meta is not None:
+                    # Error CLASS only — a stringified exception can carry
+                    # URL/query material; never persist that.
+                    fetch_meta.setdefault("requests", []).append({
+                        "boundary": "alpaca_options_snapshots",
+                        "status": None,
+                        "error": type(e).__name__,
+                        "symbols_count": len(chunk),
+                        "requested_at": _req_started,
+                        "received_at": datetime.utcnow().isoformat(),
+                    })
                 logger.error(f"[MTM] Alpaca options snapshot request failed: {e}")
 
         return results
@@ -1450,6 +1547,18 @@ class MarketDataTruthLayer:
             # (blob store is content-addressed → the re-record dedups). Mirrors the
             # daily-bars pattern that already records on hit.
             _record_option_chain_to_context(underlying, expiration_date, cached)
+            # Lane 4C: note the cache-served chain source for leg attribution
+            # (observe-only, fail-soft; contracts carry their own "source").
+            if self._provenance_recorder is not None:
+                try:
+                    _src = str((cached[0] or {}).get("source") or "unknown")
+                    self._provenance_recorder.note_chain(
+                        underlying, source=_src,
+                        contracts_count=len(cached), from_cache=True,
+                    )
+                except Exception:
+                    logger.debug("[PROVENANCE] chain cache note failed",
+                                 exc_info=True)
             return cached
 
         # 2. Get spot price if not provided (for strike filtering)
@@ -1462,10 +1571,16 @@ class MarketDataTruthLayer:
             spot_for_filter = quote.get("mid") or quote.get("last")
 
         # 3. Try Alpaca first for option chain
+        _prov = self._provenance_recorder
+        _prov_meta = {"requests": []} if _prov is not None else None
+        _prov_requested_at = (
+            datetime.utcnow().isoformat() if _prov is not None else None
+        )
         all_contracts = self._fetch_alpaca_option_chain(
             underlying, spot_for_filter, expiration_date, min_expiry, max_expiry,
-            strike_range, right
+            strike_range, right, fetch_meta=_prov_meta
         )
+        _chain_source = "alpaca"
 
         # 4. Fallback to Polygon if Alpaca returned nothing
         if not all_contracts:
@@ -1474,6 +1589,22 @@ class MarketDataTruthLayer:
                 underlying, spot_for_filter, expiration_date, min_expiry, max_expiry,
                 strike_range, right
             )
+            _chain_source = "polygon_fallback"
+
+        # Lane 4C: durable provenance for the chain boundary (observe-only).
+        if _prov is not None:
+            try:
+                _prov.record_chain_boundary(
+                    underlying,
+                    source=_chain_source,
+                    contracts_count=len(all_contracts),
+                    fetch_meta=_prov_meta,
+                    requested_at=_prov_requested_at,
+                    received_at=datetime.utcnow().isoformat(),
+                )
+            except Exception:
+                logger.debug("[PROVENANCE] chain boundary record failed",
+                             exc_info=True)
 
         # Record to DecisionContext if active (for replay feature store)
         _record_option_chain_to_context(underlying, expiration_date, all_contracts)
@@ -1486,10 +1617,15 @@ class MarketDataTruthLayer:
         expiration_date: Optional[str], min_expiry: Optional[str],
         max_expiry: Optional[str], strike_range: Optional[float],
         right: Optional[str],
+        fetch_meta: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         """
         Fetch option chain from Alpaca /v1beta1/options/snapshots/{underlying}.
         Returns list of canonical contract dicts matching option_chain() format.
+
+        Lane 4C: ``fetch_meta`` (per-call dict) collects per-page request
+        evidence — status, page index, rate-limit headers, error CLASS names.
+        Never keys, never sent headers.
         """
         alpaca_key = os.getenv("ALPACA_API_KEY", "")
         alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
@@ -1527,6 +1663,7 @@ class MarketDataTruthLayer:
             if page_token:
                 params["page_token"] = page_token
 
+            _req_started = datetime.utcnow().isoformat()
             try:
                 resp = self.session.get(
                     f"https://data.alpaca.markets/v1beta1/options/snapshots/{underlying}",
@@ -1534,6 +1671,20 @@ class MarketDataTruthLayer:
                     headers=headers,
                     timeout=15,
                 )
+                if fetch_meta is not None:
+                    _entry = {
+                        "boundary": "alpaca_option_chain",
+                        "status": resp.status_code,
+                        "page": len(fetch_meta.get("requests", [])),
+                        "requested_at": _req_started,
+                        "received_at": datetime.utcnow().isoformat(),
+                    }
+                    for _h in ("X-RateLimit-Remaining", "X-RateLimit-Reset",
+                               "Retry-After"):
+                        _v = resp.headers.get(_h)
+                        if _v is not None:
+                            _entry[_h.lower().replace("-", "_")] = str(_v)
+                    fetch_meta.setdefault("requests", []).append(_entry)
                 if resp.status_code != 200:
                     logger.warning(
                         f"[CHAIN] Alpaca option chain returned {resp.status_code}: "
@@ -1555,6 +1706,15 @@ class MarketDataTruthLayer:
                     break
 
             except requests.exceptions.RequestException as e:
+                if fetch_meta is not None:
+                    fetch_meta.setdefault("requests", []).append({
+                        "boundary": "alpaca_option_chain",
+                        "status": None,
+                        "error": type(e).__name__,
+                        "page": len(fetch_meta.get("requests", [])),
+                        "requested_at": _req_started,
+                        "received_at": datetime.utcnow().isoformat(),
+                    })
                 logger.error(f"[CHAIN] Alpaca option chain request failed: {e}")
                 break
 

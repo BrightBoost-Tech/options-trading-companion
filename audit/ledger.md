@@ -4,6 +4,29 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-18 — THREE MIGRATIONS APPLIED (Fable migration orchestrator, opus reviews) · status:shipped
+
+Applied serially 03:34–03:40Z, market closed, verbatim from main `aeab21d8`
+via mcp apply_migration (never `db push`); preflight ABSENT_CLEAN ×3;
+tracked by NAME: `shadow_fleet_activation_rpc`→`20260718033415` ·
+`candidate_terminal_dispositions`→`20260718033912` ·
+`option_quote_provenance`→`20260718034013`. **NEVER REAPPLY.** One
+`migration_apply` receipt each (risk_alerts ids 7a3c52c1… / 0a50d417… /
+ec013a5d…). Verified: RPC pair exact-signature, EXECUTE service_role-only;
+dispositions 19 cols + partial-unique final + RLS; provenance 31 cols +
+partial fallback idx + RLS; both new tables 0 rows. Supersedes the
+"Three migrations UNAPPLIED" line in the sprint entry below. Zero fleet
+provisioning/activation (fleet tables still 0 rows); SEVEN activation
+blockers re-verified unrepaired; F-CREDIT-SIGN/stale-order/orphan-job
+corrections NOT applied (zero data-table UPDATE/DELETE); broker flat 0/0 at
+all three checkpoints; 0 new crit/high; entries_paused=false; deployed SHA
+unchanged (worker SUCCESS `aeab21d8`). Side-note (07-18): orphan check must
+treat `cancelled`/`dead_lettered` as terminal — non-terminal = 4 running +
+1 queued = the census 5. Pending natural falsifiers (unchanged owners):
+disposition/provenance writers first natural rows Mon 07-20 scan cycle ·
+fleet provision/activate sequence (operator prompts in bundle).
+Results doc: `docs/review/migration-results-2026-07-18.md`.
+
 ## 2026-07-18 — FRIDAY POST-CLOSE SPRINT MERGED (Fable orchestrator, opus reviews) · status:shipped-code/runtime-pending
 
 Serialized merges w/ per-PR opus adversarial review, per-merge deploy

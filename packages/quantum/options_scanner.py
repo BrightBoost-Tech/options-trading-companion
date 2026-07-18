@@ -2502,6 +2502,68 @@ def _determine_execution_cost(
         "proxy_cost_contract": proxy_cost_contract,
     }
 
+
+def build_scanner_cost_capture(
+    *,
+    expected_execution_cost: Any,
+    cost_details: Dict[str, Any],
+    unified_execution_cost: Any,
+    combo_width_share: Any,
+    num_legs: Any,
+    is_limit_order: bool,
+) -> Dict[str, Any]:
+    """Verbatim scan-time capture of the scanner's OWN execution-cost numbers.
+
+    Multi-basis cost model phase-2, Lane 3 (consumer #2). OBSERVE-ONLY. This
+    dict rides the in-memory candidate to the disposition-write seam so the
+    observe-only cost-reconciliation artifact can type two bases from the EXACT
+    numbers the scanner already produced here — never a re-run at the seam
+    (``combo_width_share``, the ``drag_map`` and the regime snapshot are gone
+    by then):
+
+      - ``scanner_estimate`` (basis 1a) — ``_determine_execution_cost``'s
+        ``expected_execution_cost`` (= max(history drag, proxy)), plus the
+        proxy/take-frac/source provenance;
+      - ``scanner_unified_final`` (basis 1b) —
+        ``calculate_unified_score(...).execution_cost_dollars`` (the number the
+        scanner's gate consumes), which is NOT otherwise carried on the
+        candidate (``unified_score_details`` holds the normalized POINTS, not
+        the dollar cost).
+
+    NO decision path reads this key; capturing it changes no behavior (the same
+    additive pattern as the D2 momentum block). Every number is stored verbatim
+    in USD PER STRUCTURE-CONTRACT (the scanner's native unit); a None input
+    stays None (typed UNAVAILABLE downstream, never a fabricated zero — H9).
+
+    DETERMINISM: this block carries NO wall-clock — ``candidate_dict`` is
+    input-deterministic by contract (test_lifecycle_fail_closed_route's
+    healthy-path byte-pin). The per-basis SOURCE is stamped here (``source``
+    tags below); the observe-only artifact stamps its own ``assembled_at`` at
+    the disposition seam, and the durable disposition row carries
+    ``finalized_at`` / ``code_sha`` — so the timestamp provenance lives where it
+    is honest, never as ambient non-determinism in the scan output.
+    """
+    cd = cost_details or {}
+    return {
+        "source": "scanner_scan_time_verbatim",
+        "unit": "per_structure_contract_usd",
+        "combo_width_share": combo_width_share,
+        "num_legs": num_legs,
+        "is_limit_order": bool(is_limit_order),
+        "scanner_estimate": {
+            "expected_execution_cost": expected_execution_cost,
+            "proxy_cost_contract": cd.get("proxy_cost_contract"),
+            "spread_take_frac": cd.get("spread_take_frac"),
+            "source_used": cd.get("execution_cost_source_used"),
+            "samples_used": cd.get("execution_cost_samples_used"),
+            "drag_source": cd.get("execution_drag_source"),
+        },
+        "scanner_unified_final": {
+            "unified_execution_cost": unified_execution_cost,
+        },
+    }
+
+
 def _apply_tier_price_filter(
     symbols: List[str],
     quotes_map: Dict[str, Any],
@@ -4150,6 +4212,20 @@ def scan_for_opportunities(
                 "execution_drag_source": cost_details["execution_drag_source"],
                 "execution_cost_source_used": cost_details["execution_cost_samples_used"],
                 "execution_cost_samples_used": cost_details["execution_cost_samples_used"],
+                # Multi-basis cost model phase-2 (Lane 3, consumer #2): verbatim
+                # scan-time capture of the scanner's OWN execution-cost numbers
+                # so the observe-only disposition reconciliation artifact can
+                # type the scanner_estimate + scanner_unified_final bases from
+                # the exact numbers computed here (the seam can't re-run the
+                # scanner). OBSERVE-ONLY, additive; no decision path reads it.
+                "scanner_cost_basis_capture": build_scanner_cost_capture(
+                    expected_execution_cost=expected_execution_cost,
+                    cost_details=cost_details,
+                    unified_execution_cost=final_execution_cost,
+                    combo_width_share=combo_width_share,
+                    num_legs=len(legs),
+                    is_limit_order=is_limit_order,
+                ),
                 # Risk Primitives
                 "max_loss_per_contract": max_loss_contract,
                 "max_profit_per_contract": max_profit_contract,

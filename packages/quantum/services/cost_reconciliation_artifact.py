@@ -21,6 +21,23 @@ this is a side-by-side reconciliation of their divergent bases.
 BASES RECONSTRUCTABLE AT THE DISPOSITION SEAM (from the candidate dict alone —
 no network, no DB, no mutation):
 
+  - ``scanner_estimate``       (CONSUMER #2) the scanner's own
+                               ``_determine_execution_cost`` expected cost
+                               (max(history drag, proxy)), ENTRY one-side, USD
+                               per structure-contract — read VERBATIM from the
+                               candidate's ``scanner_cost_basis_capture`` block
+                               (stamped at scan time by
+                               ``options_scanner.build_scanner_cost_capture``),
+                               NOT re-run (the scanner's inputs —
+                               ``combo_width_share``, the ``drag_map``, the
+                               regime snapshot — are gone at this seam).
+  - ``scanner_unified_final``  (CONSUMER #2) ``calculate_unified_score``'s
+                               ``execution_cost_dollars`` — the number the
+                               scanner's gate consumes — likewise read verbatim
+                               from ``scanner_cost_basis_capture`` (it is NOT
+                               otherwise on the candidate:
+                               ``unified_score_details`` carries the normalized
+                               POINTS, not the dollar cost).
   - ``ranker_model``           canonical_ranker fees (round-trip, 2 sides) +
                                slippage proxy, TOTAL usd — the number the
                                ranker subtracts from EV. Always attempted
@@ -36,11 +53,13 @@ no network, no DB, no mutation):
                                ``_ev_raw_true`` / ``_calibration_applied``
                                markers.
 
-BASES THAT LIVE UPSTREAM of this seam (scanner drag/unified, both
-TransactionCostModels, the realized close) are typed UNAVAILABLE with an
-explicit reason: their inputs (``combo_width_share``, a live execution ticket,
-a broker fill) are not carried on the disposition candidate. A missing basis
-is TYPED, never zero (H9 both ends).
+BASES THAT LIVE UPSTREAM/DOWNSTREAM of this seam (both TransactionCostModels,
+the realized close) are typed UNAVAILABLE with an explicit reason: their inputs
+(a live execution ticket, a broker fill) are not carried on the disposition
+candidate. When a candidate predates consumer #2 (no
+``scanner_cost_basis_capture``), the two scanner bases type UNAVAILABLE with
+reason ``scanner_cost_capture_absent``. A missing basis is TYPED, never zero
+(H9 both ends).
 
 SHARED COMPONENTS — the bases are alternative MEASUREMENTS of the same round
 trip; COMPARE them, never SUM them. The ``shared_components`` block in the
@@ -57,6 +76,7 @@ failure). No exception escapes ``build_cost_reconciliation``.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -78,11 +98,16 @@ CANONICAL_BASES: Tuple[str, ...] = (
     "realized",
 )
 
-# Why the upstream-only bases cannot be reconstructed from a disposition
-# candidate. Typed reasons, not zeros.
+# Candidate key holding the scanner's verbatim scan-time cost capture. MUST
+# match ``options_scanner.build_scanner_cost_capture``'s output key — the one
+# seam by which the scanner threads its own cost numbers to this artifact.
+SCANNER_CAPTURE_KEY = "scanner_cost_basis_capture"
+
+# Why the still-upstream/downstream bases cannot be reconstructed from a
+# disposition candidate. Typed reasons, not zeros. (scanner_estimate /
+# scanner_unified_final are now reconstructable from SCANNER_CAPTURE_KEY —
+# their absence reason is set dynamically, ``scanner_cost_capture_absent``.)
 _SEAM_UNAVAILABLE_REASON: Dict[str, str] = {
-    "scanner_estimate": "scanner_drag_inputs_not_carried_to_disposition_seam",
-    "scanner_unified_final": "scanner_scoring_not_rerun_at_disposition_seam",
     "tcm": "no_execution_ticket_at_disposition_seam",
     "tcm_legacy": "no_execution_ticket_at_disposition_seam",
     "realized": "no_broker_fill_pre_execution",
@@ -108,6 +133,27 @@ SHARED_COMPONENTS: Dict[str, str] = {
     "commission_double_count_guard": (
         "scanner_estimate embeds commission ONE side only; ranker fees are "
         "round-trip (x2). Never add scanner + ranker fees"
+    ),
+    "scanner_estimate.expected_execution_cost": (
+        "the scanner's max(history_drag, proxy) execution cost — ENTRY "
+        "one-side, per structure-contract; embedded commission is "
+        "num_legs*$0.65 ONE SIDE only (NOT round-trip). Verbatim scan-time "
+        "capture, not a re-run"
+    ),
+    "scanner_estimate_vs_unified_final_containment": (
+        "scanner_unified_final = max(calculate_unified_score's own 0.5-take "
+        "inner proxy, the scanner_estimate drag) — scanner_estimate is an "
+        "INPUT/FLOOR of scanner_unified_final and they SHARE the "
+        "num_legs*0.0065 commission term. NEVER sum the two scanner bases: "
+        "unified already CONTAINS estimate. They are two views of ONE "
+        "scan-time entry cost, COMPARE not SUM"
+    ),
+    "scanner_one_side_vs_round_trip_bases": (
+        "both scanner bases are ENTRY one-side, per structure-contract; the "
+        "executable cross and ranker fees are ROUND-TRIP. Comparing a scanner "
+        "base to a round-trip basis expects roughly a HALF, not a match — the "
+        "scanner_modeled_vs_stage_executable_per_contract delta reads through "
+        "that asymmetry, it is not pure model error"
     ),
     "quantity": (
         "TOTAL = per_structure_contract * contracts — the SAME cost at two "
@@ -235,6 +281,112 @@ def _ev_bases(cand: Mapping[str, Any]) -> Tuple[
     return raw, calibrated, label
 
 
+def _scanner_estimate_breakdown(cb: Any, cap: Mapping[str, Any],
+                                qty: Optional[float]) -> Any:
+    """scanner_estimate (basis 1a) typed from the scanner's VERBATIM capture —
+    NOT a re-run. The number is exactly ``_determine_execution_cost``'s
+    ``expected_execution_cost``, stamped at the scanner's real call site. Unit
+    PER_STRUCTURE_CONTRACT, ENTRY side, ESTIMATED basis; commission embedded
+    ONE SIDE only (frozen fact in provenance). A missing captured value is
+    typed UNAVAILABLE, never zero."""
+    est = cap.get("scanner_estimate")
+    est = est if isinstance(est, Mapping) else {}
+    # Forward-compat: a real market-data quote as-of if a future scanner threads
+    # one; None today (the scanner carries no wall-clock — see build_scanner_
+    # cost_capture) and typed None, never fabricated.
+    q_ts = cap.get("quote_timestamp")
+    prov = cb.Provenance(
+        model_version=(
+            "options_scanner._determine_execution_cost@verbatim-scan-capture"
+        ),
+        quote_timestamp=q_ts if isinstance(q_ts, str) else None,
+        source_detail=(
+            "verbatim_scan_time_capture;commission_embedded_one_side_only"
+            f";source_used={est.get('source_used')}"
+            f";samples={est.get('samples_used')}"
+            f";take_frac={est.get('spread_take_frac')}"
+        ),
+    )
+    val = _coerce_float(est.get("expected_execution_cost"))
+    if val is None:
+        primary = cb.CostComponent.make_unavailable(
+            "expected_execution_cost", cb.CostSource.SCANNER_ESTIMATE,
+            cb.CostSide.ENTRY, cb.CostBasisKind.ESTIMATED,
+            cb.CostUnit.PER_STRUCTURE_CONTRACT,
+            "scanner_estimate_capture_missing:expected_execution_cost",
+            quantity=qty, provenance=prov,
+        )
+        return cb.CostBreakdown(
+            source=cb.CostSource.SCANNER_ESTIMATE, side=cb.CostSide.ENTRY,
+            basis=cb.CostBasisKind.ESTIMATED, components=(primary,),
+            primary="expected_execution_cost", quantity=qty, provenance=prov,
+        )
+    comps = [cb.CostComponent(
+        name="expected_execution_cost", source=cb.CostSource.SCANNER_ESTIMATE,
+        side=cb.CostSide.ENTRY, basis=cb.CostBasisKind.ESTIMATED,
+        unit=cb.CostUnit.PER_STRUCTURE_CONTRACT, amount_usd=val,
+        quantity=qty, provenance=prov,
+    )]
+    proxy = _coerce_float(est.get("proxy_cost_contract"))
+    if proxy is not None:
+        comps.append(cb.CostComponent(
+            name="proxy_cost_contract", source=cb.CostSource.SCANNER_ESTIMATE,
+            side=cb.CostSide.ENTRY, basis=cb.CostBasisKind.ESTIMATED,
+            unit=cb.CostUnit.PER_STRUCTURE_CONTRACT, amount_usd=proxy,
+            quantity=qty, provenance=prov,
+        ))
+    return cb.CostBreakdown(
+        source=cb.CostSource.SCANNER_ESTIMATE, side=cb.CostSide.ENTRY,
+        basis=cb.CostBasisKind.ESTIMATED, components=tuple(comps),
+        primary="expected_execution_cost", quantity=qty, provenance=prov,
+    )
+
+
+def _scanner_unified_breakdown(cb: Any, cap: Mapping[str, Any],
+                               qty: Optional[float]) -> Any:
+    """scanner_unified_final (basis 1b) typed from the scanner's VERBATIM
+    capture — ``calculate_unified_score(...).execution_cost_dollars``, the
+    number the scanner's gate consumes. Same source enum as scanner_estimate
+    (there is no separate SCANNER_UNIFIED source); the two are distinguished by
+    their reconcile keys. Unit PER_STRUCTURE_CONTRACT, ENTRY side. Missing →
+    typed UNAVAILABLE."""
+    uni = cap.get("scanner_unified_final")
+    uni = uni if isinstance(uni, Mapping) else {}
+    q_ts = cap.get("quote_timestamp")
+    prov = cb.Provenance(
+        model_version=(
+            "analytics.scoring.calculate_unified_score@verbatim-scan-capture"
+        ),
+        quote_timestamp=q_ts if isinstance(q_ts, str) else None,
+        source_detail=(
+            "verbatim_scan_time_capture;"
+            "max(inner_half_width_proxy_0.5, scanner_estimate_drag)"
+        ),
+    )
+    val = _coerce_float(uni.get("unified_execution_cost"))
+    if val is None:
+        comp = cb.CostComponent.make_unavailable(
+            "unified_execution_cost", cb.CostSource.SCANNER_ESTIMATE,
+            cb.CostSide.ENTRY, cb.CostBasisKind.ESTIMATED,
+            cb.CostUnit.PER_STRUCTURE_CONTRACT,
+            "scanner_unified_capture_missing:unified_execution_cost",
+            quantity=qty, provenance=prov,
+        )
+    else:
+        comp = cb.CostComponent(
+            name="unified_execution_cost",
+            source=cb.CostSource.SCANNER_ESTIMATE, side=cb.CostSide.ENTRY,
+            basis=cb.CostBasisKind.ESTIMATED,
+            unit=cb.CostUnit.PER_STRUCTURE_CONTRACT, amount_usd=val,
+            quantity=qty, provenance=prov,
+        )
+    return cb.CostBreakdown(
+        source=cb.CostSource.SCANNER_ESTIMATE, side=cb.CostSide.ENTRY,
+        basis=cb.CostBasisKind.ESTIMATED, components=(comp,),
+        primary="unified_execution_cost", quantity=qty, provenance=prov,
+    )
+
+
 def build_cost_reconciliation(
     cand: Optional[Mapping[str, Any]],
     *,
@@ -324,6 +476,43 @@ def build_cost_reconciliation(
         if ranker_bd is None:
             not_built_reason["ranker_model"] = "ranker_extract_error"
 
+        # ── scanner_estimate + scanner_unified_final (CONSUMER #2) ──────────
+        # The scanner's OWN execution-cost numbers, captured VERBATIM at scan
+        # time onto the candidate (options_scanner.build_scanner_cost_capture)
+        # and typed here WITHOUT re-running the scanner — its inputs
+        # (combo_width_share, the drag_map, the regime snapshot) are gone at the
+        # disposition seam. Absent capture (pre-consumer-#2 candidate) -> typed
+        # UNAVAILABLE with reason scanner_cost_capture_absent, never zero.
+        cap = cand.get(SCANNER_CAPTURE_KEY)
+        if isinstance(cap, Mapping):
+            try:
+                built["scanner_estimate"] = _scanner_estimate_breakdown(
+                    cb, cap, qty,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[COST_RECON] scanner_estimate basis skipped: %s", exc,
+                )
+                not_built_reason["scanner_estimate"] = (
+                    "scanner_estimate_extract_error"
+                )
+            try:
+                built["scanner_unified_final"] = _scanner_unified_breakdown(
+                    cb, cap, qty,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[COST_RECON] scanner_unified basis skipped: %s", exc,
+                )
+                not_built_reason["scanner_unified_final"] = (
+                    "scanner_unified_extract_error"
+                )
+        else:
+            not_built_reason["scanner_estimate"] = "scanner_cost_capture_absent"
+            not_built_reason["scanner_unified_final"] = (
+                "scanner_cost_capture_absent"
+            )
+
         # Nothing reconstructable -> no artifact (rather than an all-empty one).
         if not built:
             return None
@@ -332,6 +521,8 @@ def build_cost_reconciliation(
             quantity=qty,
             gross_ev=raw_ev,
             calibrated_ev=calibrated_ev,
+            scanner=built.get("scanner_estimate"),
+            scanner_unified=built.get("scanner_unified_final"),
             ranker=built.get("ranker_model"),
             stage=built.get("stage_executable_cross"),
         )
@@ -367,6 +558,11 @@ def build_cost_reconciliation(
         artifact["observe_only"] = True
         artifact["decisional"] = False
         artifact["artifact_version"] = ARTIFACT_VERSION
+        # Disposition-seam assembly timestamp — the honest, durable "when" for
+        # this observe-only artifact (the scanner numbers are scan-time verbatim
+        # and source-tagged; the row also carries finalized_at / code_sha). The
+        # scan output itself stays wall-clock-free for determinism.
+        artifact["assembled_at"] = datetime.now(timezone.utc).isoformat()
         artifact["bases_status"] = bases_status
         artifact["shared_components"] = dict(SHARED_COMPONENTS)
         return artifact

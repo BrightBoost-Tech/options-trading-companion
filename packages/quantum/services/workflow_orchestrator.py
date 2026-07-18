@@ -3728,6 +3728,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e4_fatal",
+                                    # Typed discriminator so capital-fit queries
+                                    # can cleanly exclude marketdata deaths from
+                                    # the overloaded h7_dropped bucket (C2 pkt
+                                    # Option-A) without parsing reason strings.
+                                    "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
                                     "quality_gate_mode": quality_gate_mode,
                                     "policy": midday_policy,
@@ -3776,6 +3781,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e5_skip_policy",
+                                    # Typed discriminator (see E4 above): lets
+                                    # capital-fit queries exclude marketdata
+                                    # deaths from the h7_dropped bucket cleanly.
+                                    "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
                                     "quality_gate_mode": quality_gate_mode,
                                     "policy": midday_policy,

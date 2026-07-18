@@ -614,6 +614,10 @@ class TestQualityGateHardModeSeam(_RouteBase):
         final = finals[0]
         self.assertEqual(final["disposition"], "h7_dropped")
         self.assertEqual(final["detail"]["reason"], "quality_gate_e4_fatal")
+        # Typed discriminator: excludes marketdata deaths from the overloaded
+        # h7_dropped bucket without reason-string parsing (C2 pkt Option-A).
+        self.assertEqual(final["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
         self.assertEqual(final["detail"]["effective_action"], "skip_fatal")
         self.assertEqual(final["detail"]["quality_gate_mode"], "hard")
         self.assertGreaterEqual(final["detail"]["fatal_count"], 1)
@@ -655,6 +659,8 @@ class TestQualityGateHardModeSeam(_RouteBase):
         self.assertEqual(final["disposition"], "h7_dropped")
         self.assertEqual(final["detail"]["reason"],
                          "quality_gate_e5_skip_policy")
+        self.assertEqual(final["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
         self.assertEqual(final["detail"]["effective_action"], "skip_policy")
         self.assertEqual(final["detail"]["policy"], "skip")
         # E5 is the NON-fatal warning branch: warnings present, zero fatals.
@@ -684,7 +690,10 @@ class TestQualityGateHardModeSeam(_RouteBase):
         )
         self.assertTrue(result["ok"], result.get("notes"))
         self._assert_one_final_per_identity(client)  # raises on a duplicate
-        self.assertEqual(len(self._finals(client)), 1)
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
 
 
 class TestQualityGateSoftModeUnchanged(_RouteBase):

@@ -31,8 +31,15 @@ delta/gamma/vega/theta are present and finite; otherwise it contributes NOTHING
 and is counted as uncovered. Coverage is reported on the result
 (``greeks_coverage`` = {legs_total, legs_with_greeks, complete}). Caps are
 untouched (every greek limit still defaults 0; the ``if limit > 0`` gate is
-unchanged), so while dormant the (violations, greeks) output is unchanged for
+unchanged), so while dormant the (violations, passed) output is unchanged for
 every input that did not previously raise.
+
+D2 FIX (4B) — SUPERSEDES the null-safety PR's 'byte-identical aggregate'
+property: check_greeks now SIGNS each covered leg by its own direction via the
+canonical ``position_model._direction_sign``, so a long and a short leg NET
+instead of ADD. The reported greek VALUE therefore diverges from the pre-fix
+unsigned add for opposing-direction legs (a measurement correction); the
+DORMANCY invariant (no violation at caps=0) is preserved exactly.
 
 Tests inject at ORIGIN (positions + config) and assert at the TOP — the greeks
 result and the crash-safety are driven through the production
@@ -216,9 +223,10 @@ class TestNullSafety(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# (b) Real greeks + caps STILL 0 → no greeks-violation (dormancy preserved),
-#     and (proof) the aggregate is byte-identical to the pre-fix aggregation
-#     for the two shapes that actually occur (all-greekless, all-complete).
+# (b) Real greeks + caps STILL 0 → no greeks-violation (dormancy preserved).
+#     Post-D2-fix (4B) the SIGNED aggregate NETS opposing legs, so it diverges
+#     from the pre-fix unsigned add for a mixed-direction book; the greekless
+#     book still aggregates to 0.0 on both.
 # ---------------------------------------------------------------------------
 
 class TestDormancyPreserved(unittest.TestCase):
@@ -231,20 +239,31 @@ class TestDormancyPreserved(unittest.TestCase):
         self.assertEqual(r.greeks_coverage["legs_with_greeks"], 2)
         self.assertTrue(r.greeks_coverage["complete"])
 
-    def test_aggregate_byte_identical_to_old_logic_complete_book(self):
-        # Prove the NEW sum equals the OLD sum for a complete finite book (the
-        # post-#1259 real shape): identical, so portfolio_greeks is unchanged.
+    def test_signed_aggregate_nets_opposing_legs_diverging_from_old_unsigned(self):
+        # 4B (D2 fix) SUPERSEDES the #1261 'byte-identical to old logic' property
+        # for opposing-direction legs. The _pos fixture is a put debit spread —
+        # leg0 BUY, leg1 SELL. The pre-fix check_greeks summed |contribution|
+        # (both legs ADDED); the signed aggregate NETS them. For two identical
+        # _FULL greek blocks the signed net is exactly zero, and it DIVERGES from
+        # the retired unsigned add — which is the point of the D2 lane.
         legs_g = (dict(_FULL), dict(_FULL))
         pos = _pos(quantity=3.0, leg_greeks=legs_g)
         config = _default_all_caps_zero()
 
         _, new_greeks = check_greeks([pos], config)
 
-        expected = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
-        for g in legs_g:  # replicate the pre-fix per-leg aggregation exactly
-            for key in expected:
-                expected[key] += _old_leg_greek_term(g, key, 3.0)
-        self.assertEqual(new_greeks, expected)
+        # Signed net: +1*x*3*100 + -1*x*3*100 = 0 for every greek.
+        self.assertEqual(
+            new_greeks, {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+        )
+
+        # The retired pre-fix unsigned add DOUBLED each greek (both legs added).
+        old = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
+        for g in legs_g:
+            for key in old:
+                old[key] += _old_leg_greek_term(g, key, 3.0)
+        self.assertEqual(old["delta"], _FULL["delta"] * 3 * 100 * 2)  # the phantom
+        self.assertNotEqual(new_greeks, old)  # D2: no longer byte-identical
 
     def test_aggregate_byte_identical_to_old_logic_greekless_book(self):
         # Pre-#1259 real shape: every leg greek-less → both aggregations are 0.0.
@@ -283,10 +302,16 @@ def _default_all_caps_zero() -> EnvelopeConfig:
 
 class TestArmedCapFires(unittest.TestCase):
     def test_delta_cap_violation_through_check_all_envelopes(self):
-        # Two complete legs, delta 0.5 each, quantity 2 → aggregate delta
-        # 0.5*2*100 * 2 legs = 200. Arm the cap at 100 → violation.
+        # 4B (D2): an armed cap now reads the SIGNED aggregate. A directional book
+        # — long leg delta +0.5, short leg delta -0.5 (selling a negative-delta
+        # downside leg is a long-delta position) — nets to +200 at quantity 2:
+        # +1*0.5*2*100 + -1*-0.5*2*100 = 100 + 100 = 200. Arm the cap at 100 →
+        # violation on the honest signed sum. (Two identical +0.5 legs would net
+        # to 0 under the fix — the pre-fix fixture only "violated" via the D2 add.)
+        long_leg = dict(_FULL)  # delta +0.5, bought
+        short_leg = {"delta": -0.5, "gamma": 0.01, "vega": 0.05, "theta": -0.02}  # sold
         result = check_all_envelopes(
-            positions=[_pos(quantity=2.0, leg_greeks=(dict(_FULL), dict(_FULL)))],
+            positions=[_pos(quantity=2.0, leg_greeks=(long_leg, short_leg))],
             equity=EQUITY,
             config=_isolating_config(max_portfolio_delta=100.0),
         )

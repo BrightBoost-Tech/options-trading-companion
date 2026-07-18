@@ -323,12 +323,16 @@ class TestCurrentDefects(unittest.TestCase):
 
     D1, D4, and correlation-one D5 are inverted by canonical-position PR-2;
     the unclamped linear-stress slice of D5 is inverted by PR-3 (payoff-capped
-    stress). D2 and D3 remain pinned; never delete them. (The D2/D3 fixtures now
-    carry COMPLETE greeks blocks — all four values finite — because check_greeks
-    was made null-safe: it aggregates a leg only when delta/gamma/vega/theta are
-    all present and finite, contributing nothing otherwise, never a fabricated 0.
-    The defects themselves — no side-netting, position-quantity-not-leg-ratio
-    scaling — are unchanged and still asserted verbatim.)
+    stress). **D2 is inverted by 4B** — check_greeks now signs each leg via the
+    canonical _direction_sign, so its assertions pin the SIGNED net (long+short
+    cancel), no longer the unsigned add. **D3 remains pinned; never delete it**:
+    check_greeks still scales by the POSITION quantity, not the leg ratio, so a
+    same-direction 1×2 ratio is still counted once (see
+    test_d3_leg_ratios_are_ignored — untouched by the D2 fix because both legs
+    share a sign). The D2/D3 fixtures carry COMPLETE greeks blocks — all four
+    values finite — because check_greeks aggregates a leg only when
+    delta/gamma/vega/theta are all present and finite (null-safe), contributing
+    nothing otherwise, never a fabricated 0.
     """
 
     def test_d1_exact_max_loss_replaces_credit_received(self):
@@ -379,14 +383,15 @@ class TestCurrentDefects(unittest.TestCase):
         with self.assertRaises(PositionRiskUnavailable):
             _pos_risk(naked)
 
-    def test_d2_opposing_leg_greeks_add_instead_of_netting(self):
-        """risk_envelope.py check_greeks reads no side, so long+short ADD."""
-        # A delta-neutral-by-construction structure: +0.50 long, -0.50 short.
-        # Complete greeks blocks (all four finite): check_greeks is now null-safe
-        # and only aggregates a leg whose delta/gamma/vega/theta are ALL present
-        # and finite (matching #1259's complete-or-null populate contract and
-        # aggregate_greeks.complete). The D2 defect — no side-netting — is
-        # unchanged and still pinned by the delta==100 assertion below.
+    def test_d2_opposing_leg_greeks_now_net(self):
+        """D2 FIXED (4B): check_greeks signs each leg via the canonical
+        _direction_sign, so a long +0.50 and a short +0.50 NET to zero.
+
+        ASSERTION FLIP (the point of the D2 lane, not a weakening): the pre-fix
+        unsigned add reported delta==100.0; it now reports 0.0. The honest
+        canonical aggregate_greeks agreed with 0 all along — check_greeks now
+        reuses the same sign authority and matches it.
+        """
         pos = {
             "quantity": 1,
             "legs": [
@@ -396,10 +401,12 @@ class TestCurrentDefects(unittest.TestCase):
         }
         _violations, greeks = check_greeks([pos], EnvelopeConfig())
 
-        # Live code: 0.50*100 + 0.50*100 = 100. The short leg added.
-        self.assertAlmostEqual(greeks["delta"], 100.0, places=2)
+        # FLIP: +1*0.50*100 + -1*0.50*100 = 0. Was 100.0 (the retired unsigned add).
+        self.assertAlmostEqual(greeks["delta"], 0.0, places=2)
+        self.assertNotAlmostEqual(greeks["delta"], 100.0, places=2)
 
-        # Honest: the legs net to zero.
+        # Honest canonical aggregate: the legs net to zero — and check_greeks,
+        # now reusing _direction_sign, agrees with it.
         honest = aggregate_greeks(
             _position(
                 [
@@ -410,6 +417,9 @@ class TestCurrentDefects(unittest.TestCase):
             )
         )
         self.assertAlmostEqual(honest.delta_dollars_per_underlying_point, 0.0, places=2)
+        self.assertAlmostEqual(
+            greeks["delta"], honest.delta_dollars_per_underlying_point, places=2
+        )
 
     def test_d2_greeks_envelope_is_dormant_no_leg_carries_greeks(self):
         """The persisted leg schema has no `greeks` key, so the sum is all zeros.
@@ -437,17 +447,25 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertEqual(len(exposure.missing_legs), 2)
 
     def test_d2_greek_caps_default_to_no_limit(self):
-        """Second dormancy limb: all four caps default 0 and 0 means no limit."""
+        """Second dormancy limb: all four caps default 0 and 0 means no limit.
+
+        (4B: the leg now carries an explicit side. Post-D2-fix a sideless leg is
+        UNSIGNABLE and typed uncovered — so the fixture gives it action='buy' to
+        realize the huge signed exposure. The invariant asserted here — NO
+        violation at ANY exposure size while caps are 0 — is unchanged.)
+        """
         config = EnvelopeConfig()
         self.assertEqual(config.max_portfolio_delta, 0.0)
         self.assertEqual(config.max_portfolio_gamma, 0.0)
         self.assertEqual(config.max_portfolio_vega, 0.0)
         self.assertEqual(config.max_portfolio_theta, 0.0)
 
-        # Complete greeks block (null-safe completeness bar — see D2 netting test).
+        # Complete greeks block (null-safe completeness bar) + explicit side.
         huge = {"quantity": 1000,
-                "legs": [{"greeks": {"delta": 9.99, "gamma": 0.0, "vega": 0.0, "theta": 0.0}}]}
+                "legs": [{"action": "buy",
+                          "greeks": {"delta": 9.99, "gamma": 0.0, "vega": 0.0, "theta": 0.0}}]}
         violations, greeks = check_greeks([huge], config)
+        # +1 * 9.99 * abs(1000) * 100 = 999000 (signed, single long leg).
         self.assertAlmostEqual(greeks["delta"], 999000.0, places=2)
         self.assertEqual(violations, [])  # no cap => no violation, at any size
 
@@ -1629,6 +1647,93 @@ class TestCanonicalGreeksWiring(unittest.TestCase):
         self.assertFalse(cg["complete"])
         self.assertIsNone(cg["delta"])
         self.assertEqual(cg["unrepresentable_structures"], 1)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 4B — check_greeks signed aggregation (D2 fix): long/short NET via the
+# canonical _direction_sign. Covers debit, credit, condor, mixed-book, qty>1,
+# and the named 'condor 4x' phantom regression.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestD2SignedAggregateFix(unittest.TestCase):
+    """check_greeks reuses position_model._direction_sign so a long leg and a
+    short leg NET instead of ADD. Magnitude scaling (position qty × 100) is
+    unchanged — D3/D4 are their own lanes. These drive the production
+    check_greeks and assert on its portfolio_greeks output."""
+
+    @staticmethod
+    def _greeks(book):
+        _violations, greeks = check_greeks(book, EnvelopeConfig())
+        return greeks
+
+    def test_credit_vertical_nets_by_side(self):
+        # short put vertical (credit, qty -2): sell 100P (-1), buy 95P (+1).
+        pos = _persisted_short_put_vertical()
+        pos["legs"][0]["greeks"] = {"delta": -0.55, "gamma": 0.03, "vega": 0.10, "theta": -0.05}
+        pos["legs"][1]["greeks"] = {"delta": -0.35, "gamma": 0.01, "vega": 0.08, "theta": -0.03}
+        greeks = self._greeks([pos])
+        # signed: -1*-0.55*2*100 + +1*-0.35*2*100 = 110 - 70 = 40
+        self.assertAlmostEqual(greeks["delta"], 40.0, places=2)
+        # retired unsigned add: -0.55*2*100 + -0.35*2*100 = -180
+        self.assertNotAlmostEqual(greeks["delta"], -180.0, places=2)
+        # gamma: -1*0.03*2*100 + +1*0.01*2*100 = -6 + 2 = -4
+        self.assertAlmostEqual(greeks["gamma"], -4.0, places=2)
+
+    def test_debit_vertical_qty3_nets_by_side(self):
+        # debit call vertical (qty 3): buy 100C (+1), sell 105C (-1). qty>1.
+        pos = _persisted_debit_call_vertical(qty=3)
+        pos["legs"][0]["greeks"] = {"delta": 0.60, "gamma": 0.03, "vega": 0.12, "theta": -0.06}
+        pos["legs"][1]["greeks"] = {"delta": 0.40, "gamma": 0.02, "vega": 0.09, "theta": -0.04}
+        greeks = self._greeks([pos])
+        # signed: +1*0.60*3*100 + -1*0.40*3*100 = 180 - 120 = 60
+        self.assertAlmostEqual(greeks["delta"], 60.0, places=2)
+        self.assertNotAlmostEqual(greeks["delta"], 300.0, places=2)  # unsigned add
+
+    def test_condor_four_legs_phantom_regression(self):
+        """NAMED REGRESSION — the §8 'a 4-leg condor contributes 4x|per-leg
+        greek|' phantom. Pre-fix check_greeks summed |delta| across all four
+        legs (4 * 0.25 * 1 * 100 = 100). Signed: the two shorts subtract, the two
+        longs add — a symmetric condor nets to 0."""
+        pos = _persisted_iron_condor()  # sell650P / buy645P / sell765C / buy770C
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": 0.25, "gamma": 0.01, "vega": 0.05, "theta": -0.02}
+        greeks = self._greeks([pos])
+        # signed: (-1 + +1 + -1 + +1) * 0.25 * 1 * 100 = 0
+        self.assertAlmostEqual(greeks["delta"], 0.0, places=2)
+        # the retired phantom (4x|per-leg|):
+        self.assertNotAlmostEqual(greeks["delta"], 100.0, places=2)
+
+    def test_mixed_book_two_positions_net_across_book(self):
+        credit = _persisted_short_put_vertical()  # qty -2
+        credit["legs"][0]["greeks"] = {"delta": -0.50, "gamma": 0.01, "vega": 0.05, "theta": -0.02}
+        credit["legs"][1]["greeks"] = {"delta": -0.30, "gamma": 0.01, "vega": 0.05, "theta": -0.02}
+        debit = _persisted_debit_call_vertical(qty=1)
+        debit["legs"][0]["greeks"] = {"delta": 0.50, "gamma": 0.01, "vega": 0.05, "theta": -0.02}
+        debit["legs"][1]["greeks"] = {"delta": 0.30, "gamma": 0.01, "vega": 0.05, "theta": -0.02}
+        greeks = self._greeks([credit, debit])
+        # credit: -1*-0.50*2*100 + +1*-0.30*2*100 = 100 - 60 = 40
+        # debit:  +1*0.50*1*100 + -1*0.30*1*100 = 50 - 30 = 20
+        # book delta = 40 + 20 = 60
+        self.assertAlmostEqual(greeks["delta"], 60.0, places=2)
+
+    def test_unknown_side_leg_is_uncovered_never_unsigned(self):
+        """A leg whose side cannot be determined is UNSIGNABLE → typed uncovered
+        (contributes nothing), never a fabricated directionless add (H9)."""
+        pos = {
+            "quantity": 1,
+            "legs": [
+                {"action": "buy", "greeks": {"delta": 0.5, "gamma": 0.01, "vega": 0.05, "theta": -0.02}},
+                {"greeks": {"delta": 0.5, "gamma": 0.01, "vega": 0.05, "theta": -0.02}},  # no side
+            ],
+        }
+        coverage: dict = {}
+        _v, greeks = check_greeks([pos], EnvelopeConfig(), coverage_out=coverage)
+        # Only the sided leg contributes: +1*0.5*1*100 = 50.
+        self.assertAlmostEqual(greeks["delta"], 50.0, places=2)
+        self.assertEqual(coverage["legs_total"], 2)
+        self.assertEqual(coverage["legs_with_greeks"], 1)
+        self.assertFalse(coverage["complete"])
 
 
 if __name__ == "__main__":

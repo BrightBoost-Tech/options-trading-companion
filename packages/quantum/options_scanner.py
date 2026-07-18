@@ -4268,17 +4268,19 @@ def scan_for_opportunities(
                 "selection_mode": "multi_strategy" if len(candidates) > 1 else "single",
             }
 
+            # Lane 4C: stamp the emitted candidate's leg set SELECTED so its
+            # provenance row persists unconditionally (never sampled out).
+            # Sits ABOVE the emission counter: the counter is source-pinned
+            # immediately before `return candidate_dict` (#113 PR-6 test).
+            try:
+                provenance_recorder.mark_selected(symbol, strategy_key)
+            except Exception:
+                pass
             # #113 PR-6: emission counter increment. Fires once per
             # successfully-emitted candidate. Both primary and fallback
             # paths in _process_symbol_multi flow through this return,
             # so each emitted candidate counts exactly once.
             rej_stats.record_emission(suggestion["strategy"])
-            # Lane 4C: stamp the emitted candidate's leg set SELECTED so its
-            # provenance row persists unconditionally (never sampled out).
-            try:
-                provenance_recorder.mark_selected(symbol, strategy_key)
-            except Exception:
-                pass
             return candidate_dict
 
         except Exception as e:

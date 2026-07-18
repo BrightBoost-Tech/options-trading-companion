@@ -4,6 +4,40 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-18 — SATURDAY-NIGHT ORCHESTRATOR (2nd Sat run; fable + ≤6 opus) · status:shipped
+
+Full record: `docs/review/saturday-night-results-2026-07-18.md`. Six merges,
+all adversarially reviewed + deploy-verified: **#1264 `592a267a` nightly-audit
+runner** (all 6 failure-class findings VERIFIED: sleep-kill, stale checkout,
+headless broker-blind, no-transcript, existence-not-completeness ping; wrapper
++ fresh origin/main audit worktree + GET-only scrubbed broker snapshot +
+completion contract; **local Task Scheduler task re-registered** — 4 deltas,
+backup+rollback in bundle; self-test PASS; ⚠ operator must `git pull` the
+checkout before Sun 00:00 CT for the wrapper flow) · **#1265 `35836cdc`**
+scanner cost bases → disposition artifact · **#1263 `a558de7e`** canonical
+greeks wiring (sign-once proven) · **#1269 `fdcaf644`** D2 FIXED in
+check_greeks (signed net via canonical `_direction_sign`; re-landing of
+reviewed #1267 after stacked-squash conflict; 4 defect-pins flipped to pin
+the fix; caps stay 0) · **#1266 `851416a0`** ⑤ per-leg IV capture + typed-
+unavailable spot (review FAIL→repair→re-verify PASS: STUDY_SQL close-
+contamination fixed — marker-gated open-order LATERAL, geometry always
+suggestion legs) · **#1268 `76757684`** startup flag echo, 27 flags, real
+parsers (in-lane repair: the wiring test was itself a sys.modules polluter →
+subprocess route tests). **Packets:** fleet manifest (3 honest identities vs
+50 — gap 47; options gap-stated; registration design specced; strict-endpoint
+provisioning/activation prompts SUPERSEDE the old direct-RPC prompt) ·
+sizing-loop taxonomy (Option-C rec; **E4/E5 invariant hole found** —
+quality-gate HARD drops a selected candidate with NO disposition row, latent
+bug; E3e/E3f mislabels) · Monday natural-evidence prompt. **New liars/
+findings:** strict-`=="1"` quartet (CALIBRATION_ENABLED — `true` DISABLES it —
+SCHEDULER_ENABLED, RISK_ENVELOPE_ENFORCE, RISK_UTILIZATION_GATE_ENABLED;
+§3 wording corrected; echo now prints effective values every start) ·
+options_scanner.py:4213 source_used↔samples_used mislabel (LOW) · stress-model
+unsigned-add D2 residual (payoff-clamped safe; future lane) · ⑤ challenger
+still needs a spot source (endorsed follow-up: thread scan-time
+current_price). ZERO broker/production-DB/fleet/migration actions; operator
+worktree byte-identical (`0d3067b4…`).
+
 ## 2026-07-18 — WEEKEND ORCHESTRATOR (Sat; fable + ≤6 opus; serialized production writes) · status:shipped
 
 Full record: `docs/review/weekend-results-2026-07-18.md`. Four data

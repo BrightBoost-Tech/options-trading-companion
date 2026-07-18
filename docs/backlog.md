@@ -20,10 +20,15 @@ services deployed). **MERGED+DEPLOYED (squash SHAs):** #1246 test-honesty
 #1253 quote provenance `c51f41eb`. Deployed ≠ naturally exercised — runtime
 falsifiers stay in the ledger pending list.
 
-- **THREE MIGRATIONS UNAPPLIED** (code no-ops typed until applied; apply via
-  bundle operator prompts, market closed, by NAME): `20260717090000_shadow_
-  fleet_activation_rpc` · `20260717100000_candidate_terminal_dispositions` ·
-  `20260717120000_option_quote_provenance`. Never `db push`.
+- **THREE MIGRATIONS APPLIED 2026-07-18 03:34–03:40Z** (Fable migration
+  orchestrator, opus reviews; market closed; verbatim from main `aeab21d8`;
+  tracked by NAME): `shadow_fleet_activation_rpc` → `20260718033415` ·
+  `candidate_terminal_dispositions` → `20260718033912` ·
+  `option_quote_provenance` → `20260718034013`. **NEVER REAPPLY.** One
+  `migration_apply` receipt each in risk_alerts. Schema ready; writers
+  self-activate — natural runtime proof pending (first scan cycle Mon
+  07-20). Zero fleet provisioning/activation; new tables 0 rows.
+  Results: `docs/review/migration-results-2026-07-18.md`.
 - **Zero production data writes this sprint.** Operator-gated censuses (bundle
   `otc-friday-post-close-2026-07-17/`, fingerprints embedded): F-CREDIT-SIGN
   19 closes (−14,367 realized / −16,971 cash; fp b780271c…) · stale orders 6/6
@@ -47,11 +52,13 @@ falsifiers stay in the ledger pending list.
 - **Owner decisions open:** F-BAN A/B · tier-cliff · single-leg · prequential
   (a/b/c) · sizing-loop disposition taxonomy note (#1252) · fleet
   activation sequence. **UI: BLOCKED_UI_FILE_OWNERSHIP** (Palette).
-- **Strategic order (post-sprint):** 1 fleet operationalization → APPLY+
-  RECONCILE+ACTIVATE sequence (operator) · 2 ⑤ challenger evidence
-  accumulation (observe) · 3 multi-basis phase-2 consumers · 4 canonical
-  remainder (stage-time greeks next) · 5 funnel: apply dispositions+quote
-  provenance migrations → OI floor · 6 E19-2B (post-fleet-epoch).
+- **Strategic order (post-sprint):** 1 fleet operationalization → RPC
+  applied 07-18; remaining = RECONCILE (seven blockers) + PROVISION +
+  ACTIVATE sequence (operator; bundle `fleet-provisioning-operator-prompt.md`)
+  · 2 ⑤ challenger evidence accumulation (observe) · 3 multi-basis phase-2
+  consumers · 4 canonical remainder (stage-time greeks next) · 5 funnel:
+  dispositions+quote-provenance migrations applied 07-18 → natural writer
+  proof, then OI floor · 6 E19-2B (post-fleet-epoch).
 
 ## 2026-07-17 — POST-MERGE RECOVERY STANDING (authoritative; supersedes older queue text)
 

@@ -386,10 +386,14 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   suspect (§8-class liar until fixed). 07-18: the Friday sprint
   (#1246-#1253) is MERGED+DEPLOYED at `c51f41eb` — ⑤ foundation, cost-basis
   parity locks, payoff-capped stress, origin provenance, fleet transaction
-  (dry-run-only; strict =1 gate), dispositions+quote-provenance writers
-  (typed no-op until their UNAPPLIED migrations land: rpc 090000 /
-  dispositions 100000 / quote-provenance 120000 — apply by NAME via bundle
-  prompts). Fleet activation blockers = SEVEN rows. Draft-PR tracking lives
+  (dry-run-only; strict =1 gate), dispositions+quote-provenance writers.
+  All three sprint migrations APPLIED 2026-07-18 03:34–03:40Z (by NAME:
+  `shadow_fleet_activation_rpc`→20260718033415 ·
+  `candidate_terminal_dispositions`→20260718033912 ·
+  `option_quote_provenance`→20260718034013 — **NEVER REAPPLY**; receipts in
+  risk_alerts `migration_apply`); writers self-activate, natural runtime
+  proof pending. Zero fleet provisioning/activation; fleet activation
+  blockers = SEVEN rows. Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
 
@@ -816,11 +820,13 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16)
+## Current overnight standing (2026-07-16; migration status updated 07-18)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
-  semantics. The fleet migration is not applied and no fleet is active.
+  semantics. Fleet schema applied 07-17 (`20260717052208`) and the fleet
+  RPC + dispositions + quote-provenance migrations applied 07-18; **no fleet
+  is provisioned or active** (0 rows; seven activation blockers stand).
 - #1228 is a draft read-only persisted-tape hash/count verifier with an
   operator-triggered job path. It is unscheduled and does not prove full
   deterministic strategy replay.

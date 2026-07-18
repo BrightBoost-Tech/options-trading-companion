@@ -203,6 +203,11 @@ def test_event_risk_agent_regression():
 
 
 def test_strategy_design_agent_regression():
+    # The former ban-driven scenarios (chop_override_banned_condor,
+    # policy_ban_fallback) were removed with the F-BAN phantom feature —
+    # per-strategy bans had no producer and StrategyDesignAgent no longer
+    # reads context["banned_strategies"]. Remaining scenarios cover the
+    # real regime/IV override logic.
     scenarios = [
         {
             "name": "normal_pass",
@@ -210,7 +215,6 @@ def test_strategy_design_agent_regression():
                 "legacy_strategy": "LONG CALL",
                 "effective_regime": "BULLISH",
                 "iv_rank": 30,
-                "banned_strategies": []
             }
         },
         {
@@ -219,7 +223,6 @@ def test_strategy_design_agent_regression():
                 "legacy_strategy": "LONG CALL",
                 "effective_regime": "SHOCK",
                 "iv_rank": 30,
-                "banned_strategies": []
             }
         },
         {
@@ -228,16 +231,6 @@ def test_strategy_design_agent_regression():
                 "legacy_strategy": "LONG CALL",
                 "effective_regime": "CHOP",
                 "iv_rank": 30,
-                "banned_strategies": []
-            }
-        },
-        {
-            "name": "chop_override_banned_condor",
-            "context": {
-                "legacy_strategy": "LONG CALL",
-                "effective_regime": "CHOP",
-                "iv_rank": 30,
-                "banned_strategies": ["iron_condor"]
             }
         },
         {
@@ -246,16 +239,6 @@ def test_strategy_design_agent_regression():
                 "legacy_strategy": "LONG CALL",
                 "effective_regime": "BULLISH",
                 "iv_rank": 80,
-                "banned_strategies": []
-            }
-        },
-        {
-            "name": "policy_ban_fallback",
-            "context": {
-                "legacy_strategy": "CREDIT PUT SPREAD",
-                "effective_regime": "BULLISH",
-                "iv_rank": 30,
-                "banned_strategies": ["credit_put_spread"]
             }
         }
     ]

@@ -162,32 +162,6 @@ class TestPolicyVariableInitialization:
             "Expected 'if surface_policy == \"skip\"' in scanner"
 
 
-class TestBannedStrategiesHandling:
-    """Test that missing banned_strategies returns empty list."""
-
-    def test_banned_strategies_missing_returns_empty(self):
-        """When settings.banned_strategies is missing, return empty list."""
-        banned_strategies = []
-        try:
-            raise Exception("column banned_strategies does not exist")
-        except Exception:
-            pass
-
-        assert banned_strategies == []
-
-    def test_banned_strategies_null_returns_empty(self):
-        """When banned_strategies is None, return empty list."""
-        mock_data = {"banned_strategies": None}
-        banned_strategies = mock_data.get("banned_strategies") or []
-        assert banned_strategies == []
-
-    def test_banned_strategies_present_returns_list(self):
-        """When banned_strategies is present, return the list."""
-        mock_data = {"banned_strategies": ["iron_condor", "straddle"]}
-        banned_strategies = mock_data.get("banned_strategies") or []
-        assert banned_strategies == ["iron_condor", "straddle"]
-
-
 class TestExecutionServiceColumnResilience:
     """Test that execution service handles missing columns gracefully."""
 

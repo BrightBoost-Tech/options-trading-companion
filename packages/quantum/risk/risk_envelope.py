@@ -722,10 +722,22 @@ def compute_stress_scenarios(
 ) -> tuple:
     """Compute portfolio P&L under stress scenarios, floored at the payoff bound.
 
-    Model scenarios (linear estimates, unchanged from the legacy model):
+    Model scenarios (linear estimates):
     - SPY down X%: delta-based loss estimate
     - VIX spike Y%: vega-based gain/loss estimate
     - Correlation-one: every structure at its exact canonical max loss
+
+    **D2 FIX (signed greek aggregation — stress-lane residual):** each leg's
+    delta/vega contribution is signed by its OWN direction via the canonical
+    ``position_model._direction_sign`` (the same seam check_greeks/#1269 and
+    normalize_position use — reuse, not a second BUY/SELL parser), so a long
+    and a short leg NET instead of unsigned-ADD. The pre-fix
+    ``greek * abs(qty)`` add treated a delta-hedged vertical/condor as if every
+    leg pointed the same way; the payoff clamp bounded the result but a bounded
+    phantom is still a dishonest measurement now that legs can carry real
+    greeks (post-#1259). Magnitude scaling (``abs(qty) × 100``) is UNCHANGED —
+    only the sign is added, applied exactly once. An unsignable side is
+    rejected upstream by ``_pos_risk`` (unrepresentable structure → raise).
 
     Canonical-position consumer PR-3 (D5 closure): a defined-risk book cannot
     lose more than the sum of its structures' payoff max losses — arithmetic,
@@ -778,17 +790,51 @@ def compute_stress_scenarios(
                 delta_missing_legs += 1
                 vega_missing_legs += 1
                 continue
+            # D2 FIX (stress-lane residual): sign each leg's greek by its OWN
+            # direction via the canonical authority
+            # ``position_model._direction_sign`` — the SAME seam check_greeks
+            # (#1269) and ``normalize_position`` reuse, never a second copy of
+            # the BUY/SELL token logic. A long leg and a short leg now NET
+            # instead of unsigned-ADD: the pre-fix ``delta * abs(qty) * 100``
+            # summed a delta-hedged vertical as if BOTH legs pointed the same
+            # way (a 2-leg vertical reported 2×|per-leg delta|; a 4-leg condor
+            # 4×). The book was payoff-clamped so the number stayed
+            # bounded-safe, but a bounded phantom is still a dishonest
+            # measurement now that legs can carry real greeks (post-#1259).
+            # Magnitude scaling is UNCHANGED — the stress lane uses the
+            # hardcoded 100 multiplier and the POSITION quantity (leg-ratio D3
+            # is its own lane); only the sign is new, applied exactly once.
+            #
+            # Defense in depth: an unsignable side is already rejected upstream
+            # by ``_pos_risk`` (``normalize_position`` calls this exact helper
+            # at :1006-1007), so a book with an unknown side raises
+            # ``PositionRiskUnavailable`` before reaching here — never a
+            # fabricated unsigned add (H9). This guard mirrors the non-dict-leg
+            # guard above so a stray sign-parse can never break the envelope
+            # check: the leg contributes nothing and the affected scenarios go
+            # typed-unavailable.
+            side_raw = (
+                leg.get("action")
+                if leg.get("action") is not None
+                else leg.get("side")
+            )
+            try:
+                sign = _direction_sign(side_raw)
+            except PositionNormalizationError:
+                delta_missing_legs += 1
+                vega_missing_legs += 1
+                continue
             greeks = leg.get("greeks") or pos.get("greeks") or {}
             delta = _finite_greek_value(greeks, "delta")
             vega = _finite_greek_value(greeks, "vega")
             if delta is None:
                 delta_missing_legs += 1
             else:
-                total_delta += delta * abs(qty) * 100
+                total_delta += sign * delta * abs(qty) * 100
             if vega is None:
                 vega_missing_legs += 1
             else:
-                total_vega += vega * abs(qty) * 100
+                total_vega += sign * vega * abs(qty) * 100
 
     # Payoff floor: Σ canonical max-loss totals (position-level, already
     # scaled by structure quantity and multiplier — never rescale). _pos_risk

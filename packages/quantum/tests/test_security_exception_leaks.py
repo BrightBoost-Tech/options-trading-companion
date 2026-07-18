@@ -16,6 +16,16 @@ gone. #1242 repaired the routes; this rebuild drives the REAL routes:
   - dependency overrides are resolved from the LIVE route objects
     (test_rebalance_endpoint_contract.py pattern — CI proved module-level
     imported symbols can be stale after collection-time patch leakage);
+    resolution walks THROUGH router wrappers: fastapi >= 0.139 makes
+    ``include_router`` lazy — it appends a single ``_IncludedRouter``
+    wrapper (no ``path``, no ``dependant``) to ``app.routes`` instead of
+    flattening APIRoutes, so a flat path scan finds app-direct routes
+    (/rebalance/*, defined in api.py) but NOTHING router-included
+    (/analytics/behavior, /validation/run) — exactly the CI job
+    88019921698 failure split. The real APIRoutes live on
+    ``wrapper.original_router.routes`` with full prefixed paths; the
+    resolver recurses into them and the app object is re-resolved from the
+    module attr at test time, never captured at import;
   - the rebalance harness is IMPORTED from
     test_rebalance_endpoint_contract.py rather than re-implemented, so one
     wiring owns that route's boundary fakes;
@@ -83,10 +93,38 @@ _PROD = {"APP_ENV": "production"}
 _AUTH_QUALNAMES = ("get_current_user", "get_supabase_user_client")
 
 
+def _current_app():
+    """The app object as of NOW, from the live module attr — never the
+    import-time capture (an earlier module reloading api would desync a
+    captured binding from the routes actually served)."""
+    import packages.quantum.api as _api
+
+    return _api.app
+
+
+def _iter_api_routes(routes):
+    """Yield path-bearing dependant routes, recursing through router
+    wrappers. fastapi >= 0.139: ``include_router`` appends a lazy
+    ``_IncludedRouter`` (no path/dependant) whose ``original_router.routes``
+    holds the real APIRoutes with full prefixed paths. Older fastapi
+    flattens APIRoutes directly into ``app.routes`` — both shapes resolve
+    here (mechanism proven against fastapi 0.139.2/starlette 1.3.1, the CI
+    resolver-blindness pair, and 0.135.1 local)."""
+    for r in routes:
+        if getattr(r, "path", None) and hasattr(r, "dependant"):
+            yield r
+        inner = getattr(r, "original_router", None)
+        if inner is not None:
+            yield from _iter_api_routes(inner.routes)
+        elif not hasattr(r, "dependant") and getattr(r, "routes", None):
+            # Other containers (mounts, plain sub-routers).
+            yield from _iter_api_routes(r.routes)
+
+
 def _route_dep_targets(paths):
     targets = set()
-    for r in app.routes:
-        if getattr(r, "path", "") in paths:
+    for r in _iter_api_routes(_current_app().routes):
+        if r.path in paths:
             for d in r.dependant.dependencies:
                 if getattr(d.call, "__qualname__", "") in _AUTH_QUALNAMES:
                     targets.add(d.call)
@@ -103,12 +141,21 @@ def _authed(*paths):
 
     targets = _route_dep_targets(paths)
     assert targets, f"no auth dependencies resolved for {paths!r}"
+    # Override dicts: the freshly resolved app AND the module-bound one the
+    # TestClient drives (the same object unless api was reloaded mid-session
+    # — keying both keeps client and resolver coherent either way).
+    override_dicts = {
+        id(d): d
+        for d in (_current_app().dependency_overrides, app.dependency_overrides)
+    }.values()
     added = []
     for call in targets:
         if call.__qualname__ == "get_current_user":
-            app.dependency_overrides[call] = _fake_user
+            for d in override_dicts:
+                d[call] = _fake_user
         else:
-            app.dependency_overrides[call] = lambda: fake_sb
+            for d in override_dicts:
+                d[call] = lambda: fake_sb
         added.append(call)
     # Belt-and-braces: also key the module-imported symbols (harmless
     # duplicates when identical to the route-resolved callables).
@@ -117,14 +164,16 @@ def _authed(*paths):
         get_supabase_user_client,
     )
 
-    app.dependency_overrides[get_current_user] = _fake_user
-    app.dependency_overrides[get_supabase_user_client] = lambda: fake_sb
+    for d in override_dicts:
+        d[get_current_user] = _fake_user
+        d[get_supabase_user_client] = lambda: fake_sb
     added += [get_current_user, get_supabase_user_client]
     try:
         yield fake_sb
     finally:
         for k in added:
-            app.dependency_overrides.pop(k, None)
+            for d in override_dicts:
+                d.pop(k, None)
 
 
 # ===========================================================================

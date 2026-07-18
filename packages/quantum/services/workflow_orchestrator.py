@@ -1187,6 +1187,16 @@ def build_midday_order_json(
         "legs": leg_orders,
         "underlying": cand.get("symbol"),
         "strategy": cand.get("strategy") or cand.get("strategy_key"),
+        # ⑤ scan-time underlying spot (OBSERVE-ONLY): thread the verbatim
+        # quote-mid the scanner captured at candidate construction
+        # (options_scanner.build_scan_spot_capture) through the PERSISTED
+        # suggestion order_json to the stage seam, where
+        # _populate_stage_entry_spot upgrades entry_underlying_spot to POPULATED
+        # for future challenger scorability. TOP-LEVEL key only —
+        # compute_legs_fingerprint hashes legs, so this leaves the dedup
+        # fingerprint byte-identical; no decision/sizing/ranking path reads it.
+        # None on a candidate without a capture → typed-unavailable at stage.
+        "scan_underlying_spot": cand.get("scan_underlying_spot"),
     }
     return order_json
 

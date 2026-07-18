@@ -425,6 +425,18 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   ⑤ IV capture + typed-unavailable spot (open-order STUDY_SQL linkage) ·
   #1268 76757684 startup flag echo (27 flags, real parsers). Zero
   migrations/production-DB/broker/fleet actions.
+  **07-18 SAT EVENING run** (`docs/review/
+  saturday-evening-results-2026-07-18.md`): #1274 e2f91ac2 ⑤ scan-time spot
+  (capture COMPLETE: delta+IV+spot — first post-07-18 closed outcome is
+  challenger-scorable) · #1272 94a4cdb3 E4/E5 quality-gate finals invariant
+  (h7_dropped + sizing_outcome key; owner ratification open) · #1271
+  53e86f53 source_used mislabel · #1273 9cb3876a realized cost consumer #3
+  (per-routing commission: broker-routed = real $0, internal
+  typed-unavailable) · #1275 da70b67e drift-summary quirk · #1276 02b2d8b0
+  stress-model D2 residual CLOSED. Operator checkout pull
+  BLOCKED_OPERATOR_PULL_CONFLICT (dirty audit/ledger.md +281; patch +
+  handoff in bundle) — the nightly wrapper flow starts only after the
+  operator pull. Zero migrations/production-DB/broker/fleet actions.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -602,10 +614,12 @@ unscheduled operator-triggered `replay_integrity_check` → `background`
   (sign applied exactly once), and #1269 FIXED D2 in check_greeks — the
   reported `portfolio_greeks` is now the honest SIGNED net (no longer a
   lying display). BUT all four caps still default 0 = no-limit, so it is
-  STILL NOT live protection. Residual D2-pattern: `compute_stress_scenarios`
-  still sums unsigned — payoff-clamped so bounded-safe, future stress lane.
-  Arming caps is a separate owner decision and must consume
-  `greeks_coverage`; historical legs remain greeks-less.
+  STILL NOT live protection. The `compute_stress_scenarios` unsigned
+  residual was CLOSED 07-18 evening (#1276 — signed via the canonical
+  `_direction_sign`; clamp preserved; `worst_case ≡ correlation_one` so the
+  warn surface is byte-identical). Remaining greek defects: D3
+  ratio-blindness (pinned). Arming caps is a separate owner decision and
+  must consume `greeks_coverage`; historical legs remain greeks-less.
 - **Shadow-cohort ledgers are partly fiction** (quantified 07-02,
   `docs/specs/shadow_fill_realism.md`): shadows fill 100% by construction
   at 5–17× live size; live fill rate ≈1/3 (10 of ~54 orders died

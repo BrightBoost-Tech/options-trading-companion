@@ -4,6 +4,33 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-18 — SATURDAY-EVENING ORCHESTRATOR (3rd Sat run; fable + ≤6 opus) · status:shipped
+
+Full record: `docs/review/saturday-evening-results-2026-07-18.md`. Six merges,
+each adversarially reviewed (+2 FAIL→repair→re-verify cycles), per-merge
+deploy-verified: **#1274 `e2f91ac2`** ⑤ scan-time spot threaded scanner→
+order_json→stage (deterministic provider-ts as_of; ⑤ capture now COMPLETE:
+delta+IV+spot — first post-tonight closed outcome is adapter AND challenger
+scorable) · **#1272 `94a4cdb3`** E4/E5 quality-gate hard-mode deaths now
+record exactly one final (`h7_dropped` + reason + `sizing_outcome=
+'marketdata_quality_gate'`; ⚠ owner ratification of the value = open item) ·
+**#1271 `53e86f53`** scanner source_used mislabel (in-memory only) ·
+**#1273 `9cb3876a`** realized cost consumer #3 (review caught INVERTED fees
+provenance → repaired per-routing: broker-routed = REAL $0 Alpaca commission,
+internal typed-unavailable; evidence: TCM over-charges commission −1.55 mean;
+F-CREDIT-SIGN double-correction REFUTED — all 19 were pure sign-flips) ·
+**#1275 `da70b67e`** drift-summary collection quirk (test-only) · **#1276
+`02b2d8b0`** stress-model D2 residual CLOSED (signed via canonical
+`_direction_sign`; clamp preserved; `worst_case ≡ correlation_one` proven →
+warn surface byte-identical; §8 stress-residual line RESOLVED).
+**Operator pull: BLOCKED_OPERATOR_PULL_CONFLICT** — dirty tracked
+audit/ledger.md (+281 lines) overlaps main; delta patch + handoff in bundle;
+tonight's 00:00 CT nightly runs the OLD flow under the NEW task protections;
+wrapper flow starts after the operator pull. Runtime prompts refreshed
+(sunday-nightly-audit-verification-2026-07-19.md + monday check extended).
+ZERO broker/production-DB/fleet/migration actions; operator worktree
+byte-identical (`0d3067b4…`).
+
 ## 2026-07-18 — SATURDAY-NIGHT ORCHESTRATOR (2nd Sat run; fable + ≤6 opus) · status:shipped
 
 Full record: `docs/review/saturday-night-results-2026-07-18.md`. Six merges,

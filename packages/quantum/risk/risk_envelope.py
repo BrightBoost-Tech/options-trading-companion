@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from packages.quantum.risk.position_model import (
     PositionNormalizationError,
     RiskClassification,
+    _direction_sign,
     aggregate_greeks,
     analyze_payoff,
     normalize_position,
@@ -279,7 +280,7 @@ def check_greeks(
     config: EnvelopeConfig,
     coverage_out: Optional[Dict[str, Any]] = None,
 ) -> tuple:
-    """Check portfolio-level Greeks limits — null-safe (H9).
+    """Check portfolio-level Greeks limits — null-safe (H9) and SIGN-aware (D2).
 
     A leg whose greeks are missing / None / partial / nonfinite contributes
     NOTHING to the portfolio sums. It is NEVER coerced to a fabricated 0 (the
@@ -288,18 +289,29 @@ def check_greeks(
     legs — and silently zeroed a genuinely absent one). A leg counts toward the
     aggregate only when ALL of delta/gamma/vega/theta are present and finite.
 
+    **D2 FIX (signed aggregation):** each covered leg's contribution is signed by
+    its OWN direction via the canonical sign authority
+    ``position_model._direction_sign`` (reuse, not a second copy of the BUY/SELL
+    token logic). A long leg and a short leg now NET instead of ADD — the pre-fix
+    ``abs(qty)`` add treated a delta-hedged spread as if both legs pointed the
+    same way (a 4-leg condor reported 4×|per-leg greek|). A leg whose side cannot
+    be determined (unknown / missing action|side) is UNSIGNABLE and therefore
+    typed uncovered (contributes nothing, counts against coverage), never a
+    fabricated unsigned add (H9). Magnitude scaling (``abs(qty) × 100``) is
+    UNCHANGED — leg-ratio (D3) and per-leg multiplier (D4) remain their own lanes.
+
     Coverage is reported via ``coverage_out`` (optional out-param, matching the
     ``check_loss_envelopes`` ``degraded_out`` idiom): ``{legs_total,
     legs_with_greeks, complete}`` so a consumer can see the aggregate is PARTIAL
     rather than trust a sum built from an incomplete book.
 
     Caps are UNCHANGED: every greek limit still defaults 0 (no-limit) and the
-    ``if limit > 0`` gate is untouched. While the caps are dormant (all 0) this
-    returns exactly the pre-fix ``(violations=[], greeks)`` for every input that
-    did not previously raise — the two shapes that actually occur (every leg
-    greek-less pre-#1259 → all-zero sums; every leg a complete finite dict
-    post-#1259 → identical real sums) are byte-identical to the old aggregation;
-    they diverge only on a partial-value dict, a shape no populate path emits.
+    ``if limit > 0`` gate is untouched — the aggregate is observe-only telemetry
+    (``portfolio_greeks``) while dormant, so ``(violations, passed)`` are
+    identical for every caps-0 input. The reported greek VALUE is now the honest
+    signed net (a measurement correction, like #1017/#1051/#1071); it diverges
+    from the pre-fix unsigned add exactly for opposing-direction legs — the point
+    of the D2 lane.
     """
     violations = []
     total_delta = 0.0
@@ -335,11 +347,23 @@ def check_greeks(
                 # Partial / nonfinite greeks → never fabricate the missing legs
                 # as 0; the whole leg is typed uncovered and contributes nothing.
                 continue
+            # D2: sign by the leg's own direction via the canonical helper. An
+            # indeterminate side is unsignable → the leg is typed uncovered, not
+            # coerced to a directionless unsigned add.
+            side_raw = (
+                leg.get("action")
+                if leg.get("action") is not None
+                else leg.get("side")
+            )
+            try:
+                sign = _direction_sign(side_raw)
+            except PositionNormalizationError:
+                continue
 
-            total_delta += d * abs(qty) * 100
-            total_gamma += g * abs(qty) * 100
-            total_vega += v * abs(qty) * 100
-            total_theta += t * abs(qty) * 100
+            total_delta += sign * d * abs(qty) * 100
+            total_gamma += sign * g * abs(qty) * 100
+            total_vega += sign * v * abs(qty) * 100
+            total_theta += sign * t * abs(qty) * 100
             legs_with_greeks += 1
 
     greeks = {

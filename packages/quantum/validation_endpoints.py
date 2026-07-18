@@ -111,10 +111,21 @@ def trigger_validation_run(
 
         try:
             # enqueue_job_run returns a dict with status
+            # A5-2 origin provenance: user-JWT API trigger — operator/API
+            # class. Actor is a CLASS, never the user's identity (the
+            # user_id already rides in the job payload for execution).
+            from packages.quantum.jobs.origin import (
+                ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                build_origin,
+            )
             result = enqueue_job_run(
                 job_name="validation_eval",
                 idempotency_key=key,
-                payload=job_payload
+                payload=job_payload,
+                origin=build_origin(
+                    ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                    trigger_actor_class="authenticated_user_api",
+                ),
             )
             return {"status": "queued", "job_run_id": result.get("job_run_id")}
         except Exception as e:

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from packages.quantum.observability.canonical import canonical_json_bytes
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent, BACKGROUND_QUEUE
 from packages.quantum.jobs.job_runs import JobRunStore
+from packages.quantum.jobs.origin import resolve_request_origin
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
 from packages.quantum.core.rate_limiter import limiter
@@ -34,6 +35,7 @@ from packages.quantum.public_tasks_models import (
     PaperExitEvaluatePayload,
     PaperMarkToMarketPayload,
     PaperLearningIngestPayload,
+    ShadowFleetActivationPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -163,9 +165,16 @@ def _suggestions_idempotency_key(
 def enqueue_job_run(
     job_name: str, idempotency_key: str, payload: Dict[str, Any],
     queue_name: str = "otc", force_rerun: bool = False,
+    origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
+
+    A5-2 origin provenance: ``origin`` (built via
+    ``packages.quantum.jobs.origin``) is stamped into the row's
+    ``payload.origin`` at create time — including the cancelled-at-gate
+    paths — so every attempted run is attributable. ``None`` coerces to
+    ``unknown_legacy`` at the store seam (for callers not yet threaded).
 
     v4-L5 Ops Console: Enforces pause gate - blocks enqueue when trading is paused.
 
@@ -195,7 +204,8 @@ def enqueue_job_run(
             idempotency_key=idempotency_key,
             payload=payload,
             cancelled_reason="global_ops_pause",
-            cancelled_detail=pause_reason
+            cancelled_detail=pause_reason,
+            origin=origin,
         )
 
         return {
@@ -220,7 +230,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="go_live_gate",
-                cancelled_detail="missing_user_id_for_gate"
+                cancelled_detail="missing_user_id_for_gate",
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -249,7 +260,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="go_live_gate",
-                cancelled_detail=decision.reason
+                cancelled_detail=decision.reason,
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -268,7 +280,8 @@ def enqueue_job_run(
                 idempotency_key=idempotency_key,
                 payload=payload,
                 cancelled_reason="manual_approval_required",
-                cancelled_detail=decision.reason
+                cancelled_detail=decision.reason,
+                origin=origin,
             )
             return {
                 "job_run_id": job_run["id"],
@@ -293,7 +306,9 @@ def enqueue_job_run(
     print(f"[DISPATCH_DEBUG] {job_name}: idempotency_key={idempotency_key}")
 
     # Normal flow: create job run and enqueue
-    job_run = store.create_or_get(job_name, idempotency_key, payload)
+    # A5-2: origin stamped at create time (payload.origin) — provenance
+    # exists even if no worker ever claims the row (queued-orphan lesson).
+    job_run = store.create_or_get(job_name, idempotency_key, payload, origin=origin)
     print(f"[DISPATCH_DEBUG] {job_name}: create_or_get returned id={job_run.get('id', '?')[:12]} status={job_run.get('status')}")
 
     # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
@@ -349,6 +364,7 @@ async def task_universe_sync(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/morning-brief", status_code=202)
@@ -371,6 +387,7 @@ async def task_morning_brief(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/midday-scan", status_code=202)
@@ -393,6 +410,7 @@ async def task_midday_scan(
         idempotency_key=today,
         payload={"date": today},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/weekly-report", status_code=202)
@@ -416,6 +434,7 @@ async def task_weekly_report(
         idempotency_key=week,
         payload={"week": week},
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 @router.post("/validation/eval", status_code=202)
@@ -454,6 +473,7 @@ async def task_validation_eval(
         idempotency_key=key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -510,6 +530,7 @@ async def task_suggestions_close(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -561,6 +582,7 @@ async def task_suggestions_open(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -601,6 +623,7 @@ async def task_learning_ingest(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -647,6 +670,7 @@ async def task_policy_lab_eval(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -691,6 +715,7 @@ async def task_paper_learning_ingest(
         payload=job_payload,
         queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -732,6 +757,7 @@ async def task_strategy_autotune(
         idempotency_key=f"{week}-autotune",
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -797,6 +823,7 @@ async def task_ops_health_check(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -914,6 +941,7 @@ async def task_paper_auto_execute(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -969,6 +997,7 @@ async def task_paper_auto_close(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1163,6 +1192,111 @@ async def task_validation_shadow_eval(
 
 
 # =============================================================================
+# Shadow-Fleet Provision/Activation (F-SHADOW-CAPITAL-PARITY, Lane 3A)
+# =============================================================================
+
+
+@router.post("/shadow-fleet/activation", status_code=200)
+@limiter.limit("5/minute")
+async def task_shadow_fleet_activation(
+    request: Request,
+    payload: ShadowFleetActivationPayload = Body(...),
+    auth: TaskSignatureResult = Depends(
+        verify_task_signature("tasks:shadow_fleet_activation")
+    ),
+):
+    """
+    OPERATOR-ONLY provision/activation surface for the 50 x $2,000
+    small_tier_v1 shadow fleet.
+
+    Auth: Requires v4 HMAC signature with scope
+    'tasks:shadow_fleet_activation'.
+
+    NEVER scheduled (deliberately absent from scheduler.py and any cron);
+    default unavailable without an explicit payload (`step` is required,
+    Body(...) — there is no empty-payload default).
+
+    Default action is DRY-RUN: full plan + typed readiness + audit-receipt
+    spec, zero writes. Execution is fail-closed behind ALL of (enforced in
+    services/shadow_fleet_activation.py, not here):
+    - execute=true in the payload
+    - confirm='EXECUTE-SHADOW-FLEET'
+    - idempotency_key
+    - FLEET_ACTIVATION_AUTHORIZED=1 on the running process (strict '=1')
+    - activate step: 50-slot policy_registrations map (unique,
+      pre-registered ids — never invented) + attestation referencing the
+      stale-order reconciliation receipt.
+
+    Both execute steps are single atomic server-side RPC transactions
+    (supabase/migrations/20260717090000_shadow_fleet_activation_rpc.sql).
+
+    A5-2 origin provenance: this surface acts SYNCHRONOUSLY — it does NOT
+    ``enqueue_job_run``, so there is no ``job_runs`` row to carry
+    ``payload.origin``, and its writes land inside the frozen atomic RPC
+    (signature takes no origin argument). We still resolve the request origin
+    like every sibling ``/tasks/*`` site via ``resolve_request_origin`` and
+    stamp it into the RETURNED receipt (dry-run AND execute) so the
+    operator-signed provenance is attributable at the ENDPOINT SEAM.
+    Attribution only — never authorization (the HMAC dependency already
+    gated the request).
+    """
+    from packages.quantum.jobs.handlers.utils import get_admin_client
+    from packages.quantum.services import shadow_fleet_activation as sfa
+
+    # Resolve provenance BEFORE dispatch — the request is already
+    # HMAC-authenticated by the verify_task_signature dependency above.
+    origin = resolve_request_origin(request)
+
+    supabase = get_admin_client()
+    try:
+        if not payload.execute:
+            if payload.step == "provision":
+                result = sfa.plan_provision(
+                    supabase, payload.user_id,
+                    idempotency_key=payload.idempotency_key,
+                )
+            else:
+                result = sfa.plan_activation(
+                    supabase, payload.user_id,
+                    idempotency_key=payload.idempotency_key,
+                    policy_registrations=payload.policy_registrations,
+                    attestation=payload.attestation,
+                )
+        elif payload.step == "provision":
+            result = sfa.execute_provision(
+                supabase, payload.user_id,
+                idempotency_key=payload.idempotency_key,
+                confirm=payload.confirm,
+            )
+        else:
+            if payload.policy_registrations is None or payload.attestation is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="activate execution requires explicit "
+                           "policy_registrations and attestation payloads",
+                )
+            result = sfa.execute_activation(
+                supabase, payload.user_id,
+                idempotency_key=payload.idempotency_key,
+                policy_registrations=payload.policy_registrations,
+                attestation=payload.attestation,
+                confirm=payload.confirm,
+            )
+    except sfa.ActivationNotAuthorized as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except sfa.ShadowFleetActivationError as exc:
+        # Readiness blocks, missing confirm/idempotency key, bad attestation.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # Endpoint-seam provenance stamp: the receipt carries the resolved origin
+    # (operator_signed_endpoint for a signed operator call). No job_runs row
+    # exists on this synchronous surface — this IS the attributable record.
+    if isinstance(result, dict):
+        result.setdefault("origin", origin)
+    return result
+
+
+# =============================================================================
 # 10-Day Readiness Hardening Tasks (v4-L1F)
 # =============================================================================
 
@@ -1321,6 +1455,7 @@ async def task_validation_init_window(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1369,6 +1504,7 @@ async def task_paper_exit_evaluate(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 
 
@@ -1411,5 +1547,6 @@ async def task_paper_mark_to_market(
         idempotency_key=idempotency_key,
         payload=job_payload,
         force_rerun=payload.force_rerun,
+        origin=resolve_request_origin(request),
     )
 

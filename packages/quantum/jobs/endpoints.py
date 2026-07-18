@@ -114,6 +114,24 @@ async def retry_job_run(
             "error": None,
             "attempt": 0  # Reset attempts for manual retry
         }
+        # A5-2 origin provenance: an admin manual retry re-queues the SAME
+        # row — append an operator-class annotation to payload.origin_retries
+        # (payload.origin, the creator, stays immutable). Actor is a CLASS,
+        # never the admin's identity (that lives in the audit log below).
+        # A stamp failure must never block the retry.
+        try:
+            from packages.quantum.jobs.origin import (
+                ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                append_retry_origin,
+            )
+            update_data["payload"] = append_retry_origin(
+                job.get("payload"),
+                origin=ORIGIN_OPERATOR_SIGNED_ENDPOINT,
+                trigger_actor_class="admin_jobs_api_retry",
+                parent_job_run_id=str(job_run_id),
+            )
+        except Exception:
+            pass  # provenance is best-effort on the retry path
         client.table("job_runs").update(update_data).eq("id", str(job_run_id)).execute()
 
         # Enqueue in RQ again

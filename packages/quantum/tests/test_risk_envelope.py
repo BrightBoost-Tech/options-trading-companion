@@ -208,7 +208,7 @@ class TestLossEnvelopes:
 class TestStress:
     def test_stress_computes_scenarios(self):
         positions = [_make_position(delta=0.5, vega=0.1)]
-        violations, results = compute_stress_scenarios(
+        violations, results, _unavailable = compute_stress_scenarios(
             positions, equity=100000, config=_default_config(),
         )
         assert "spy_down" in results
@@ -220,7 +220,7 @@ class TestStress:
         # 10 large positions
         positions = [_make_position(delta=0.8, max_credit=5) for _ in range(10)]
         config = _default_config(max_stress_loss_pct=0.10)
-        violations, results = compute_stress_scenarios(
+        violations, results, _unavailable = compute_stress_scenarios(
             positions, equity=50000, config=config,
         )
         # correlation_one = total risk = 10 * 500 = 5000 → 10% of equity

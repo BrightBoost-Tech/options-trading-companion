@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Body, Request
 from typing import Optional, Dict
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from datetime import datetime
@@ -14,6 +14,8 @@ import os
 # which is out of #71 scope.
 from packages.quantum.public_tasks import enqueue_job_run  # DB + RQ (canonical)
 from packages.quantum.jobs.rq_enqueue import BACKGROUND_QUEUE
+# A5-2 job-origin provenance: classify the (already-authenticated) trigger
+from packages.quantum.jobs.origin import resolve_request_origin
 
 router = APIRouter(
     prefix="/internal/tasks",
@@ -26,6 +28,7 @@ APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 @router.post("/alpaca/order-sync", status_code=202)
 async def alpaca_order_sync_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:alpaca_order_sync"))
 ):
@@ -40,6 +43,7 @@ async def alpaca_order_sync_task(
     now = datetime.now()
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="alpaca_order_sync",
         idempotency_key=f"alpaca_order_sync-{now.strftime('%Y-%m-%d-%H%M')}",
         payload={
@@ -53,12 +57,14 @@ async def alpaca_order_sync_task(
 
 @router.post("/risk/intraday-monitor", status_code=202)
 async def intraday_risk_monitor_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:intraday_risk_monitor"))
 ):
     now = datetime.now()
     # 15-min block key: e.g. intraday_risk_monitor-2026-04-09-10-30
     minute_block = (now.minute // 15) * 15
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="intraday_risk_monitor",
         idempotency_key=f"intraday_risk_monitor-{now.strftime('%Y-%m-%d-%H')}-{minute_block:02d}",
         payload={
@@ -70,6 +76,7 @@ async def intraday_risk_monitor_task(
 
 @router.post("/learning/post-trade", status_code=202)
 async def post_trade_learning_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:post_trade_learning")),
     trade_ids: list = Body(None, embed=True),
 ):
@@ -84,6 +91,7 @@ async def post_trade_learning_task(
     if user_id:
         payload["user_id"] = user_id
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="post_trade_learning",
         idempotency_key=f"post_trade_learning-{today}",
         payload=payload,
@@ -93,10 +101,12 @@ async def post_trade_learning_task(
 
 @router.post("/orchestrator/start-day", status_code=202)
 async def day_orchestrator_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:day_orchestrator"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="day_orchestrator",
         idempotency_key=f"day_orchestrator-{today}",
         payload={
@@ -108,6 +118,7 @@ async def day_orchestrator_task(
 
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:daily_progression_eval"))
 ):
@@ -122,6 +133,7 @@ async def daily_progression_eval_task(
     today = datetime.now().strftime("%Y-%m-%d")
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="daily_progression_eval",
         idempotency_key=f"daily_progression_eval-{today}",
         payload={
@@ -136,6 +148,7 @@ async def daily_progression_eval_task(
 
 @router.post("/calibration/update", status_code=202)
 async def calibration_update_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:calibration_update"))
 ):
@@ -152,6 +165,7 @@ async def calibration_update_task(
     window_days = int(payload_in.get("window_days", 30))
     force_rerun = bool(payload_in.get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="calibration_update",
         idempotency_key=f"calibration_update-{today}",
         payload={
@@ -166,10 +180,12 @@ async def calibration_update_task(
 
 @router.post("/promotion/check", status_code=202)
 async def promotion_check_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:promotion_check"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="promotion_check",
         idempotency_key=f"promotion_check-{today}",
         payload={
@@ -182,11 +198,13 @@ async def promotion_check_task(
 
 @router.post("/heartbeat", status_code=202)
 async def heartbeat_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:heartbeat"))
 ):
     """Scheduler liveness heartbeat — proves the scheduler is firing jobs."""
     now = datetime.now()
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="scheduler_heartbeat",
         idempotency_key=f"heartbeat-{now.strftime('%Y-%m-%d-%H%M')}",
         payload={
@@ -197,6 +215,7 @@ async def heartbeat_task(
 
 @router.post("/replay/integrity-check", status_code=202)
 async def replay_integrity_check_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(
         verify_task_signature("tasks:replay_integrity_check")
@@ -219,6 +238,7 @@ async def replay_integrity_check_task(
     if force_rerun:
         handler_payload["force_rerun"] = True
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="replay_integrity_check",
         idempotency_key=(
             f"replay_integrity_check-{now.strftime('%Y-%m-%d')}-"
@@ -232,6 +252,7 @@ async def replay_integrity_check_task(
 
 @router.post("/phase2-precheck", status_code=202)
 async def phase2_precheck_task(
+    request: Request,
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:phase2_precheck"))
 ):
     """PR #6 Phase 2 observation-window verification.
@@ -242,6 +263,7 @@ async def phase2_precheck_task(
     queries this exercises."""
     now = datetime.now()
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="phase2_precheck",
         idempotency_key=f"phase2-precheck-{now.strftime('%Y-%m-%d-%H%M')}",
         payload={
@@ -252,6 +274,7 @@ async def phase2_precheck_task(
 
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:walk_forward_autotune"))
 ):
@@ -270,6 +293,7 @@ async def walk_forward_autotune_task(
     cohort_name = payload_in.get("cohort_name")  # default None preserved
     force_rerun = bool(payload_in.get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="walk_forward_autotune",
         idempotency_key=f"walk_forward_autotune-{today}",
         payload={
@@ -285,6 +309,7 @@ async def walk_forward_autotune_task(
 
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:iv_daily_refresh"))
 ):
@@ -311,6 +336,7 @@ async def iv_daily_refresh_task(
     today = datetime.now().strftime("%Y-%m-%d")
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="iv_daily_refresh",
         idempotency_key=f"iv_daily_refresh-{today}",
         payload={
@@ -324,6 +350,7 @@ async def iv_daily_refresh_task(
 
 @router.post("/vol-signal/snapshot", status_code=202)
 async def vol_signal_snapshot_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:vol_signal_snapshot"))
 ):
@@ -339,6 +366,7 @@ async def vol_signal_snapshot_task(
     today = datetime.now().strftime("%Y-%m-%d")
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="vol_signal_snapshot",
         idempotency_key=f"vol_signal_snapshot-{today}",
         payload={
@@ -352,6 +380,7 @@ async def vol_signal_snapshot_task(
 
 @router.post("/thesis/score", status_code=202)
 async def thesis_score_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:thesis_tracker"))
 ):
@@ -365,6 +394,7 @@ async def thesis_score_task(
     today = datetime.now().strftime("%Y-%m-%d")
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="thesis_tracker",
         idempotency_key=f"thesis_tracker-{today}",
         payload={
@@ -379,6 +409,7 @@ async def thesis_score_task(
 
 @router.post("/ipo/readiness-monitor", status_code=202)
 async def ipo_readiness_monitor_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:ipo_readiness_monitor"))
 ):
@@ -392,6 +423,7 @@ async def ipo_readiness_monitor_task(
     today = datetime.now().strftime("%Y-%m-%d")
     force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="ipo_readiness_monitor",
         idempotency_key=f"ipo_readiness_monitor-{today}",
         payload={
@@ -405,6 +437,7 @@ async def ipo_readiness_monitor_task(
 
 @router.post("/iv/historical-backfill", status_code=202)
 async def iv_historical_backfill_task(
+    request: Request,
     body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(
         verify_task_signature("tasks:iv_historical_backfill")
@@ -460,6 +493,7 @@ async def iv_historical_backfill_task(
     # "[2026-05-15] TIER 1 CANDIDATE: worker-queue blocker" for the
     # Phase 1 incident (job_run 9627c667-...) that motivated this.
     return enqueue_job_run(
+        origin=resolve_request_origin(request),
         job_name="iv_historical_backfill",
         idempotency_key=(
             f"iv_historical_backfill-{today}-{symbols_key}-{days}d"

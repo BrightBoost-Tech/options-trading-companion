@@ -2,10 +2,11 @@
 
 Two halves:
 
-  PHASE 1 — TestCurrentDefects proves the first production consumer closes
-  D1, D4, and the correlation-one slice of D5, while retaining executable
-  evidence for D2, D3, and unclamped linear stress. Each later consumer
-  migration must invert its defect assertion rather than delete it.
+  PHASE 1 — TestCurrentDefects proves the production consumers close D1, D4
+  (PR-2), and D5 in full — correlation-one basis plus the linear-stress
+  payoff clamp (PR-3) — while retaining executable evidence for D2 and D3.
+  Each later consumer migration must invert its defect assertion rather than
+  delete it.
 
   PHASE 2 — the golden fixtures, payoff/greek/reconciliation contracts, and the
   typed rejection matrices for the new module.
@@ -23,6 +24,7 @@ from packages.quantum.risk.risk_envelope import (
     EnvelopeConfig,
     PositionRiskUnavailable,
     _pos_risk,
+    check_all_envelopes,
     check_greeks,
     compute_stress_scenarios,
 )
@@ -244,6 +246,48 @@ def _persisted_short_put_vertical(qty: int = -2, premium: float = 1.20) -> dict:
     }
 
 
+def _persisted_debit_call_vertical(qty: int = 3, premium: float = 1.50) -> dict:
+    """_f5 as persisted: POSITIVE quantity == debit, full-count legs.
+
+    100/105 long call vertical, $1.50 debit, qty 3 -> max loss $450.
+    """
+    full = abs(qty)
+    return {
+        "id": "spy-debit-cv",
+        "symbol": "SPY",
+        "quantity": qty,
+        "avg_entry_price": premium,
+        "legs": [
+            {"symbol": _occ("SPY", "C", 100.0), "action": "buy",
+             "type": "call", "strike": 100.0, "expiry": "2026-09-18",
+             "quantity": full},
+            {"symbol": _occ("SPY", "C", 105.0), "action": "sell",
+             "type": "call", "strike": 105.0, "expiry": "2026-09-18",
+             "quantity": full},
+        ],
+    }
+
+
+def _with_leg_greeks(pos: dict, **greeks) -> dict:
+    """Attach the same greeks dict to every leg of a persisted position."""
+    for leg in pos["legs"]:
+        leg["greeks"] = dict(greeks)
+    return pos
+
+
+def _permissive_config(**overrides) -> EnvelopeConfig:
+    """Config that silences concentration noise so stress asserts stay pure."""
+    config = EnvelopeConfig(
+        max_single_symbol_pct=1.0,
+        max_sector_pct=1.0,
+        max_same_expiry_pct=1.0,
+        max_correlation_cluster_pct=1.0,
+    )
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
 def _persisted_iron_condor() -> dict:
     """_f3 as a persisted one-contract credit structure."""
     return {
@@ -275,9 +319,9 @@ def _persisted_iron_condor() -> dict:
 class TestCurrentDefects(unittest.TestCase):
     """Consumer-closure evidence plus the remaining live defects.
 
-    D1, D4, and correlation-one D5 are inverted by canonical-position PR-2.
-    D2, D3, and the unclamped linear-stress slice of D5 remain pinned; never
-    delete them.
+    D1, D4, and correlation-one D5 are inverted by canonical-position PR-2;
+    the unclamped linear-stress slice of D5 is inverted by PR-3 (payoff-capped
+    stress). D2 and D3 remain pinned; never delete them.
     """
 
     def test_d1_exact_max_loss_replaces_credit_received(self):
@@ -438,32 +482,49 @@ class TestCurrentDefects(unittest.TestCase):
             _pos_risk(mini), analyze_payoff(ten).max_loss_total, places=2
         )
 
-    def test_d5_stress_can_exceed_the_defined_risk_payoff_bound(self):
-        """A linear delta extrapolation has no payoff floor.
+    def test_d5_stress_can_no_longer_exceed_the_defined_risk_payoff_bound(self):
+        """INVERTED by PR-3: the production stress route clamps at the floor.
 
-        risk_envelope.py:522-540 computes delta x shock and takes the min of
-        three scenarios with no clamp. A defined-risk structure cannot lose
-        more than its max loss — that is arithmetic, not policy.
+        The defect: a linear delta extrapolation with no payoff floor could
+        win `worst = min(...)`. Now the production route floors every
+        scenario at -Σ canonical max loss; the raw phantom is preserved in
+        `spy_down_raw` but can no longer set the worst case. A defined-risk
+        structure cannot lose more than its max loss — arithmetic, not
+        policy.
         """
         condor = _f3_qqq_iron_condor()
         max_loss = analyze_payoff(condor).max_loss_total
         self.assertAlmostEqual(max_loss, 351.0, places=2)
 
-        # A stress engine extrapolating delta linearly through a big shock.
-        raw_stress_pnl = -5000.0
-        clamp = clamp_stress_to_payoff(condor, raw_stress_pnl)
+        # A phantom per-contract delta drives the linear model far past the
+        # structure's true worst case (the D5 class).
+        pos = _persisted_iron_condor()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": 50.0, "vega": 0.0}
 
+        _violations, results, unavailable = compute_stress_scenarios(
+            [pos], equity=10000.0, config=EnvelopeConfig()
+        )
+
+        # Raw extrapolation: 4 legs x 50 x 1 x 100 = 20,000 delta dollars;
+        # x 5% shock = -$1,000 — 2.8x the structure's true worst case.
+        self.assertAlmostEqual(results["spy_down_raw"] * 10000.0, -1000.0, places=2)
+        # Clamped at the canonical payoff floor, exactly.
+        self.assertAlmostEqual(results["spy_down"] * 10000.0, -max_loss, places=2)
+        # The phantom can no longer win the min(): worst == the payoff bound.
+        self.assertAlmostEqual(results["worst_case"] * 10000.0, -max_loss, places=2)
+        self.assertEqual(unavailable, {})
+
+        # The pure-form clamp the route consumes agrees with itself.
+        clamp = clamp_stress_to_payoff(condor, -1000.0)
         self.assertTrue(clamp.applicable)
         self.assertTrue(clamp.violated)
-        self.assertAlmostEqual(clamp.floor_total, -351.0, places=2)
         self.assertAlmostEqual(clamp.clamped_total_pnl, -351.0, places=2)
-        # The unclamped number is 14x the structure's true worst case.
-        self.assertLess(clamp.raw_total_pnl, clamp.floor_total)
 
     def test_d5_correlation_one_uses_exact_payoff_max_loss(self):
         """Correlation-one stress inherits the canonical position risk."""
         pos = _persisted_iron_condor()
-        _violations, results = compute_stress_scenarios(
+        _violations, results, _unavailable = compute_stress_scenarios(
             [pos], equity=10000.0, config=EnvelopeConfig()
         )
 
@@ -475,6 +536,216 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertNotAlmostEqual(
             results["correlation_one"] * 10000.0, -149.0, places=2
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PR-3 — payoff-capped stress at the REAL consumer route
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestPayoffCappedStress(unittest.TestCase):
+    """Drive check_all_envelopes — the entrypoint all four production callers
+    (autopilot breaker, intraday monitor, MTM, midday orchestrator) invoke —
+    and assert the stress outcome at the top (doctrine: inject the failure at
+    its origin, assert the truth at the top).
+    """
+
+    EQUITY = 10000.0
+
+    def test_credit_book_cap_binds_exactly_at_sum_max_loss(self):
+        """Phantom delta on a credit vertical: stress loss == Σ max loss."""
+        pos = _with_leg_greeks(
+            _persisted_short_put_vertical(), delta=50.0, vega=0.0
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        # Raw linear model: 2 legs x 50 x |qty 2| x 100 = 20,000 delta
+        # dollars; x 5% shock = -$1,000 > the $760 the structure can lose.
+        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -1000.0, places=2)
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -760.0, places=2)
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -760.0, places=2)
+        self.assertAlmostEqual(sr["correlation_one"], sr["worst_case"], places=10)
+        self.assertEqual(result.stress_unavailable, {})
+
+    def test_debit_book_cap_binds_exactly_at_sum_max_loss(self):
+        pos = _with_leg_greeks(
+            _persisted_debit_call_vertical(), delta=50.0, vega=0.0
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        # 2 legs x 50 x |qty 3| x 100 = 30,000; x 5% = -$1,500 vs $450 cap.
+        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -1500.0, places=2)
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -450.0, places=2)
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -450.0, places=2)
+
+    def test_mixed_book_cap_is_the_book_level_sum(self):
+        """Credit + debit book: the floor is Σ per-structure max losses."""
+        book = [
+            _with_leg_greeks(_persisted_short_put_vertical(), delta=50.0, vega=0.0),
+            _with_leg_greeks(_persisted_debit_call_vertical(), delta=50.0, vega=0.0),
+        ]
+        result = check_all_envelopes(
+            book, equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -2500.0, places=2)
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -(760.0 + 450.0), places=2)
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -1210.0, places=2)
+        self.assertAlmostEqual(sr["correlation_one"] * self.EQUITY, -1210.0, places=2)
+
+    def test_healthy_uncapped_book_matches_the_legacy_model_exactly(self):
+        """Stress under the cap: values equal the legacy arithmetic, no
+        _raw keys, no unavailability — the healthy path is unchanged."""
+        pos = _with_leg_greeks(
+            _persisted_short_put_vertical(), delta=0.30, vega=0.05
+        )
+        config = _permissive_config()
+        result = check_all_envelopes([pos], equity=self.EQUITY, config=config)
+        sr = result.stress_results
+
+        # Replicate the legacy computation with identical expressions.
+        qty = float(pos["quantity"])
+        total_delta = 0.0
+        total_vega = 0.0
+        for leg in pos["legs"]:
+            total_delta += float(leg["greeks"]["delta"]) * abs(qty) * 100
+            total_vega += float(leg["greeks"]["vega"]) * abs(qty) * 100
+        expected_spy = (total_delta * config.stress_spy_down_pct * -1) / self.EQUITY
+        expected_vix = (total_vega * config.stress_vix_spike_pct * 100) / self.EQUITY
+
+        self.assertEqual(
+            set(sr.keys()),
+            {"spy_down", "vix_spike", "correlation_one", "worst_case"},
+        )
+        self.assertEqual(sr["spy_down"], expected_spy)
+        self.assertEqual(sr["vix_spike"], expected_vix)
+        self.assertAlmostEqual(sr["correlation_one"] * self.EQUITY, -760.0, places=2)
+        self.assertEqual(
+            sr["worst_case"],
+            min(expected_spy, expected_vix, sr["correlation_one"]),
+        )
+        self.assertEqual(result.stress_unavailable, {})
+        self.assertEqual(
+            [v for v in result.violations if v.envelope == "stress_scenario"], []
+        )
+
+    def test_unrepresentable_structure_raises_typed_never_finite(self):
+        """A naked short call in the book: typed unavailability, no number."""
+        naked = {
+            "id": "naked-call",
+            "quantity": -1,
+            "avg_entry_price": 3.00,
+            "legs": [{
+                "symbol": _occ("SPY", "C", 100.0),
+                "action": "sell",
+                "type": "call",
+                "strike": 100.0,
+                "expiry": "2026-09-18",
+                "quantity": 1,
+            }],
+        }
+        book = [_persisted_short_put_vertical(), naked]
+        with self.assertRaises(PositionRiskUnavailable):
+            check_all_envelopes(book, equity=self.EQUITY, config=_permissive_config())
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios(book, self.EQUITY, _permissive_config())
+
+    def test_missing_greeks_scenarios_typed_unavailable_not_zero(self):
+        """The production-realistic book (no persisted greeks, §8): the greek
+        scenarios are OMITTED + typed, never reported as a fabricated 0."""
+        book = [_persisted_short_put_vertical(), _persisted_iron_condor()]
+        result = check_all_envelopes(
+            book, equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        self.assertNotIn("spy_down", sr)
+        self.assertNotIn("vix_spike", sr)
+        self.assertIn("correlation_one", sr)
+        self.assertAlmostEqual(
+            sr["worst_case"] * self.EQUITY, -(760.0 + 351.0), places=2
+        )
+        self.assertEqual(
+            result.stress_unavailable["spy_down"],
+            {"reason": "greeks_missing", "missing_field": "delta",
+             "legs_missing": 6},
+        )
+        self.assertEqual(
+            result.stress_unavailable["vix_spike"],
+            {"reason": "greeks_missing", "missing_field": "vega",
+             "legs_missing": 6},
+        )
+        # Unavailability is a typed field, NOT a violation (would write a
+        # risk_alerts row every monitor cycle for the ledgered dormancy).
+        self.assertEqual(
+            [v for v in result.violations if "unavailable" in v.envelope], []
+        )
+        # And the serialized result carries the typed record.
+        import json
+        as_dict = result.to_dict()
+        self.assertNotIn("spy_down", as_dict["stress_results"])
+        self.assertEqual(
+            as_dict["stress_unavailable"]["spy_down"]["reason"],
+            "greeks_missing",
+        )
+        json.dumps(as_dict)  # to_dict stays JSON-serializable
+
+    def test_stress_violation_still_fires_on_the_honest_bound(self):
+        """The warn violation predicate reads the CLAMPED worst case."""
+        book = [_persisted_short_put_vertical(), _persisted_iron_condor()]
+        result = check_all_envelopes(
+            book, equity=5000.0, config=_permissive_config()
+        )
+        stress_v = [v for v in result.violations if v.envelope == "stress_scenario"]
+        # worst = -(760+351)/5000 = -22.2% beyond the 15% default limit.
+        self.assertEqual(len(stress_v), 1)
+        self.assertEqual(stress_v[0].severity, "warn")
+        self.assertAlmostEqual(stress_v[0].actual, 1111.0 / 5000.0, places=4)
+
+    def test_partial_greeks_disable_only_the_missing_scenario(self):
+        pos = _persisted_short_put_vertical()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": 0.30}  # vega absent
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        self.assertIn("spy_down", sr)
+        self.assertNotIn("vix_spike", sr)
+        self.assertEqual(list(result.stress_unavailable), ["vix_spike"])
+        self.assertEqual(
+            sr["worst_case"], min(sr["spy_down"], sr["correlation_one"])
+        )
+
+    def test_none_greek_injected_at_origin_is_unavailable_not_a_crash(self):
+        """A leg carrying delta=None used to TypeError the STRESS computation
+        (float(None)); now it is a typed per-scenario unavailability.
+
+        Driven at the stress entrypoint: the unmigrated check_greeks (D2
+        lane, deliberately untouched by this consumer) still float()-crashes
+        on a None greek upstream inside check_all_envelopes, so the full
+        route cannot demonstrate the stress seam's behavior until the greeks
+        consumer migrates. That residual belongs to the D2 lane.
+        """
+        pos = _persisted_short_put_vertical()
+        for leg in pos["legs"]:
+            leg["greeks"] = {"delta": None, "vega": 0.05}
+        _violations, results, unavailable = compute_stress_scenarios(
+            [pos], self.EQUITY, _permissive_config()
+        )
+
+        self.assertNotIn("spy_down", results)
+        self.assertEqual(unavailable["spy_down"]["missing_field"], "delta")
+        self.assertEqual(unavailable["spy_down"]["legs_missing"], 2)
+        self.assertIn("vix_spike", results)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1112,7 +1383,10 @@ class TestNonInterference(unittest.TestCase):
             except OSError:
                 continue
             if "position_model" in text:
-                consumers.append(str(path.relative_to(root)))
+                # as_posix(): the boundary literal below is posix-form; the
+                # raw str() is backslashed on Windows and made this guard
+                # fail there regardless of the actual consumer set.
+                consumers.append(path.relative_to(root).as_posix())
         self.assertEqual(
             consumers,
             ["packages/quantum/risk/risk_envelope.py"],

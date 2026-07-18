@@ -2563,6 +2563,9 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     policy = StrategyPolicy(banned_strategies)
 
     rejection_stats = None
+    # Lane 4B: per-candidate terminal disposition recorder (observe-only).
+    # None until the SELECTED set exists; every write it makes is fail-soft.
+    _ctd = None
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
         scout_results, rejection_stats = scan_for_opportunities(
@@ -2672,6 +2675,29 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             regime=current_regime
         )
 
+        # Lane 4B (funnel phase-2): durable per-candidate terminal
+        # disposition — OBSERVE-ONLY. Every rank_and_select-SELECTED
+        # candidate gets a durable attempt row NOW (selected=true) and
+        # exactly one final disposition by cycle end, closing the
+        # AAPL/IWM selected-but-unpersisted gap (allocator/H7 deaths were
+        # not durable anywhere). Fail-soft by contract: the recorder never
+        # raises into the cycle; a missing table (migration unapplied) is
+        # a typed no-op surfaced via counts.candidate_disposition.
+        try:
+            from packages.quantum.services.candidate_disposition import (
+                CandidateDispositionRecorder,
+            )
+            _ctd = CandidateDispositionRecorder.create(
+                supabase, user_id=user_id,
+                cycle_date=datetime.now(timezone.utc).date().isoformat(),
+            )
+            _ctd.record_selected(candidates)
+        except Exception as _ctd_err:
+            logger.warning(
+                "[CANDIDATE_DISPOSITION] recorder init failed "
+                "(non-fatal): %s", _ctd_err)
+            _ctd = None
+
         # H7 allocator-aware pre-check (PR \<this PR\>, 2026-05-21).
         #
         # Filter candidates whose round-trip BP requirement exceeds
@@ -2705,6 +2731,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
             _h7_passes: list = []
             _h7_drops_log: list = []
+            # Lane 4B: parallel list of the dropped candidate dicts (same
+            # order as _h7_drops_log) so active-mode drops get a durable
+            # final disposition.
+            _h7_dropped_cands: list = []
             for _cand in candidates:
                 _max_loss = float(_cand.get("max_loss_per_contract") or 0.0)
                 if _max_loss <= 0:
@@ -2734,6 +2764,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                         "rt_required": _rt_required,
                         "available_bp": deployable_capital,
                     })
+                    _h7_dropped_cands.append(_cand)
 
             h7_prefilter_dropped_count = len(_h7_drops_log)
             for _drop in _h7_drops_log:
@@ -2750,6 +2781,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 # Active mode: actually filter
                 _had_candidates = bool(candidates)
                 candidates = _h7_passes
+                # Lane 4B: active-mode drop is a terminal fate — durable
+                # final. Shadow mode drops nothing, so records nothing.
+                if _ctd is not None:
+                    for _dc, _dl in zip(_h7_dropped_cands, _h7_drops_log):
+                        _ctd.record_final(
+                            _dc, "h7_dropped",
+                            detail={"reason": "h7_prefilter", **_dl},
+                        )
                 # New exit_reason when active-mode filter drops everything:
                 # set a flag so the downstream no_suggestions_after_gates
                 # return path can override with the more-precise reason.
@@ -2853,9 +2892,26 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     _allocated_ids.add(id(_r.candidate))
                 # Filter to allocated candidates only (allocator's
                 # n_candidates cap and envelope exhaustion semantics).
+                # Lane 4B: capture the dropped set BEFORE reassignment —
+                # this is the AAPL/IWM seam where selected candidates
+                # vanished without a durable fate.
+                _alloc_dropped = [
+                    c for c in candidates if id(c) not in _allocated_ids
+                ]
                 candidates = [
                     c for c in candidates if id(c) in _allocated_ids
                 ]
+                if _ctd is not None and _alloc_dropped:
+                    for _dc in _alloc_dropped:
+                        _ctd.record_final(
+                            _dc, "allocator_dropped",
+                            detail={
+                                "reason": "not_in_allocator_output",
+                                "allocator_result_count":
+                                    len(_allocator_results),
+                                "cap": MAX_CONCURRENT_POSITIONS,
+                            },
+                        )
                 print(
                     f"[Midday] PortfolioAllocator: {len(_allocator_results)} "
                     f"allocations for small tier (equity=${deployable_capital:.2f}, "
@@ -2950,6 +3006,8 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     ),
                     "candidates": 0,
                     "created": 0,
+                    # Lane 4B writer telemetry
+                    "candidate_disposition": _ctd.counters_dict() if _ctd is not None else None,
                 },
                 "cycle_metadata": _build_cycle_metadata(
                     exit_reason="no_candidates",
@@ -3185,6 +3243,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 f"(suggested_entry={cand.get('suggested_entry')!r}) — "
                 f"no suggestion row will be written"
             )
+            # Lane 4B: a selected candidate that dies here must still get a
+            # durable final (capital/priceability-fit family; exact cause in
+            # detail.reason).
+            if _ctd is not None:
+                _ctd.record_final(cand, "h7_dropped", detail={
+                    "reason": "unpriceable_candidate",
+                    "suggested_entry": cand.get("suggested_entry"),
+                })
             continue
 
         # --- SIZING INPUTS (compute BEFORE calling calculate_sizing) ---
@@ -3421,6 +3487,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 )
             except Exception as e:
                 print(f"Error logging trade veto: {e}")
+            # Lane 4B: durable final for the risk-budget-exhausted death.
+            if _ctd is not None:
+                _ctd.record_final(cand, "h7_dropped", detail={
+                    "reason": "risk_budget_exhausted",
+                    "remaining_global": remaining_global,
+                })
             continue
 
         # Update variable for sizing engine
@@ -3758,6 +3830,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # Final Policy Gate (should have been filtered upstream, but redundant check)
             if not policy.is_allowed(strategy):
                 print(f"[Midday] Final Gate: Rejecting {ticker} {strategy} due to policy.")
+                # Lane 4B: durable final for the redundant-policy-gate death
+                # (verdict-block family).
+                if _ctd is not None:
+                    _ctd.record_final(cand, "rank_blocked", detail={
+                        "reason": "policy_final_gate",
+                    })
                 continue
 
             # v4: Build and sign lineage
@@ -3889,6 +3967,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             if raev <= -999:
                 suggestion["status"] = "NOT_EXECUTABLE"
                 suggestion["blocked_reason"] = "edge_below_minimum"
+                # Lane 4B: ranker verdict final. The persist seam re-finals
+                # the SAME attempt with the suggestion_id (same disposition —
+                # a refinement, never a second final).
+                if _ctd is not None:
+                    _ctd.record_final(cand, "rank_blocked", detail={
+                        "reason": "edge_below_minimum",
+                        "risk_adjusted_ev": raev,
+                    })
 
             suggestions.append(suggestion)
 
@@ -3908,6 +3994,16 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                         "score": cand.get("score")
                     }
                 )
+        else:
+            # Lane 4B: sized-to-zero (post any test-mode override) is the
+            # REAL H7/capital-fit verdict — the dominant selected-then-
+            # vanished death (4-of-4 on 2026-05-21). Durable final.
+            if _ctd is not None:
+                _ctd.record_final(cand, "h7_dropped", detail={
+                    "reason": sizing.get("reason") or "sized_to_zero",
+                    "round_trip_required": sizing.get("round_trip_required"),
+                    "available_bp": deployable_capital,
+                })
 
     # Aggregation pattern: per-candidate failures collected during
     # loop, alerted once after. If the cycle exits abnormally before
@@ -3995,6 +4091,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 ),
                 "candidates": len(candidates),
                 "created": 0,
+                # Lane 4B observability: selected-set fates are durable even
+                # on the zero-suggestion path (h7/allocator/sizing deaths).
+                "candidate_disposition": (
+                    _ctd.counters_dict() if _ctd is not None else None
+                ),
             },
             "cycle_metadata": _build_cycle_metadata(
                 exit_reason=_exit_reason,
@@ -4039,6 +4140,9 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         _midday_insert_failures = []
 
         for s in suggestions:
+            # Lane 4B: length watermark — whether THIS suggestion produced an
+            # inserted_suggestions entry decides its persist-seam disposition.
+            _ctd_ins_len_before = len(inserted_suggestions)
             s["cycle_date"] = cycle_date
             if _decision_id:
                 s["decision_id"] = _decision_id  # gap-(c) linkage
@@ -4124,6 +4228,49 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                         "error_class": type(e).__name__,
                         "error_message": str(e)[:200],
                     })
+
+            # Lane 4B: persist-seam terminal disposition (observe-only,
+            # fail-soft). Persisted pending -> persisted_executable;
+            # NOT_EXECUTABLE -> rank_blocked (edge verdict, refines the
+            # ranker-seam final with its suggestion_id) or persisted_blocked
+            # (marketdata gate etc.); no row produced -> persisted_blocked
+            # with detail.insert_failed=true (the row is LOST — say so).
+            if _ctd is not None:
+                _ctd_appended = (
+                    inserted_suggestions[-1]
+                    if len(inserted_suggestions) > _ctd_ins_len_before
+                    else None
+                )
+                if _ctd_appended is not None:
+                    if s.get("status") == "NOT_EXECUTABLE":
+                        _ctd_disp = (
+                            "rank_blocked"
+                            if s.get("blocked_reason") == "edge_below_minimum"
+                            else "persisted_blocked"
+                        )
+                    else:
+                        _ctd_disp = "persisted_executable"
+                    _ctd.record_final(
+                        s.get("internal_cand"), _ctd_disp,
+                        detail={
+                            "status": s.get("status"),
+                            "blocked_reason": s.get("blocked_reason"),
+                            "is_new": _ctd_appended.get("is_new"),
+                        },
+                        suggestion_id=_ctd_appended.get("suggestion_id"),
+                        symbol=s.get("ticker"), strategy=s.get("strategy"),
+                        fingerprint=s.get("legs_fingerprint"),
+                    )
+                else:
+                    _ctd.record_final(
+                        s.get("internal_cand"), "persisted_blocked",
+                        detail={
+                            "insert_failed": True,
+                            "reason": "persist_did_not_yield_suggestion_row",
+                        },
+                        symbol=s.get("ticker"), strategy=s.get("strategy"),
+                        fingerprint=s.get("legs_fingerprint"),
+                    )
 
         print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
 
@@ -4371,6 +4518,8 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 # of the cycle silently completing green. The aggregated
                 # workflow_midday_suggestion_insert_failed alert is unchanged.
                 "suggestion_insert_failures": len(_midday_insert_failures),
+                # Lane 4B writer telemetry
+                "candidate_disposition": _ctd.counters_dict() if _ctd is not None else None,
             },
             "cycle_metadata": _build_cycle_metadata(
                 # Happy path: exit_reason=None signals successful funnel

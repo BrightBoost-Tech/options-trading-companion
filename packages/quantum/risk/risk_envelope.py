@@ -169,6 +169,16 @@ class EnvelopeCheckResult:
     # conflation (a daily-loss sweep must not bench a symbol per-symbol).
     symbol_loss_stops: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Stress scenarios whose greek inputs were missing this pass — typed
+    # unavailability (H9: omit + flag, never a fabricated 0). Keyed by
+    # scenario name ("spy_down"/"vix_spike") with {reason, missing_field,
+    # legs_missing}. Deliberately NOT an EnvelopeViolation: production legs
+    # persist no greeks (§8 double-dormancy), and a per-cycle warn violation
+    # here would write a risk_alerts row every monitor pass for a ledgered
+    # standing condition (the A9 noise class). correlation_one + worst_case
+    # remain in stress_results whenever every structure is representable.
+    stress_unavailable: Dict[str, Any] = field(default_factory=dict)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -186,6 +196,7 @@ class EnvelopeCheckResult:
             "loss_status": {k: round(v, 4) for k, v in self.loss_status.items()},
             "degraded_per_symbol": self.degraded_per_symbol,
             "symbol_loss_stops": self.symbol_loss_stops,
+            "stress_unavailable": self.stress_unavailable,
         }
 
 
@@ -515,28 +526,76 @@ def check_loss_envelopes(
     return violations, force_close_ids, loss_status
 
 
+def _stress_greek_value(greeks: Any, key: str) -> Optional[float]:
+    """Finite greek input for the stress model, or None when MISSING.
+
+    A missing key, None, bool, non-numeric, or non-finite value is a missing
+    INPUT (typed unavailable at the scenario level) — never a silent 0
+    pretending the exposure was measured (H9: reject or flag, never
+    fabricate).
+    """
+    if not isinstance(greeks, dict) or key not in greeks:
+        return None
+    value = greeks[key]
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(out) or math.isinf(out):
+        return None
+    return out
+
+
 def compute_stress_scenarios(
     positions: List[Dict],
     equity: float,
     config: EnvelopeConfig,
 ) -> tuple:
-    """
-    Compute portfolio P&L under stress scenarios.
+    """Compute portfolio P&L under stress scenarios, floored at the payoff bound.
 
-    Simplified stress model:
+    Model scenarios (linear estimates, unchanged from the legacy model):
     - SPY down X%: delta-based loss estimate
     - VIX spike Y%: vega-based gain/loss estimate
-    - Correlation-one: all positions move against you
+    - Correlation-one: every structure at its exact canonical max loss
+
+    Canonical-position consumer PR-3 (D5 closure): a defined-risk book cannot
+    lose more than the sum of its structures' payoff max losses — arithmetic,
+    not policy (position_model.clamp_stress_to_payoff, applied here at BOOK
+    level: the sum of per-structure floors IS the book floor). A delta/vega
+    extrapolation landing below -Σ max_loss_total is clamped to it; the raw
+    value is preserved in results["<scenario>_raw"] so the phantom stays
+    visible while it can no longer win the worst-case min() (the 06-17 MARA
+    phantom class, in the stress lane).
+
+    Typed unavailability (H9): a scenario whose greek inputs are missing on
+    ANY leg is NOT computed — a partial sum is a fabricated total. The
+    scenario key is omitted from `results` (never a placeholder 0) and
+    recorded in the returned `unavailable` mapping as
+    {reason, missing_field, legs_missing}. Production legs persist no greeks
+    today (§8 double-dormancy), so spy_down/vix_spike are expected-unavailable
+    there until stage-time greek population ships; correlation_one is always
+    computable for a representable book and is itself the payoff bound.
+
+    An unrepresentable or not-defined-risk structure raises
+    PositionRiskUnavailable via _pos_risk — a bound is never fabricated for
+    an unbounded structure.
+
+    Returns (violations, results, unavailable).
     """
     violations = []
-    results = {}
+    results: Dict[str, float] = {}
+    unavailable: Dict[str, Dict[str, Any]] = {}
 
     if not positions or equity <= 0:
-        return violations, results
+        return violations, results, unavailable
 
     total_delta = 0.0
     total_vega = 0.0
     total_risk = 0.0
+    delta_missing_legs = 0
+    vega_missing_legs = 0
 
     for pos in positions:
         qty = float(_pos_field(pos, "quantity", 0))
@@ -545,31 +604,96 @@ def compute_stress_scenarios(
 
         legs = pos.get("legs") or []
         for leg in legs:
-            if isinstance(leg, dict):
-                greeks = leg.get("greeks") or pos.get("greeks") or {}
-                total_delta += float(greeks.get("delta", 0)) * abs(qty) * 100
-                total_vega += float(greeks.get("vega", 0)) * abs(qty) * 100
+            if not isinstance(leg, dict):
+                # Unreadable leg: its greeks cannot be sourced. Unreachable
+                # after a successful _pos_risk (normalization rejects
+                # non-mapping legs) — kept as defense in depth.
+                delta_missing_legs += 1
+                vega_missing_legs += 1
+                continue
+            greeks = leg.get("greeks") or pos.get("greeks") or {}
+            delta = _stress_greek_value(greeks, "delta")
+            vega = _stress_greek_value(greeks, "vega")
+            if delta is None:
+                delta_missing_legs += 1
+            else:
+                total_delta += delta * abs(qty) * 100
+            if vega is None:
+                vega_missing_legs += 1
+            else:
+                total_vega += vega * abs(qty) * 100
 
-    # SPY down scenario
+    # Payoff floor: Σ canonical max-loss totals (position-level, already
+    # scaled by structure quantity and multiplier — never rescale). _pos_risk
+    # raised above if any structure was unrepresentable or unbounded, so a
+    # finite floor here is honest by construction.
+    floor_total = -total_risk
+
+    # SPY down scenario (delta-based linear model, clamped at the floor)
     spy_move = config.stress_spy_down_pct
-    spy_loss = total_delta * spy_move * -1  # Delta loss from down move
-    spy_loss_pct = spy_loss / equity if equity > 0 else 0
-    results["spy_down"] = spy_loss_pct
+    if delta_missing_legs == 0:
+        spy_loss = total_delta * spy_move * -1  # Delta loss from down move
+        if spy_loss < floor_total:
+            results["spy_down_raw"] = spy_loss / equity
+            logger.warning(
+                "[STRESS_PAYOFF_CAP] spy_down raw stress $%.2f exceeds the "
+                "defined-risk floor $%.2f — clamped to the payoff bound "
+                "(D5 class)",
+                spy_loss, floor_total,
+            )
+            spy_loss = floor_total
+        results["spy_down"] = spy_loss / equity
+    else:
+        unavailable["spy_down"] = {
+            "reason": "greeks_missing",
+            "missing_field": "delta",
+            "legs_missing": delta_missing_legs,
+        }
 
-    # VIX spike scenario (vega impact)
+    # VIX spike scenario (vega-based linear model, clamped at the floor)
     vix_move = config.stress_vix_spike_pct
-    vix_impact = total_vega * vix_move * 100  # Vega * vol points
-    vix_impact_pct = vix_impact / equity if equity > 0 else 0
-    results["vix_spike"] = vix_impact_pct
+    if vega_missing_legs == 0:
+        vix_impact = total_vega * vix_move * 100  # Vega * vol points
+        if vix_impact < floor_total:
+            results["vix_spike_raw"] = vix_impact / equity
+            logger.warning(
+                "[STRESS_PAYOFF_CAP] vix_spike raw stress $%.2f exceeds the "
+                "defined-risk floor $%.2f — clamped to the payoff bound "
+                "(D5 class)",
+                vix_impact, floor_total,
+            )
+            vix_impact = floor_total
+        results["vix_spike"] = vix_impact / equity
+    else:
+        unavailable["vix_spike"] = {
+            "reason": "greeks_missing",
+            "missing_field": "vega",
+            "legs_missing": vega_missing_legs,
+        }
 
-    # Correlation-one: all positions at max loss simultaneously
+    # Correlation-one: all positions at their exact canonical max loss
+    # simultaneously. This IS the payoff bound — the cap binds here by
+    # identity.
     corr_one_loss = -total_risk  # Worst case
-    corr_one_pct = corr_one_loss / equity if equity > 0 else 0
-    results["correlation_one"] = corr_one_pct
+    results["correlation_one"] = corr_one_loss / equity
 
-    # Check stress limits
-    worst = min(spy_loss_pct, vix_impact_pct, corr_one_pct)
+    # Worst case over the scenarios that were honestly computable. The raw
+    # (pre-clamp) values never enter — the clamp exists precisely so a
+    # phantom extrapolation cannot win this min().
+    worst = min(
+        results[key]
+        for key in ("spy_down", "vix_spike", "correlation_one")
+        if key in results
+    )
     results["worst_case"] = worst
+
+    if unavailable:
+        # INFO, not WARNING: greek absence is the ledgered §8 standing
+        # condition on every production book; the typed field is the flag.
+        logger.info(
+            "[STRESS] scenarios unavailable (typed, no fabricated 0): %s",
+            {k: v["legs_missing"] for k, v in unavailable.items()},
+        )
 
     if abs(worst) > config.max_stress_loss_pct:
         violations.append(EnvelopeViolation(
@@ -580,7 +704,7 @@ def compute_stress_scenarios(
             message=f"Worst stress scenario loss {worst:.1%} exceeds {-config.max_stress_loss_pct:.1%} limit",
         ))
 
-    return violations, results
+    return violations, results, unavailable
 
 
 # ---------------------------------------------------------------------------
@@ -640,11 +764,14 @@ def check_all_envelopes(
     for v in loss_violations:
         result.add_violation(v)
 
-    # 4. Stress scenarios
-    stress_violations, stress_results = compute_stress_scenarios(
+    # 4. Stress scenarios (payoff-capped at Σ canonical max loss; greek
+    #    scenarios are typed-unavailable when inputs are missing — see
+    #    compute_stress_scenarios)
+    stress_violations, stress_results, stress_unavailable = compute_stress_scenarios(
         positions, equity, config
     )
     result.stress_results = stress_results
+    result.stress_unavailable = stress_unavailable
     for v in stress_violations:
         result.add_violation(v)
 

@@ -334,6 +334,19 @@ TASKS = {
         "description": "Weekly walk-forward parameter optimization (Mon 5:30 AM)",
         "user_id_mode": "none",
     },
+    "shadow_fleet_activation": {
+        "path": "/tasks/shadow-fleet/activation",
+        "scope": "tasks:shadow_fleet_activation",
+        "description": (
+            "OPERATOR-ONLY shadow-fleet provision/activation (never "
+            "scheduled). Dry-run by default; requires explicit --payload-json "
+            "with at least {\"step\": \"provision\"|\"activate\"}. Execution "
+            "additionally requires execute/confirm/idempotency_key in the "
+            "payload and FLEET_ACTIVATION_AUTHORIZED=1 on the server."
+        ),
+        "user_id_mode": "require",
+        "skip_time_gate": True,
+    },
 }
 
 

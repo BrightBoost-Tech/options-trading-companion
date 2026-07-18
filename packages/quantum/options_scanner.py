@@ -23,6 +23,7 @@ from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+from packages.quantum.services.quote_provenance import QuoteProvenanceRecorder
 from packages.quantum.analytics import option_liquidity as _option_liquidity
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
@@ -2714,6 +2715,17 @@ def scan_for_opportunities(
         cycle_date=datetime.now().date(),
     )
 
+    # Lane 4C (2026-07-17): per-cycle option-quote provenance recorder —
+    # OBSERVE-ONLY durable evidence of quote source / fallback reason /
+    # spread-gate verdicts (option_quote_provenance). Threaded the same way
+    # RejectionStats is (per-cycle object, no globals); every hook is
+    # fail-soft; flushed in one batched write before return. Changes NO
+    # scan decision (pinned by the behavior-immutability test).
+    provenance_recorder = QuoteProvenanceRecorder(
+        supabase=supabase_client,
+        cycle_date=datetime.now().date(),
+    )
+
     # Initialize services
     market_data = PolygonService()
     strategy_selector = StrategySelector()
@@ -2724,6 +2736,14 @@ def scan_for_opportunities(
 
     # Unified Regime Engine
     truth_layer = MarketDataTruthLayer()
+    # Lane 4C: attach the per-cycle recorder at the truth-layer boundary
+    # (where source/fallback/429 is KNOWN). Fail-soft: a stubbed truth
+    # layer without the setter must never break the scan.
+    try:
+        truth_layer.set_provenance_recorder(provenance_recorder)
+    except Exception:
+        logger.debug("quote_provenance attach failed (non-fatal)",
+                     exc_info=True)
     regime_engine = RegimeEngineV3(
         supabase_client=supabase_client,
         market_data=truth_layer,
@@ -3817,6 +3837,32 @@ def scan_for_opportunities(
                     else:
                         reject_reason = "spread_too_wide"
 
+                    # Lane 4C: durable leg-set provenance for the REJECTED
+                    # verdict (threshold + basis + per-leg source joined from
+                    # this cycle's truth-layer notes). Observe-only, fail-soft
+                    # — recorded BEFORE the rejection count so rej_stats stays
+                    # adjacent to the return (silent-return audit contract);
+                    # neither call can change the verdict.
+                    try:
+                        provenance_recorder.record_spread_verdict(
+                            symbol=symbol,
+                            strategy_key=strategy_key,
+                            verdict="rejected",
+                            reject_reason=reject_reason,
+                            threshold=effective_threshold,
+                            option_spread_pct=option_spread_pct,
+                            is_condor=False,
+                            is_credit_spread=is_credit_spread,
+                            combo_source=("cost_range" if cost_range is not None
+                                          else "fallback"),
+                            combo_width_share=combo_width_share,
+                            entry_cost_share=entry_cost_share,
+                            max_loss_share=max_loss_share,
+                            legs=legs,
+                        )
+                    except Exception:
+                        logger.debug("quote_provenance spread record failed",
+                                     exc_info=True)
                     if hasattr(rej_stats, 'record_with_sample'):
                         sample = {
                             "symbol": symbol,
@@ -3832,6 +3878,30 @@ def scan_for_opportunities(
                             reject_reason, strategy=suggestion["strategy"]
                         )
                     return None
+
+            # Lane 4C: the leg set PASSED the spread gate — record the same
+            # evidence with verdict='passed' (sampled at flush unless the
+            # candidate is later emitted → mark_selected persists it).
+            # Observe-only, fail-soft.
+            try:
+                provenance_recorder.record_spread_verdict(
+                    symbol=symbol,
+                    strategy_key=strategy_key,
+                    verdict="passed",
+                    threshold=effective_threshold,
+                    option_spread_pct=option_spread_pct,
+                    is_condor=is_condor,
+                    is_credit_spread=is_credit_spread,
+                    combo_source=("cost_range" if cost_range is not None
+                                  else "fallback"),
+                    combo_width_share=combo_width_share,
+                    entry_cost_share=entry_cost_share,
+                    max_loss_share=max_loss_share,
+                    legs=legs,
+                )
+            except Exception:
+                logger.debug("quote_provenance spread record failed",
+                             exc_info=True)
 
             # H. Unified Scoring
             trade_dict = {
@@ -4198,6 +4268,14 @@ def scan_for_opportunities(
                 "selection_mode": "multi_strategy" if len(candidates) > 1 else "single",
             }
 
+            # Lane 4C: stamp the emitted candidate's leg set SELECTED so its
+            # provenance row persists unconditionally (never sampled out).
+            # Sits ABOVE the emission counter: the counter is source-pinned
+            # immediately before `return candidate_dict` (#113 PR-6 test).
+            try:
+                provenance_recorder.mark_selected(symbol, strategy_key)
+            except Exception:
+                pass
             # #113 PR-6: emission counter increment. Fires once per
             # successfully-emitted candidate. Both primary and fallback
             # paths in _process_symbol_multi flow through this return,
@@ -4360,5 +4438,19 @@ def scan_for_opportunities(
             "symbols_processed": _stats_snapshot["symbols_processed"],
         },
     )
+
+    # Lane 4C: single batched provenance flush (sampling + cap + scrub
+    # applied inside). LOUD counter on persist failure; typed no-op while
+    # the option_quote_provenance migration is unapplied. Never breaks the
+    # scan return.
+    try:
+        _prov_counts = provenance_recorder.flush()
+        if (_prov_counts.get("persist_failures")
+                or _prov_counts.get("schema_absent")):
+            logger.warning("quote_provenance flush: %s", _prov_counts)
+        else:
+            logger.info("quote_provenance flush: %s", _prov_counts)
+    except Exception:
+        logger.warning("quote_provenance flush failed", exc_info=True)
 
     return candidates, rejection_stats

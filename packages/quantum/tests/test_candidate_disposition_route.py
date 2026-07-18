@@ -15,6 +15,9 @@ Wired call sites proven end-to-end:
   - H7 pre-filter ACTIVE drop       -> h7_dropped final
   - allocator drop (AAPL/IWM seam)  -> allocator_dropped final
   - unpriceable loop death          -> h7_dropped final (reason in detail)
+  - marketdata quality gate HARD E4 (fatal) / E5 (skip-policy) -> h7_dropped
+    final (pre-persist death; detail.reason distinguishes E4/E5), and soft
+    mode does NOT drop (persisted_blocked at persist) — byte-identical on/off
   - schema-absent (migration unapplied) -> typed no-op, cycle output intact
   - writer on/off                   -> candidate outputs byte-identical
 """
@@ -43,6 +46,14 @@ from packages.quantum.tests.test_prerejection_full_route_e19 import (
 )
 from packages.quantum.tests.test_candidate_disposition_writer import (
     SchemaAbsentFake,
+)
+from packages.quantum.services import workflow_orchestrator as _wo
+from packages.quantum.services.market_data_truth_layer import (
+    TruthSnapshotV4,
+    TruthQuoteV4,
+    TruthTimestampsV4,
+    TruthQualityV4,
+    TruthSourceV4,
 )
 
 def _pin_real_module(stack, name):
@@ -514,6 +525,262 @@ class TestMultiCandidateInvariant(_RouteBase):
                           {"rank_blocked", "h7_dropped",
                            "persisted_blocked", "persisted_executable",
                            "allocator_dropped"})
+
+
+# ---------------------------------------------------------------------------
+# Marketdata quality-gate HARD-mode seam (E4 fatal / E5 skip-policy).
+#
+# Origin injection at the DEEPEST constructable layer: the marketdata feed
+# (MarketDataTruthLayer.snapshot_many_v4) returns the bad data, and the REAL
+# gate functions (check_snapshots_executable + format_quality_gate_result +
+# classify_snapshot_quality) do the classifying — no intermediate gate
+# function is mocked. MIDDAY_TRUST_SCANNER_QUOTES=0 is the real production
+# config that makes the snapshot gate run (scanner quotes not trusted).
+#   - E4: empty snapshots -> every leg FAIL_MISSING_SNAPSHOT (fatal).
+#   - E5: present-but-low-quality snapshots (score<min, not stale) -> WARN
+#         (non-fatal) + policy=skip.
+# Assertion is at the TOP: durable DB rows + top-level cycle counts.
+# ---------------------------------------------------------------------------
+import time as _time
+
+
+def _empty_v4(self, symbols, raw_snapshots=None):
+    """E4 origin: the feed returns nothing -> real gate sees missing/fatal."""
+    return {}
+
+
+def _low_quality_snap(sym):
+    """A genuine TruthSnapshotV4 the REAL classifier grades WARN_LOW_QUALITY:
+    present + fresh (not stale) + no fatal issue code, but quality_score below
+    the min threshold -> non-executable WARNING, never fatal."""
+    now_ms = int(_time.time() * 1000)
+    return TruthSnapshotV4(
+        symbol_canonical=sym,
+        quote=TruthQuoteV4(bid=0.55, ask=0.65, mid=0.60),
+        timestamps=TruthTimestampsV4(source_ts=now_ms, received_ts=now_ms),
+        quality=TruthQualityV4(
+            quality_score=50, issues=["low_quality"],
+            is_stale=False, freshness_ms=100,
+        ),
+        source=TruthSourceV4(),
+    )
+
+
+def _low_quality_v4(self, symbols, raw_snapshots=None):
+    """E5 origin: present-but-low-quality snapshots for every requested leg."""
+    return {s: _low_quality_snap(s) for s in symbols}
+
+
+def _gate_env(**over):
+    """Env patch that makes the snapshot gate RUN (scanner quotes untrusted).
+    Individual tests layer mode/policy on top."""
+    base = {"MIDDAY_TRUST_SCANNER_QUOTES": "0",
+            "MARKETDATA_MIN_QUALITY_SCORE": "60"}
+    base.update(over)
+    return patch.dict(os.environ, base, clear=False)
+
+
+class TestQualityGateHardModeSeam(_RouteBase):
+    """The E4/E5 invariant hole: a SELECTED candidate that the marketdata
+    quality gate drops in HARD mode must still reach EXACTLY ONE final
+    disposition (it used to `continue` with no final)."""
+
+    def test_e4_fatal_hard_mode_gets_one_h7_dropped_final(self):
+        client = FakeSupabase()
+        self._seed(client)
+        cand = _executable_candidate()  # clears sizing -> reaches the gate
+        expected_fp = candidate_fingerprint(cand)
+
+        result = self._drive(
+            client, [cand], cal_blob=None,
+            extra_patches=(
+                _gate_env(MIDDAY_QUALITY_GATE_MODE="hard"),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many",
+                             lambda self, *a, **k: {}),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many_v4",
+                             _empty_v4),
+            ),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+
+        # HARD mode drops it BEFORE persist -> nothing persisted.
+        self.assertEqual(
+            [r for r in client.tables.get("trade_suggestions", [])
+             if r.get("cohort_name") is None], [])
+
+        # …but the fate is durable: EXACTLY ONE final (the invariant hole).
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        final = finals[0]
+        self.assertEqual(final["disposition"], "h7_dropped")
+        self.assertEqual(final["detail"]["reason"], "quality_gate_e4_fatal")
+        # Typed discriminator: excludes marketdata deaths from the overloaded
+        # h7_dropped bucket without reason-string parsing (C2 pkt Option-A).
+        self.assertEqual(final["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
+        self.assertEqual(final["detail"]["effective_action"], "skip_fatal")
+        self.assertEqual(final["detail"]["quality_gate_mode"], "hard")
+        self.assertGreaterEqual(final["detail"]["fatal_count"], 1)
+        self.assertTrue(final["selected"])
+        self.assertEqual(final["candidate_fingerprint"], expected_fp)
+
+        ctd = self._cycle_counts(result)["candidate_disposition"]
+        self.assertFalse(ctd["table_missing"])
+        self.assertEqual(ctd["attempts_recorded"], 1)
+        self.assertEqual(ctd["finals_recorded"], 1)
+        self.assertEqual(ctd["write_failures"], 0)
+
+    def test_e5_skip_policy_hard_mode_gets_one_h7_dropped_final(self):
+        client = FakeSupabase()
+        self._seed(client)
+        cand = _executable_candidate()
+        expected_fp = candidate_fingerprint(cand)
+
+        result = self._drive(
+            client, [cand], cal_blob=None,
+            extra_patches=(
+                _gate_env(MIDDAY_QUALITY_GATE_MODE="hard",
+                          MARKETDATA_QUALITY_POLICY="skip"),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many",
+                             lambda self, *a, **k: {}),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many_v4",
+                             _low_quality_v4),
+            ),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+
+        self.assertEqual(
+            [r for r in client.tables.get("trade_suggestions", [])
+             if r.get("cohort_name") is None], [])
+
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        final = finals[0]
+        self.assertEqual(final["disposition"], "h7_dropped")
+        self.assertEqual(final["detail"]["reason"],
+                         "quality_gate_e5_skip_policy")
+        self.assertEqual(final["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
+        self.assertEqual(final["detail"]["effective_action"], "skip_policy")
+        self.assertEqual(final["detail"]["policy"], "skip")
+        # E5 is the NON-fatal warning branch: warnings present, zero fatals.
+        self.assertEqual(final["detail"]["fatal_count"], 0)
+        self.assertGreaterEqual(final["detail"]["warning_count"], 1)
+        self.assertEqual(final["candidate_fingerprint"], expected_fp)
+
+        ctd = self._cycle_counts(result)["candidate_disposition"]
+        self.assertEqual(ctd["attempts_recorded"], 1)
+        self.assertEqual(ctd["finals_recorded"], 1)
+        self.assertEqual(ctd["write_failures"], 0)
+
+    def test_no_duplicate_final_across_gate_and_persist(self):
+        """Belt-and-suspenders: the gate drop is the candidate's ONLY final —
+        the persist seam is never reached, so no second final can appear."""
+        client = FakeSupabase()
+        self._seed(client)
+        result = self._drive(
+            client, [_executable_candidate()], cal_blob=None,
+            extra_patches=(
+                _gate_env(MIDDAY_QUALITY_GATE_MODE="hard"),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many",
+                             lambda self, *a, **k: {}),
+                patch.object(_wo.MarketDataTruthLayer, "snapshot_many_v4",
+                             _empty_v4),
+            ),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+        self._assert_one_final_per_identity(client)  # raises on a duplicate
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["detail"]["sizing_outcome"],
+                         "marketdata_quality_gate")
+
+
+class TestQualityGateSoftModeUnchanged(_RouteBase):
+    """DEFAULT (soft) mode must be byte-identical to pre-fix: the gate does
+    NOT drop in soft mode (the candidate persists NOT_EXECUTABLE and earns the
+    pre-existing persisted_blocked at the persist seam), and the added
+    hard-mode records are observe-only (writer on/off -> identical persisted
+    output)."""
+
+    @staticmethod
+    def _projection(client):
+        rows = client.tables.get("trade_suggestions", [])
+        return sorted(
+            (
+                (
+                    r.get("ticker"), r.get("strategy"), r.get("window"),
+                    r.get("cohort_name"), r.get("status"),
+                    r.get("blocked_reason"),
+                    str(r.get("order_json", {}).get("legs")),
+                    r.get("order_json", {}).get("contracts"),
+                )
+                for r in rows
+            ),
+            key=lambda t: tuple(str(x) for x in t),
+        )
+
+    def _soft_patches(self, snap_v4):
+        return (
+            _gate_env(MARKETDATA_QUALITY_POLICY="skip"),  # mode unset -> soft
+            patch.object(_wo.MarketDataTruthLayer, "snapshot_many",
+                         lambda self, *a, **k: {}),
+            patch.object(_wo.MarketDataTruthLayer, "snapshot_many_v4",
+                         snap_v4),
+        )
+
+    def test_soft_mode_does_not_drop_and_earns_persisted_blocked(self):
+        client = FakeSupabase()
+        self._seed(client)
+        result = self._drive(
+            client, [_executable_candidate()], cal_blob=None,
+            extra_patches=self._soft_patches(_low_quality_v4),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+
+        # SOFT mode PERSISTS the candidate (does NOT drop) as NOT_EXECUTABLE.
+        src = [r for r in client.tables["trade_suggestions"]
+               if r.get("ticker") == "SOFI" and r.get("cohort_name") is None]
+        self.assertEqual(len(src), 1)
+        self.assertEqual(src[0]["status"], "NOT_EXECUTABLE")
+        self.assertEqual(src[0]["blocked_reason"], "marketdata_quality_gate")
+
+        # The disposition is the PRE-EXISTING persist-seam value, unchanged by
+        # this fix (soft mode never enters the new hard-mode branch).
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["disposition"], "persisted_blocked")
+
+    def test_soft_mode_output_byte_identical_writer_on_off(self):
+        # (a) writer ON (table present)
+        client_on = FakeSupabase()
+        self._seed(client_on)
+        res_on = self._drive(
+            client_on, [_executable_candidate()], cal_blob=None,
+            extra_patches=self._soft_patches(_low_quality_v4))
+        self.assertTrue(res_on["ok"], res_on.get("notes"))
+        self.assertTrue(self._ctd_rows(client_on))  # writer really wrote
+        proj_on = self._projection(client_on)
+
+        # (b) writer OFF (recorder construction forced to fail -> _ctd None)
+        client_off = FakeSupabase()
+        self._seed(client_off)
+        res_off = self._drive(
+            client_off, [_executable_candidate()], cal_blob=None,
+            extra_patches=self._soft_patches(_low_quality_v4) + (
+                patch("packages.quantum.services.candidate_disposition."
+                      "CandidateDispositionRecorder.create",
+                      side_effect=RuntimeError("writer forced off")),
+            ),
+        )
+        self.assertTrue(res_off["ok"], res_off.get("notes"))
+        self.assertEqual(self._ctd_rows(client_off), [])
+
+        # The persisted decision output is byte-identical with the observe-only
+        # writer recording vs fully disabled -> the E4/E5 fix is inert in soft
+        # mode.
+        self.assertEqual(proj_on, self._projection(client_off))
+        self.assertTrue(any(p[4] == "NOT_EXECUTABLE" for p in proj_on))
 
 
 if __name__ == "__main__":

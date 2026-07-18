@@ -7,8 +7,14 @@ AUTHORIZED env, the six-stale-order DB rows) and the truth asserted at the
 TOP (HTTP status + zero writes/RPCs on the fake supabase) — a green test on
 the service helper alone is not a green closure on the route (E8-3 lesson).
 
-Auth is exercised via the legacy X-Cron-Secret arm of verify_task_signature
-(module attrs patched at call time); the v4 HMAC arm is pinned by
+Auth is exercised via the legacy X-Cron-Secret arm of verify_task_signature.
+The arm is enabled by patching the globals of the ROUTE-RESOLVED dependency
+closure (pattern from test_rebalance_endpoint_contract.py): CI proved a
+module-level ``from packages.quantum.security import task_signing_v4`` can
+bind a MagicMock CHILD of a poisoned parent package — an earlier-collected
+module leaks ``sys.modules["packages.quantum.security"] = MagicMock()``
+(test_inbox_ranker_comprehensive.py) — so patching that symbol never
+reaches the real module the route closed over. The v4 HMAC arm is pinned by
 test_task_signing_v4.py and is not under test here.
 """
 
@@ -48,7 +54,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from packages.quantum.api import app  # noqa: E402
 from packages.quantum.core.rate_limiter import limiter  # noqa: E402
-from packages.quantum.security import task_signing_v4  # noqa: E402
 from packages.quantum.services import shadow_fleet_activation as sfa  # noqa: E402
 from packages.quantum.tests.test_shadow_fleet_activation import (  # noqa: E402
     FakeSupabase,
@@ -72,13 +77,39 @@ AUTH_HEADERS = {"X-Cron-Secret": CRON_SECRET}
 USER = "11111111-2222-3333-4444-555555555555"
 
 
+def _route_auth_dependency():
+    """Resolve the ACTUAL auth dependency callable bound into the activation
+    route (route-resolved pattern from test_rebalance_endpoint_contract.py).
+
+    Immune by construction to the poisoned-parent from-import (see module
+    docstring): the callable resolved off ``app.routes`` IS the
+    ``verify_task_signature(...)._dependency`` closure the route calls, and
+    its ``__globals__`` is the REAL task_signing_v4 module dict —
+    ``_verify_legacy_cron_secret`` reads ALLOW_LEGACY_CRON_SECRET /
+    CRON_SECRET from that exact dict at call time.
+    """
+    calls = [
+        d.call
+        for r in app.routes
+        if getattr(r, "path", "") == ROUTE
+        for d in r.dependant.dependencies
+        if (getattr(d.call, "__module__", "") or "").endswith("task_signing_v4")
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one task_signing_v4 dependency on {ROUTE}, "
+        f"got {calls!r}"
+    )
+    return calls[0]
+
+
 def _legacy_auth():
-    """Enable the legacy cron-secret arm for this call (module attrs are
-    read at call time inside _verify_legacy_cron_secret)."""
-    return mock.patch.multiple(
-        task_signing_v4,
-        ALLOW_LEGACY_CRON_SECRET=True,
-        CRON_SECRET=CRON_SECRET,
+    """Enable the legacy cron-secret arm for this call by patching the
+    globals the route's own dependency closure reads at call time. The REAL
+    _verify_legacy_cron_secret still runs (constant-time compare included) —
+    the arm stays exercised, nothing is bypassed."""
+    return mock.patch.dict(
+        _route_auth_dependency().__globals__,
+        {"ALLOW_LEGACY_CRON_SECRET": True, "CRON_SECRET": CRON_SECRET},
     )
 
 

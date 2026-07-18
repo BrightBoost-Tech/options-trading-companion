@@ -35,10 +35,22 @@ HONESTY CONTRACT (charter — the same H9 both-ends discipline as consumers #1/#
     therefore out of scope here — typed absent, never reconstructed.
   - The REALIZED values are the DB rows of record: ``paper_orders.avg_fill_price``
     / ``filled_qty`` (the actual fills) and ``paper_positions.realized_pl`` (the
-    authoritative round-trip P&L). ``paper_orders.fees_usd`` is NOT realized — it
-    is the stamped TCM fee ESTIMATE (verified: it equals tcm.fees_usd /
-    ranking_costs.expected_fees_total) — so realized COMMISSION is typed
-    UNAVAILABLE, never fabricated from an estimate column.
+    authoritative round-trip P&L).
+  - REALIZED COMMISSION is PER-ROUTING, not blanket-unavailable (07-18 review
+    correction). ``paper_orders.fees_usd`` means TWO different things by routing,
+    read read-only from the live data:
+      * BROKER-ROUTED fills (``execution_mode`` alpaca_live/alpaca_paper AND
+        ``alpaca_order_id`` present AND ``broker_status='filled'``) carry the REAL
+        Alpaca commission that ``alpaca_fill_reconciler`` stamped — today $0
+        (zero-commission options). Verified: on ALL 42 broker-routed filled
+        orders ``fees_usd=0`` and it NEVER equals ``tcm.fees_usd`` (0/42). For
+        these rows realized commission is KNOWN (= fees_usd, source
+        ``broker_reconciler``) — reporting it UNAVAILABLE would be OVER-abstention,
+        the mirror image of H9.
+      * INTERNAL / non-broker fills (internal_paper / shadow_blocked /
+        submission_failed) carry an estimate-or-ambiguous ``fees_usd`` (it equals
+        ``tcm.fees_usd`` on 76/120 internal_paper + 12/12 shadow_blocked) — there
+        realized commission is typed UNAVAILABLE, never fabricated.
   - SIGN SAFETY (2026-07-08 close_fill_gap sign-bug class): the broker
     ``avg_fill_price`` sign is UNRELIABLE for direction (verified: sell fills are
     positive 68x and negative 12x in the live data). Entry adverse/favorable
@@ -46,6 +58,10 @@ HONESTY CONTRACT (charter — the same H9 both-ends discipline as consumers #1/#
     MAGNITUDE, NEVER the raw signed fill. The close side reuses the frozen
     ``close_fill_gap.broker_fill_to_mark_basis`` (negation) via
     ``cost_basis.extract_realized_close_costs`` — the canonical sign-correct path.
+    Fills on F-CREDIT-SIGN-marked rows are already the CORRECTED magnitude (the
+    correction ran 2026-07-18 ~14:20Z — 19 orders carry
+    ``order_json.f_credit_sign_correction``, census fp b780271c…); the abs()-based
+    entry path is immune to the correction either way (magnitude only).
   - COMPARE, NEVER SUM. Estimated, executable and realized are alternative
     MEASUREMENTS of one round trip. Every output is a typed pairwise delta
     (a - b) or a passthrough; no field ever adds two bases together.
@@ -81,8 +97,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from packages.quantum.analytics.cost_basis import (
     OPTION_MULTIPLIER,
+    CostBasisKind,
     CostComponent,
     CostDelta,
+    CostSide,
+    CostSource,
+    CostUnit,
     Provenance,
     extract_realized_close_costs,
 )
@@ -109,7 +129,9 @@ WITH cp AS (
 open_o AS (
   SELECT DISTINCT ON (po.position_id)
     po.position_id, po.side, po.avg_fill_price, po.requested_price,
-    po.filled_qty, po.fees_usd, po.tcm, po.filled_at
+    po.filled_qty, po.fees_usd, po.tcm, po.filled_at,
+    po.execution_mode, (po.alpaca_order_id IS NOT NULL) AS has_alpaca_oid,
+    po.broker_status
   FROM paper_orders po
   WHERE po.status = 'filled'
   ORDER BY po.position_id, po.filled_at ASC
@@ -117,7 +139,9 @@ open_o AS (
 close_o AS (
   SELECT DISTINCT ON (po.position_id)
     po.position_id, po.side, po.avg_fill_price, po.requested_price,
-    po.filled_qty, po.fees_usd, po.order_json, po.filled_at
+    po.filled_qty, po.fees_usd, po.order_json, po.filled_at,
+    po.execution_mode, (po.alpaca_order_id IS NOT NULL) AS has_alpaca_oid,
+    po.broker_status
   FROM paper_orders po
   WHERE po.status = 'filled'
   ORDER BY po.position_id, po.filled_at DESC
@@ -150,12 +174,21 @@ FROM (
     oo.avg_fill_price                                      AS entry_fill_price,
     oo.requested_price                                     AS entry_requested_price,
     oo.filled_qty                                          AS entry_filled_qty,
-    oo.fees_usd                                            AS entry_fees_estimate,
+    -- fees_usd is REAL broker commission on broker-routed rows, estimate on
+    -- internal rows — the routing columns below disambiguate (never blanket).
+    oo.fees_usd                                            AS entry_fees_usd,
+    oo.execution_mode                                      AS entry_execution_mode,
+    oo.has_alpaca_oid                                      AS entry_has_alpaca_oid,
+    oo.broker_status                                       AS entry_broker_status,
     oo.tcm                                                 AS entry_tcm,
     -- CLOSE realized fill (broker net fill) + PERSISTED executable stamp
     co.side                                                AS close_side,
     co.avg_fill_price                                      AS close_fill_price,
     co.filled_qty                                          AS close_filled_qty,
+    co.fees_usd                                            AS close_fees_usd,
+    co.execution_mode                                      AS close_execution_mode,
+    co.has_alpaca_oid                                      AS close_has_alpaca_oid,
+    co.broker_status                                       AS close_broker_status,
     co.order_json                                          AS close_order_json,
     -- PERSISTED ranker fee estimate (present only on ranked suggestions)
     ts.ranking_costs                                       AS ranking_costs
@@ -315,6 +348,89 @@ def _entry_delta(
     )
 
 
+# --- realized commission (PER-ROUTING; never blanket-unavailable) ------------
+# A fill is BROKER-ROUTED — its ``fees_usd`` is the REAL Alpaca commission the
+# reconciler stamped ($0 for options today) — iff it executed at the broker.
+# Verified read-only 2026-07-18: on ALL 42 broker-routed filled orders
+# ``fees_usd = 0`` and it NEVER equals ``tcm.fees_usd`` (0/42). Internal /
+# non-broker fills carry an estimate-or-ambiguous ``fees_usd`` (it equals
+# ``tcm.fees_usd`` on 76/120 internal_paper + 12/12 shadow_blocked) — there the
+# realized commission is typed UNAVAILABLE, never fabricated. Reporting the
+# broker-known value UNAVAILABLE would be OVER-abstention (the mirror of H9).
+_BROKER_EXEC_MODES = frozenset({"alpaca_live", "alpaca_paper"})
+_COMMISSION_PROV = Provenance(
+    model_version="paper_orders.fees_usd@broker_reconciler",
+    source_detail="real Alpaca commission on broker-routed fills; $0 options today",
+)
+
+
+def _broker_routed(
+    execution_mode: Any, has_alpaca_oid: Any, broker_status: Any
+) -> bool:
+    """True only for a genuine broker execution: an alpaca execution_mode AND a
+    broker order id AND broker_status='filled'. Excludes internal_paper,
+    shadow_blocked, and submission_failed (verified: those never carry a real
+    $0-stamped commission)."""
+    return (
+        str(execution_mode or "").strip().lower() in _BROKER_EXEC_MODES
+        and bool(has_alpaca_oid)
+        and str(broker_status or "").strip().lower() == "filled"
+    )
+
+
+def _realized_commission_component(
+    name: str, side: CostSide, execution_mode: Any, has_alpaca_oid: Any,
+    broker_status: Any, fees_usd: Any,
+) -> CostComponent:
+    """Realized commission for ONE fill, typed PER ROUTING (TOTAL USD).
+    Broker-routed → KNOWN (= ``fees_usd``, source broker_reconciler; $0 today).
+    Internal / non-broker → typed UNAVAILABLE (fees_usd is estimate-or-ambiguous
+    there). Never blanket-unavailable when the real value is known."""
+    if not _broker_routed(execution_mode, has_alpaca_oid, broker_status):
+        return CostComponent.make_unavailable(
+            name, CostSource.REALIZED, side, CostBasisKind.REALIZED,
+            CostUnit.TOTAL, "internal_fill_commission_not_broker_stamped",
+            provenance=_COMMISSION_PROV,
+        )
+    fee = _coerce_float(fees_usd)
+    if fee is None:
+        return CostComponent.make_unavailable(
+            name, CostSource.REALIZED, side, CostBasisKind.REALIZED,
+            CostUnit.TOTAL, "broker_routed_but_fees_missing",
+            provenance=_COMMISSION_PROV,
+        )
+    return CostComponent(
+        name=name, source=CostSource.REALIZED, side=side,
+        basis=CostBasisKind.REALIZED, unit=CostUnit.TOTAL,
+        amount_usd=abs(fee), provenance=_COMMISSION_PROV,
+    )
+
+
+def _tcm_fees_usd(tcm: Any) -> Optional[float]:
+    if isinstance(tcm, Mapping):
+        return _coerce_float(tcm.get("fees_usd"))
+    return None
+
+
+def _tcm_commission_component(tcm: Any) -> CostComponent:
+    """The persisted TCM commission ESTIMATE as a typed component (entry
+    one-way, TOTAL USD) — the b-side for the realized-vs-estimate commission
+    delta. Typed UNAVAILABLE when tcm has no fees_usd."""
+    fee = _tcm_fees_usd(tcm)
+    if fee is None:
+        return CostComponent.make_unavailable(
+            "tcm_commission_estimate", CostSource.TCM, CostSide.ENTRY,
+            CostBasisKind.ESTIMATED, CostUnit.TOTAL,
+            "tcm_fees_not_persisted",
+            provenance=Provenance(model_version="paper_orders.tcm@persisted"),
+        )
+    return CostComponent(
+        name="tcm_commission_estimate", source=CostSource.TCM,
+        side=CostSide.ENTRY, basis=CostBasisKind.ESTIMATED, unit=CostUnit.TOTAL,
+        amount_usd=fee, provenance=Provenance(model_version="paper_orders.tcm@persisted"),
+    )
+
+
 # --- per-row typed comparison ------------------------------------------------
 @dataclass(frozen=True)
 class RowComparison:
@@ -336,6 +452,10 @@ class RowComparison:
     entry_slip_vs_tcm: CostDelta              # realized entry fill vs persisted tcm expected fill
     close_realized_vs_executable_cross: CostDelta  # realized close fill vs persisted executable cross
     close_gap_fraction: Optional[float]       # where fill sits between cross (0) and mid (1)
+    # realized commission, typed PER ROUTING (broker-known vs internal-unavailable)
+    entry_realized_commission: CostComponent
+    close_realized_commission: CostComponent
+    entry_commission_vs_tcm: CostDelta        # realized commission vs persisted TCM commission estimate
     # persisted-estimate context (displayed, NEVER added to realized)
     persisted_estimates: Mapping[str, Any]
 
@@ -353,9 +473,11 @@ def _persisted_estimate_context(row: Mapping[str, Any]) -> Dict[str, Any]:
     rc = row.get("ranking_costs") if isinstance(row.get("ranking_costs"), Mapping) else {}
     ctx: Dict[str, Any] = {
         "entry_requested_price_per_contract": _abs(row.get("entry_requested_price")),
-        "entry_fees_estimate_usd_note": (
-            "paper_orders.fees_usd is the STAMPED TCM fee ESTIMATE, not a "
-            "realized commission — realized commission is UNAVAILABLE here"
+        "entry_fees_usd_note": (
+            "paper_orders.fees_usd is the REAL Alpaca commission on broker-routed "
+            "fills (the realized commission — see entry_realized_commission), and "
+            "an estimate-or-ambiguous value on internal fills; it is disambiguated "
+            "PER ROUTING, never treated as a blanket estimate"
         ),
         "tcm_estimate": {
             "expected_fill_price_per_contract": _tcm_expected_fill(tcm),
@@ -429,6 +551,29 @@ def build_row(row: Mapping[str, Any]) -> RowComparison:
                 "note": "single-fill position (no distinct close order filled)"},
         )
 
+    # Realized commission, typed PER ROUTING — broker-known ($0 today) vs
+    # internal-unavailable. NEVER blanket-unavailable when the broker stamped it.
+    entry_commission = _realized_commission_component(
+        "entry_realized_commission", CostSide.ENTRY,
+        row.get("entry_execution_mode"), row.get("entry_has_alpaca_oid"),
+        row.get("entry_broker_status"), row.get("entry_fees_usd"),
+    )
+    close_commission = _realized_commission_component(
+        "close_realized_commission", CostSide.EXIT,
+        row.get("close_execution_mode"), row.get("close_has_alpaca_oid"),
+        row.get("close_broker_status"), row.get("close_fees_usd"),
+    )
+    # Realized commission vs the persisted TCM commission ESTIMATE (entry
+    # one-way, TOTAL USD): available only when the broker stamped a real value
+    # AND the tcm estimate is present. Today broker $0 vs a positive estimate →
+    # a negative delta (the model over-charges commission for zero-fee options).
+    entry_commission_vs_tcm = _delta(
+        "entry_realized_commission_vs_tcm_estimate",
+        entry_commission, _tcm_commission_component(row.get("entry_tcm")),
+        note=("TOTAL USD, entry one-way; a − b = realized commission − TCM "
+              "commission estimate; negative = the estimate over-charged"),
+    )
+
     return RowComparison(
         record_id=str(row.get("record_id")),
         cohort=cohort,
@@ -447,6 +592,9 @@ def build_row(row: Mapping[str, Any]) -> RowComparison:
         entry_slip_vs_tcm=entry_slip_vs_tcm,
         close_realized_vs_executable_cross=close_delta,
         close_gap_fraction=gap_fraction,
+        entry_realized_commission=entry_commission,
+        close_realized_commission=close_commission,
+        entry_commission_vs_tcm=entry_commission_vs_tcm,
         persisted_estimates=_persisted_estimate_context(row),
     )
 
@@ -504,6 +652,11 @@ class CohortReport:
     close_vs_executable_cross: DeltaStat
     gap_fraction_n: int
     gap_fraction_mean: Optional[float]
+    # realized commission, typed per routing (broker-known vs internal-unavailable)
+    entry_commission_broker_known: int
+    entry_commission_internal_unavailable: int
+    close_commission_broker_known: int
+    entry_commission_vs_tcm: DeltaStat
 
 
 @dataclass(frozen=True)
@@ -537,6 +690,15 @@ def _build_cohort(cohort: str, rows: List[RowComparison]) -> CohortReport:
             [r.close_realized_vs_executable_cross for r in rows]),
         gap_fraction_n=len(gaps),
         gap_fraction_mean=(statistics.fmean(gaps) if gaps else None),
+        entry_commission_broker_known=sum(
+            1 for r in rows if r.entry_realized_commission.available),
+        entry_commission_internal_unavailable=sum(
+            1 for r in rows if not r.entry_realized_commission.available),
+        close_commission_broker_known=sum(
+            1 for r in rows if r.close_realized_commission.available),
+        entry_commission_vs_tcm=_stat(
+            "entry_realized_commission_vs_tcm_estimate",
+            [r.entry_commission_vs_tcm for r in rows]),
     )
 
 
@@ -599,8 +761,12 @@ def render_markdown(study: StudyReport) -> str:
              "typed UNAVAILABLE where the stage stamp is absent.")
     L.append("- `realized_pl` is the authoritative DB round-trip P&L "
              "(context, never a cost basis).")
-    L.append("- Realized COMMISSION is typed UNAVAILABLE: `paper_orders.fees_usd` "
-             "is the stamped TCM fee ESTIMATE, not a broker charge.")
+    L.append("- Realized COMMISSION is typed PER ROUTING (not blanket): on "
+             "BROKER-routed fills `paper_orders.fees_usd` is the REAL Alpaca "
+             "commission (KNOWN, $0 for options today); on INTERNAL fills it is "
+             "estimate-or-ambiguous → typed UNAVAILABLE. The commission delta "
+             "compares the KNOWN broker value against the persisted TCM estimate "
+             "(TOTAL USD, entry one-way).")
     L.append("")
     for c in study.cohorts:
         L.append(f"## Cohort: {c.cohort.upper()}")
@@ -619,12 +785,17 @@ def render_markdown(study: StudyReport) -> str:
                  f"· wins {c.realized_wins} / losses {c.realized_losses}")
         L.append(f"- Close-fill-gap (fill between executable cross=0 and mid=1): "
                  f"n={c.gap_fraction_n}, mean={_fmt(c.gap_fraction_mean, 4)}")
+        L.append(f"- Realized commission routing: entry "
+                 f"{c.entry_commission_broker_known} broker-KNOWN / "
+                 f"{c.entry_commission_internal_unavailable} internal-UNAVAILABLE "
+                 f"· close {c.close_commission_broker_known} broker-KNOWN")
         L.append("")
         L.append("| typed delta (a − b) | n avail | n unavail | mean USD | "
                  "median USD | abstain reasons |")
         L.append("|---|---|---|---|---|---|")
         L.append(_delta_row("ENTRY realized fill vs requested limit", c.entry_vs_requested))
         L.append(_delta_row("ENTRY realized fill vs TCM expected fill", c.entry_vs_tcm))
+        L.append(_delta_row("ENTRY realized commission vs TCM estimate", c.entry_commission_vs_tcm))
         L.append(_delta_row("CLOSE realized fill vs executable cross", c.close_vs_executable_cross))
         L.append("")
     if not study.cohorts:

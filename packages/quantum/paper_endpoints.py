@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import logging
+import math
 import uuid
 import os
 import time
@@ -749,6 +750,19 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # Prepare Order
     side = ticket.legs[0].action if ticket.legs else "buy"
 
+    order_json = {
+        **ticket.model_dump(mode="json"),
+        # 06-11 credit-open sign fix — consumed by
+        # build_alpaca_order_request (mirrors is_credit_close).
+        **({"is_credit_open": True} if _entry_is_net_credit else {}),
+    }
+    # Stage-time leg greeks population (observe-only — CLAUDE.md §8 populate
+    # side; NO cap activation, never rejects). Runs on the built order_json legs
+    # BEFORE the insert, so EVERY route (internal / live-routed / shadow /
+    # dry-run) and the paper_positions.legs the fill copies these into carry a
+    # typed, source-attributed greek basis. OPEN-only (closes exempt inside).
+    _populate_stage_leg_greeks(order_json.get("legs"), position_id=position_id)
+
     order_payload = {
         "user_id": user_id,
         "portfolio_id": portfolio_id,
@@ -757,12 +771,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         "staged_at": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace_id,
         "suggestion_id": suggestion_id,
-        "order_json": {
-            **ticket.model_dump(mode="json"),
-            # 06-11 credit-open sign fix — consumed by
-            # build_alpaca_order_request (mirrors is_credit_close).
-            **({"is_credit_open": True} if _entry_is_net_credit else {}),
-        },
+        "order_json": order_json,
 
         # V3 Fields
         "requested_qty": ticket.quantity,
@@ -1104,6 +1113,140 @@ def _make_entry_quote_fetch_fn(poly):
     if _entry_quote_source_aligned():
         return lambda s: _aligned_leg_quote_fetch(poly, s)
     return lambda s: _fetch_quote_with_retry(poly, s)
+
+
+# ── Stage-time leg greeks population (observe-only; CLAUDE.md §8 populate side)
+# The greeks exposure envelope is DOUBLE-dormant: no persisted leg jsonb has
+# ever carried a `greeks` key, and every cap defaults 0 (no-limit). The
+# ledgered fix path is populate-at-stage THEN separately decide caps. This is
+# ONLY the populate side — no cap is activated, no envelope behavior changes,
+# and staging NEVER starts rejecting on missing greeks.
+_GREEKS_STATUS_POPULATED = "populated_at_stage"
+_GREEKS_STATUS_UNAVAILABLE = "unavailable_at_stage"
+# Standard OCC equity-option deliverable: 100 shares/contract. The truth-layer
+# snapshot greeks are per-CONTRACT-per-share; this is the multiplier the
+# canonical aggregate_greeks scales by (the risk-layer position model's
+# MULTIPLIER_ASSUMED_STANDARD_OCC). Recorded as CONTEXT, never a proof that a
+# non-standard (adjusted) deliverable is standard.
+_STAGE_GREEKS_MULTIPLIER = 100
+
+
+def _is_occ_symbol(sym) -> bool:
+    """True when sym looks like an OCC option contract (O:-prefixed or the bare
+    >10-char OCC form) — mirrors _resolve_quote_symbol / _validate_order_legs."""
+    return bool(sym) and (str(sym).startswith("O:") or len(str(sym)) > 10)
+
+
+def _finite_float_or_none(v) -> Optional[float]:
+    """float(v) when finite, else None. None / bool / NaN / inf / non-numeric →
+    None — NEVER a fabricated zero (H9)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _stage_leg_greeks_snapshot(sym: str) -> Optional[Dict[str, Any]]:
+    """One leg's option snapshot via the truth layer (Alpaca options snapshots
+    primary → Polygon fallback) — the SAME source set _aligned_leg_quote_fetch
+    uses for entry-quote validation. The 60s snapshot cache makes this
+    cache-coherent with the quote fetch (same snapshot, no extra provider call
+    within the TTL). Returns the canonical snapshot dict or None."""
+    from packages.quantum.services.market_data_truth_layer import (
+        MarketDataTruthLayer,
+    )
+    snaps = MarketDataTruthLayer().snapshot_many([sym]) or {}
+    return snaps.get(sym) or (next(iter(snaps.values())) if snaps else None)
+
+
+def _apply_leg_greeks(leg: Dict[str, Any], snap: Optional[Dict[str, Any]]) -> None:
+    """Stamp one leg dict with a typed greeks block from its stage-time snapshot.
+
+    SIGN CONVENTION — RAW per-contract greeks, EXACTLY as the snapshot reports
+    them (a call delta is +, a put delta is −), UNSIGNED by leg direction. This
+    matches the risk-layer canonical LegGreeks ("Per-CONTRACT greeks … Unscaled:
+    no ratio, no structure quantity, no multiplier applied"). The long/short
+    sign and the ×contracts×multiplier scaling are applied DOWNSTREAM by the
+    canonical aggregate_greeks via signed_ratio (recovered from the leg's
+    persisted action/side). We deliberately do NOT negate short legs here:
+    doing so would DOUBLE-negate against aggregate_greeks and corrupt the #1250
+    canonical-position consumer. This does not feed the dormant, D2-defective
+    risk_envelope.check_greeks — that stays exactly as-is.
+
+    All four of delta/gamma/theta/vega must be present AND finite to populate;
+    any missing/nonfinite/absent (including a Polygon feed-fallback that carries
+    no greeks) → typed unavailable marker, NEVER placeholder zeros (H9)."""
+    raw = (snap or {}).get("greeks") if isinstance(snap, dict) else None
+    source = (snap or {}).get("source") if isinstance(snap, dict) else None
+
+    values: Dict[str, float] = {}
+    complete = isinstance(raw, dict)
+    if complete:
+        for name in ("delta", "gamma", "theta", "vega"):
+            fv = _finite_float_or_none(raw.get(name))
+            if fv is None:
+                complete = False
+                break
+            values[name] = fv
+
+    if complete:
+        leg["greeks"] = values
+        leg["greeks_status"] = _GREEKS_STATUS_POPULATED
+        leg["greeks_source"] = source or "unknown"
+        # Multiplier CONTEXT (assumed standard OCC — see constant): per-contract
+        # greeks scale to dollars by × multiplier × contracts downstream.
+        leg["greeks_multiplier"] = _STAGE_GREEKS_MULTIPLIER
+        leg["greeks_as_of"] = (snap or {}).get("retrieved_ts")
+    else:
+        # Dark / partial / feed-fallback-without-greeks → typed unavailable.
+        leg["greeks"] = None
+        leg["greeks_status"] = _GREEKS_STATUS_UNAVAILABLE
+        if source:
+            leg["greeks_source"] = source
+
+
+def _populate_stage_leg_greeks(
+    legs, *, position_id=None, snapshot_fetch=None,
+) -> None:
+    """OBSERVE-ONLY: stamp per-leg greeks onto the staged order's leg jsonb from
+    the stage-time market snapshot, so a later consumer — and the
+    paper_positions.legs the fill copies these into — can read a real,
+    source-attributed greek basis. The ledgered populate side of the
+    double-dormant greeks envelope (CLAUDE.md §8): NEVER activates a cap, NEVER
+    rejects, NEVER blocks staging. A dark-greeks leg stages normally with
+    greeks=None + greeks_status='unavailable_at_stage'.
+
+    OPEN-only: a CLOSE (position_id set) creates no new position legs and is
+    exempt (mirrors _validate_entry_quotes' close exemption; the exit path is
+    left untouched). Fail-soft end-to-end — any fetch/parse error types the leg
+    unavailable and staging proceeds. Mutates the leg dicts in place."""
+    if position_id is not None:
+        return  # CLOSE order — no new position legs to populate
+    if not legs:
+        return
+    fetch = snapshot_fetch or _stage_leg_greeks_snapshot
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        sym = leg.get("symbol") or leg.get("occ_symbol")
+        if not _is_occ_symbol(sym):
+            # Non-option leg (e.g. a stock leg) — no option greeks to source.
+            leg["greeks"] = None
+            leg["greeks_status"] = _GREEKS_STATUS_UNAVAILABLE
+            continue
+        snap = None
+        try:
+            snap = fetch(sym)
+        except Exception as exc:  # fail-soft — greeks never block staging
+            logger.warning(
+                f"[STAGE_GREEKS] snapshot fetch failed for {sym}: {exc} — "
+                f"typing leg greeks unavailable (staging proceeds)"
+            )
+            snap = None
+        _apply_leg_greeks(leg, snap)
 
 
 def _leg_symbol(leg) -> Optional[str]:

@@ -306,6 +306,30 @@ class CandidateDispositionRecorder:
             ).execute(),
         )
 
+    def _cost_reconciliation(
+        self, cand: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Observe-only multi-basis cost artifact for this candidate (Lane 2C,
+        phase-2 consumer #1). Lazy import so the writer carries no static
+        ``cost_basis`` dependency (the import-lock allowlists the builder, not
+        this writer). Absolutely fail-soft: any failure returns None and the
+        artifact is simply omitted — a disposition row is NEVER lost to a cost
+        artifact failure, and the artifact NEVER feeds a decision (nothing in
+        the decision path reads this table)."""
+        if cand is None:
+            return None
+        try:
+            from packages.quantum.services.cost_reconciliation_artifact import (
+                build_cost_reconciliation,
+            )
+            return build_cost_reconciliation(cand)
+        except Exception as exc:  # never touch the write path
+            logger.debug(
+                "[CANDIDATE_DISPOSITION] cost_reconciliation skipped "
+                "(non-fatal): %s", exc,
+            )
+            return None
+
     def _demote_other_finals(self, fingerprint: str, keep_attempt: int) -> None:
         """Supersede semantics: any OTHER attempt of this identity that holds
         the final loses it — its disposition becomes ``superseded_retry`` —
@@ -401,6 +425,16 @@ class CandidateDispositionRecorder:
                 # fingerprint by construction; if it ever diverges, record
                 # the divergence rather than silently switching identity.
                 merged_detail["persisted_fingerprint_mismatch"] = fingerprint
+
+            # Observe-only multi-basis cost reconciliation (Lane 2C, phase-2
+            # consumer #1). Computed ONCE per attempt (re-finals of the same
+            # attempt inherit it via _final_details); typed 'unavailable' for
+            # any basis not reconstructable at this seam; fail-soft — a None
+            # simply omits the artifact and never blocks the write.
+            if "cost_reconciliation" not in merged_detail:
+                artifact = self._cost_reconciliation(cand)
+                if artifact is not None:
+                    merged_detail["cost_reconciliation"] = artifact
 
             prior = self._finals.get(fp)
             if prior is not None and prior != attempt:

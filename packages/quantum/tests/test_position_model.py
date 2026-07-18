@@ -516,21 +516,25 @@ class TestCurrentDefects(unittest.TestCase):
         )
 
     def test_d5_stress_can_no_longer_exceed_the_defined_risk_payoff_bound(self):
-        """INVERTED by PR-3: the production stress route clamps at the floor.
+        """INVERTED AGAIN by the D2 stress-lane fix: the unsigned delta phantom
+        this pin encoded vanishes once each leg is signed.
 
-        The defect: a linear delta extrapolation with no payoff floor could
-        win `worst = min(...)`. Now the production route floors every
-        scenario at -Σ canonical max loss; the raw phantom is preserved in
-        `spy_down_raw` but can no longer set the worst case. A defined-risk
-        structure cannot lose more than its max loss — arithmetic, not
-        policy.
+        Original (PR-3) narrative: an unsigned linear delta extrapolation
+        (4 legs × 50 × 1 × 100 = 20,000 delta $ → -$1,000 at a 5% shock,
+        2.8× the structure's true worst case) had to be CLAMPED to the payoff
+        floor. That -$1,000 was itself a D2 artifact: the four condor legs
+        alternate long/short (sell put, buy put, sell call, buy call), so with
+        equal per-leg greeks their SIGNED delta NETS TO ZERO. The stress model
+        now signs each leg via the canonical ``_direction_sign`` (the D2 fix),
+        so ``spy_down`` is ~0, there is no ``spy_down_raw`` (nothing exceeded
+        the floor to clamp), and the honest worst case is ``correlation_one``
+        (= the exact payoff bound) — the D5 clamp still GOVERNS the book, just
+        via the identity scenario rather than a phantom directional add.
         """
         condor = _f3_qqq_iron_condor()
         max_loss = analyze_payoff(condor).max_loss_total
         self.assertAlmostEqual(max_loss, 351.0, places=2)
 
-        # A phantom per-contract delta drives the linear model far past the
-        # structure's true worst case (the D5 class).
         pos = _persisted_iron_condor()
         for leg in pos["legs"]:
             leg["greeks"] = {"delta": 50.0, "vega": 0.0}
@@ -539,16 +543,20 @@ class TestCurrentDefects(unittest.TestCase):
             [pos], equity=10000.0, config=EnvelopeConfig()
         )
 
-        # Raw extrapolation: 4 legs x 50 x 1 x 100 = 20,000 delta dollars;
-        # x 5% shock = -$1,000 — 2.8x the structure's true worst case.
-        self.assertAlmostEqual(results["spy_down_raw"] * 10000.0, -1000.0, places=2)
-        # Clamped at the canonical payoff floor, exactly.
-        self.assertAlmostEqual(results["spy_down"] * 10000.0, -max_loss, places=2)
-        # The phantom can no longer win the min(): worst == the payoff bound.
+        # SIGNED: the alternating-direction condor nets to ZERO delta. The
+        # pre-D2-fix pin asserted spy_down_raw == -1000 (clamped to -351);
+        # both are gone — the phantom never forms.
+        self.assertNotIn("spy_down_raw", results)
+        self.assertAlmostEqual(results["spy_down"] * 10000.0, 0.0, places=2)
+        # The payoff bound still governs, now via the identity scenario.
+        self.assertAlmostEqual(
+            results["correlation_one"] * 10000.0, -max_loss, places=2
+        )
         self.assertAlmostEqual(results["worst_case"] * 10000.0, -max_loss, places=2)
         self.assertEqual(unavailable, {})
 
-        # The pure-form clamp the route consumes agrees with itself.
+        # The pure-form clamp the route consumes still agrees with itself (it
+        # is direction-agnostic — it bounds whatever scalar it is handed).
         clamp = clamp_stress_to_payoff(condor, -1000.0)
         self.assertTrue(clamp.applicable)
         self.assertTrue(clamp.violated)
@@ -586,7 +594,15 @@ class TestPayoffCappedStress(unittest.TestCase):
     EQUITY = 10000.0
 
     def test_credit_book_cap_binds_exactly_at_sum_max_loss(self):
-        """Phantom delta on a credit vertical: stress loss == Σ max loss."""
+        """Equal per-leg delta on a credit vertical: SIGNED delta NETS to zero.
+
+        D2 stress-lane fix: the pre-fix unsigned model reported
+        spy_down_raw = 2 legs × 50 × |qty 2| × 100 = 20,000 delta $ → -$1,000
+        at a 5% shock, then CLAMPED it to -$760. Both are D2 phantoms — a short
+        put + long put point OPPOSITE ways, so with equal deltas the signed
+        directional stress is ~0 and there is nothing to clamp. The honest
+        worst case is the identity scenario ``correlation_one`` == -Σ max loss.
+        """
         pos = _with_leg_greeks(
             _persisted_short_put_vertical(), delta=50.0, vega=0.0
         )
@@ -595,15 +611,19 @@ class TestPayoffCappedStress(unittest.TestCase):
         )
         sr = result.stress_results
 
-        # Raw linear model: 2 legs x 50 x |qty 2| x 100 = 20,000 delta
-        # dollars; x 5% shock = -$1,000 > the $760 the structure can lose.
-        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -1000.0, places=2)
-        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -760.0, places=2)
+        self.assertNotIn("spy_down_raw", sr)  # old pin: -1000 → gone
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, 0.0, places=2)
         self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -760.0, places=2)
         self.assertAlmostEqual(sr["correlation_one"], sr["worst_case"], places=10)
         self.assertEqual(result.stress_unavailable, {})
 
     def test_debit_book_cap_binds_exactly_at_sum_max_loss(self):
+        """Equal per-leg delta on a debit vertical: SIGNED delta NETS to zero.
+
+        Pre-D2-fix pin: unsigned 2 legs × 50 × |qty 3| × 100 = 30,000 → -$1,500
+        at a 5% shock, clamped to -$450. A long call + short call oppose, so the
+        equal-delta signed stress is ~0 and correlation_one governs the worst.
+        """
         pos = _with_leg_greeks(
             _persisted_debit_call_vertical(), delta=50.0, vega=0.0
         )
@@ -612,13 +632,20 @@ class TestPayoffCappedStress(unittest.TestCase):
         )
         sr = result.stress_results
 
-        # 2 legs x 50 x |qty 3| x 100 = 30,000; x 5% = -$1,500 vs $450 cap.
-        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -1500.0, places=2)
-        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -450.0, places=2)
+        self.assertNotIn("spy_down_raw", sr)  # old pin: -1500 → gone
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, 0.0, places=2)
         self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -450.0, places=2)
+        self.assertAlmostEqual(sr["correlation_one"] * self.EQUITY, -450.0, places=2)
 
     def test_mixed_book_cap_is_the_book_level_sum(self):
-        """Credit + debit book: the floor is Σ per-structure max losses."""
+        """Credit + debit book: each balanced structure nets to zero signed
+        delta; the book floor is still Σ per-structure max losses via
+        correlation_one.
+
+        Pre-D2-fix pin: unsigned spy_down_raw = -$2,500 (both structures'
+        4 legs added same-signed), clamped to -$1,210. Signing dissolves the
+        per-structure phantom, so correlation_one == -(760 + 450) governs.
+        """
         book = [
             _with_leg_greeks(_persisted_short_put_vertical(), delta=50.0, vega=0.0),
             _with_leg_greeks(_persisted_debit_call_vertical(), delta=50.0, vega=0.0),
@@ -628,14 +655,14 @@ class TestPayoffCappedStress(unittest.TestCase):
         )
         sr = result.stress_results
 
-        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -2500.0, places=2)
-        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -(760.0 + 450.0), places=2)
+        self.assertNotIn("spy_down_raw", sr)  # old pin: -2500 → gone
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, 0.0, places=2)
         self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -1210.0, places=2)
         self.assertAlmostEqual(sr["correlation_one"] * self.EQUITY, -1210.0, places=2)
 
     def test_healthy_uncapped_book_matches_the_legacy_model_exactly(self):
-        """Stress under the cap: values equal the legacy arithmetic, no
-        _raw keys, no unavailability — the healthy path is unchanged."""
+        """Stress under the cap: values equal the SIGNED linear arithmetic, no
+        _raw keys, no unavailability — the healthy path clamps nothing."""
         pos = _with_leg_greeks(
             _persisted_short_put_vertical(), delta=0.30, vega=0.05
         )
@@ -643,13 +670,19 @@ class TestPayoffCappedStress(unittest.TestCase):
         result = check_all_envelopes([pos], equity=self.EQUITY, config=config)
         sr = result.stress_results
 
-        # Replicate the legacy computation with identical expressions.
+        # Independent oracle: replicate the linear model WITH the per-leg sign
+        # (a local buy/sell map, not the production helper), the D2-fixed
+        # arithmetic. For this hedged vertical the signed sums net to zero.
+        _sign = {"buy": 1, "sell": -1}
         qty = float(pos["quantity"])
         total_delta = 0.0
         total_vega = 0.0
         for leg in pos["legs"]:
-            total_delta += float(leg["greeks"]["delta"]) * abs(qty) * 100
-            total_vega += float(leg["greeks"]["vega"]) * abs(qty) * 100
+            s = _sign[leg["action"]]
+            total_delta += s * float(leg["greeks"]["delta"]) * abs(qty) * 100
+            total_vega += s * float(leg["greeks"]["vega"]) * abs(qty) * 100
+        self.assertEqual(total_delta, 0.0)  # short put + long put, equal delta
+        self.assertEqual(total_vega, 0.0)
         expected_spy = (total_delta * config.stress_spy_down_pct * -1) / self.EQUITY
         expected_vix = (total_vega * config.stress_vix_spike_pct * 100) / self.EQUITY
 
@@ -779,6 +812,213 @@ class TestPayoffCappedStress(unittest.TestCase):
         self.assertEqual(unavailable["spy_down"]["missing_field"], "delta")
         self.assertEqual(unavailable["spy_down"]["legs_missing"], 2)
         self.assertIn("vix_spike", results)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D2 residual — SIGNED greek aggregation in the stress model
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestStressSignedGreekAggregation(unittest.TestCase):
+    """compute_stress_scenarios signs each leg's delta/vega by its OWN
+    direction via the canonical ``position_model._direction_sign`` — the SAME
+    seam check_greeks (#1269) reuses — so a long and a short leg NET instead of
+    unsigned-ADD. The pre-fix ``greek * abs(qty) * 100`` add treated a
+    delta-hedged spread as if every leg pointed the same way; the payoff clamp
+    bounded the result, so it was bounded-SAFE, but a bounded phantom is still a
+    dishonest measurement now that legs can carry real greeks (post-#1259).
+
+    All tests DRIVE the production entrypoint (``check_all_envelopes`` — the
+    route the autopilot breaker, intraday monitor, MTM, and midday orchestrator
+    all invoke — or ``compute_stress_scenarios``) and assert the top-level
+    stress OUTPUT (§9: inject at the origin, assert the truth at the top). The
+    payoff clamp, the ``correlation_one`` identity, and caps-0 dormancy are
+    preserved; only the sign is new.
+    """
+
+    EQUITY = 10000.0
+
+    @staticmethod
+    def _per_leg(pos, greeks_by_index):
+        """Attach DISTINCT greeks per leg index (asymmetric books)."""
+        for i, g in greeks_by_index.items():
+            pos["legs"][i]["greeks"] = dict(g)
+        return pos
+
+    def test_condor_signed_nets_to_zero_naming_the_unsigned_phantom(self):
+        """Symmetric iron condor, equal per-leg delta: the SIGNED sum is zero
+        while the old UNSIGNED add fabricated a -$1,000 directional phantom."""
+        pos = _with_leg_greeks(_persisted_iron_condor(), delta=50.0, vega=0.0)
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        # THE OLD PHANTOM, named exactly: the unsigned add summed all 4 legs
+        # same-signed → 4 × 50 × |qty 1| × 100 = 20,000 delta $ → -$1,000 at a
+        # 5% shock (then clamped to -$351). Signing (sell put −1, buy put +1,
+        # sell call −1, buy call +1) makes it vanish.
+        unsigned_phantom = 4 * 50.0 * 1 * 100 * 0.05 * -1
+        self.assertAlmostEqual(unsigned_phantom, -1000.0, places=6)
+
+        self.assertNotIn("spy_down_raw", sr)  # nothing exceeds the floor now
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, 0.0, places=2)
+        self.assertAlmostEqual(sr["correlation_one"] * self.EQUITY, -351.0, places=2)
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -351.0, places=2)
+        self.assertEqual(result.stress_unavailable, {})
+
+    def test_net_long_delta_book_loses_on_a_down_move(self):
+        """Asymmetric debit vertical (net long delta) loses on a down shock —
+        the SIGNED directional result the unsigned add could never place."""
+        pos = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 0.60, "vega": 0.0},   # long call  (+1)
+             1: {"delta": 0.10, "vega": 0.0}},  # short call (−1)
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        net_signed_delta = (0.60 - 0.10) * 3 * 100  # 150 delta $ (net +0.50/ct)
+        expected_spy = net_signed_delta * 0.05 * -1 / self.EQUITY
+        self.assertNotIn("spy_down_raw", sr)  # -7.5 is well inside the -450 floor
+        self.assertAlmostEqual(sr["spy_down"], expected_spy, places=10)
+        self.assertLess(sr["spy_down"], 0.0)  # net long delta → down move loses
+
+    def test_net_short_delta_book_gains_on_a_down_move(self):
+        """The mirror: a net-SHORT-delta book GAINS on a down shock. The
+        unsigned add (abs magnitudes) can only ever be a loss — a signed gain
+        is the qualitative proof the D2 fix landed."""
+        pos = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 0.10, "vega": 0.0},   # long call  (+1)
+             1: {"delta": 0.60, "vega": 0.0}},  # short call (−1) → net −0.50/ct
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        self.assertGreater(sr["spy_down"], 0.0)  # net short delta → down = gain
+        # A gain never wins min(): the worst case is still the payoff bound.
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -450.0, places=2)
+
+    def test_qty_scales_the_signed_stress_linearly(self):
+        """|position quantity| × 100 magnitude scaling is preserved (only the
+        sign changed): the same net exposure at qty 1 vs qty 3 scales 3×."""
+        def book(qty):
+            return [self._per_leg(
+                _persisted_debit_call_vertical(qty=qty),
+                {0: {"delta": 5.0, "vega": 0.0},
+                 1: {"delta": 1.0, "vega": 0.0}},
+            )]
+
+        s1 = check_all_envelopes(
+            book(1), equity=self.EQUITY, config=_permissive_config()
+        ).stress_results["spy_down"] * self.EQUITY
+        s3 = check_all_envelopes(
+            book(3), equity=self.EQUITY, config=_permissive_config()
+        ).stress_results["spy_down"] * self.EQUITY
+
+        # net (5−1)=4 × 100 × 5% = 20/contract-lot → qty1 -20, qty3 -60.
+        self.assertAlmostEqual(s1, -20.0, places=2)
+        self.assertAlmostEqual(s3, -60.0, places=2)
+        self.assertAlmostEqual(s3, 3 * s1, places=2)
+
+    def test_clamp_still_binds_when_signed_stress_exceeds_the_floor(self):
+        """The D5 payoff clamp still governs post-D2: a NET-directional book
+        whose SIGNED delta stress exceeds -Σ max loss is clamped to the floor,
+        the raw signed value preserved in ``spy_down_raw``."""
+        pos = self._per_leg(
+            _persisted_debit_call_vertical(),   # max loss 450
+            {0: {"delta": 60.0, "vega": 0.0},   # long call  (+1)
+             1: {"delta": 10.0, "vega": 0.0}},  # short call (−1) → net +50/ct
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        # SIGNED raw = 50 × |qty 3| × 100 × 5% × −1 = -750 < -450 floor.
+        self.assertAlmostEqual(sr["spy_down_raw"] * self.EQUITY, -750.0, places=2)
+        self.assertAlmostEqual(sr["spy_down"] * self.EQUITY, -450.0, places=2)
+        self.assertAlmostEqual(sr["worst_case"] * self.EQUITY, -450.0, places=2)
+        self.assertEqual(result.stress_unavailable, {})
+
+    def test_signed_vega_drives_the_vix_scenario(self):
+        """Vega is signed too: a net-long-vega book GAINS on a vol spike."""
+        pos = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 0.0, "vega": 2.0},   # long call  (+1)
+             1: {"delta": 0.0, "vega": 0.5}},  # short call (−1) → net +1.5/ct
+        )
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        sr = result.stress_results
+
+        net_vega = (2.0 - 0.5) * 3 * 100          # 450
+        expected_vix = net_vega * 0.50 * 100 / self.EQUITY  # +2.25
+        self.assertAlmostEqual(sr["vix_spike"], expected_vix, places=10)
+        self.assertGreater(sr["vix_spike"], 0.0)
+
+    def test_unknown_or_missing_side_rejects_never_fabricates_an_add(self):
+        """An unsignable leg cannot enter a directional sum. In the stress lane
+        it is rejected UPSTREAM by ``_pos_risk`` (``normalize_position`` calls
+        the same ``_direction_sign``), so the whole computation raises
+        ``PositionRiskUnavailable`` — the loudest H9 flag, never a fabricated
+        unsigned contribution. (check_greeks, which has no ``_pos_risk`` gate,
+        instead types the leg uncovered; both lane conventions are honest.)"""
+        # (a) unknown side TOKEN
+        bad_token = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 50.0, "vega": 0.0}, 1: {"delta": 50.0, "vega": 0.0}},
+        )
+        bad_token["legs"][0]["action"] = "frobnicate"
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios([bad_token], self.EQUITY, _permissive_config())
+        with self.assertRaises(PositionRiskUnavailable):
+            check_all_envelopes(
+                [bad_token], equity=self.EQUITY, config=_permissive_config()
+            )
+
+        # (b) side MISSING entirely (no action, no side)
+        no_side = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 50.0, "vega": 0.0}, 1: {"delta": 50.0, "vega": 0.0}},
+        )
+        del no_side["legs"][0]["action"]
+        self.assertNotIn("side", no_side["legs"][0])
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios([no_side], self.EQUITY, _permissive_config())
+
+    def test_caps_zero_is_non_gating_for_every_shape(self):
+        """The greek caps default 0 (no-limit) and stay dormant: even a large
+        SIGNED directional book writes NO greeks_* violation. The D2 fix is a
+        measurement correction, not an armed cap — no monitor/force-close
+        behavior changes."""
+        directional = self._per_leg(
+            _persisted_debit_call_vertical(),
+            {0: {"delta": 60.0, "vega": 5.0}, 1: {"delta": 10.0, "vega": 1.0}},
+        )
+        shapes = [
+            _with_leg_greeks(_persisted_short_put_vertical(), delta=50.0, vega=3.0),
+            _with_leg_greeks(_persisted_debit_call_vertical(), delta=50.0, vega=3.0),
+            _with_leg_greeks(_persisted_iron_condor(), delta=50.0, vega=3.0),
+            directional,
+        ]
+        for pos in shapes:
+            config = _permissive_config()  # greek caps left at their 0 default
+            result = check_all_envelopes(
+                [pos], equity=self.EQUITY, config=config
+            )
+            greek_v = [
+                v for v in result.violations if v.envelope.startswith("greeks_")
+            ]
+            self.assertEqual(
+                greek_v, [], f"caps-0 must be non-gating for {pos['id']}"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════

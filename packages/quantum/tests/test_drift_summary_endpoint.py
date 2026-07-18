@@ -1,13 +1,49 @@
+import os
+import sys
+import types
 
 import pytest
 from unittest.mock import MagicMock, patch
-from fastapi.testclient import TestClient
-import sys
-import os
 
+# ---------------------------------------------------------------------------
+# Environment BEFORE importing the app module. packages.quantum.api runs
+# validate_security_config() at import time; without these vars the module
+# raises SecurityConfigError at COLLECTION. In the full suite an earlier
+# sibling (test_rebalance_endpoint_contract.py / test_api_info_disclosure.py)
+# happens to seed them first, so this file only errored when collected SOLO
+# or first — an ordering artifact, not a real failure. setdefault → the real
+# CI env always wins; this only fills the local gap.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret")
+os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321")
+os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-key")
+os.environ.setdefault(
+    "ENCRYPTION_KEY", "ke2AXS883XK_QFY9uLNGUiQlce1MifOaZNmmn06eoC8="
+)
+os.environ.setdefault("TASK_SIGNING_SECRET", "test-task-secret")
+os.environ.setdefault("POLYGON_API_KEY", "test-polygon-key")
 
-from packages.quantum.api import app
-from packages.quantum.security import get_current_user, get_supabase_user_client
+# Windows-local shim: rq's import raises ValueError (no 'fork' context) so
+# packages.quantum.api — which transitively imports rq at module level — is
+# unimportable locally (the known 9-file fork class). CI (Linux) imports the
+# real rq; the shim only engages where rq itself cannot load.
+# Pattern copied from test_ops_health_q30_dedup.py /
+# test_rebalance_endpoint_contract.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from packages.quantum.api import app  # noqa: E402
+from packages.quantum.security import (  # noqa: E402
+    get_current_user,
+    get_supabase_user_client,
+)
 
 client = TestClient(app)
 
@@ -25,6 +61,14 @@ app.dependency_overrides[get_supabase_user_client] = mock_get_supabase_client_de
 
 @pytest.fixture
 def mock_supabase():
+    # Re-assert the auth overrides per test. `app` is a process-global shared
+    # with every other api-importing test; a sibling's teardown that deletes
+    # get_current_user / get_supabase_user_client overrides by __qualname__
+    # (e.g. test_rebalance_endpoint_contract.py) would otherwise strand these
+    # tests at 401 whenever it runs first — an ordering artifact, not a real
+    # failure. This keeps the file order-independent.
+    app.dependency_overrides[get_current_user] = mock_get_current_user
+    app.dependency_overrides[get_supabase_user_client] = mock_get_supabase_client_dep
     mock_supabase_client.reset_mock()
     return mock_supabase_client
 

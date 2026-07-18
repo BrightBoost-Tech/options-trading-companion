@@ -77,12 +77,42 @@ AUTH_HEADERS = {"X-Cron-Secret": CRON_SECRET}
 USER = "11111111-2222-3333-4444-555555555555"
 
 
+def _iter_route_candidates():
+    """Yield route objects from ``app.routes`` across FastAPI versions.
+
+    fastapi<=0.135 FLATTENS ``include_router()``: every included endpoint
+    appears in ``app.routes`` as a prefix-qualified APIRoute. fastapi
+    0.139.x (starlette 1.x, what CI resolves the UNPINNED
+    ``fastapi>=0.104.0`` to) instead appends an ``_IncludedRouter``
+    CONTAINER — the real APIRoute objects live on
+    ``container.original_router.routes`` (path still prefix-qualified,
+    dependant intact) while a flat ``app.routes`` scan sees ZERO /tasks
+    routes even though requests still dispatch through the container
+    (CI run 29623820938: lookup ``got []`` with the unauthenticated-401
+    test — served by the same app — passing 0.2s earlier). Walk both
+    shapes; dedup by identity.
+    """
+    seen = set()
+    stack = list(app.routes)
+    while stack:
+        route = stack.pop()
+        if id(route) in seen:
+            continue
+        seen.add(id(route))
+        yield route
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            stack.extend(getattr(inner, "routes", None) or [])
+        stack.extend(getattr(route, "routes", None) or [])
+
+
 def _route_auth_dependency():
     """Resolve the ACTUAL auth dependency callable bound into the activation
-    route (route-resolved pattern from test_rebalance_endpoint_contract.py).
+    route (route-resolved pattern from test_rebalance_endpoint_contract.py,
+    made include_router-shape-robust via _iter_route_candidates).
 
     Immune by construction to the poisoned-parent from-import (see module
-    docstring): the callable resolved off ``app.routes`` IS the
+    docstring): the callable resolved off the route table IS the
     ``verify_task_signature(...)._dependency`` closure the route calls, and
     its ``__globals__`` is the REAL task_signing_v4 module dict —
     ``_verify_legacy_cron_secret`` reads ALLOW_LEGACY_CRON_SECRET /
@@ -90,7 +120,7 @@ def _route_auth_dependency():
     """
     calls = [
         d.call
-        for r in app.routes
+        for r in _iter_route_candidates()
         if getattr(r, "path", "") == ROUTE
         for d in r.dependant.dependencies
         if (getattr(d.call, "__module__", "") or "").endswith("task_signing_v4")

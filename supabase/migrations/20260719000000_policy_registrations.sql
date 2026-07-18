@@ -16,14 +16,17 @@
 --     runtime truth. The ENVIRONMENT stores only kill switches + the epoch
 --     name — NEVER the catalog of 50 policies.
 --
--- Immutability convention (enforced by the trigger below): once a row is
--- approval_status='approved', its identity + parameterization are frozen —
--- policy_registration_id / policy_config / config_canonical / config_hash /
--- schema_version can never change. An approved policy may still be transitioned
--- to 'retired' or 'revoked' (status change only); it can never be silently
--- re-parameterized under a stable id (that would let a bound fleet slot's
--- meaning drift out from under it). A new parameterization is a NEW row with a
--- NEW id (and, for the same epoch, a distinct config_hash).
+-- Immutability convention (enforced by the trigger below): 'draft' is a
+-- one-way ORIGIN state — once a row leaves draft it can never return, and its
+-- identity + parameterization freeze (policy_registration_id / policy_config /
+-- config_canonical / config_hash / schema_version / effective_epoch can never
+-- change while the row is approved / retired / revoked). This closes the
+-- status-round-trip bypass (approved -> draft -> edit -> re-approve). An
+-- approved policy may still be transitioned FORWARD to 'retired' or 'revoked'
+-- (status change only); it can never be silently re-parameterized under a
+-- stable id (that would let a bound fleet slot's meaning drift out from under
+-- it). A new parameterization is a NEW row with a NEW id (and, for the same
+-- epoch, a distinct config_hash).
 --
 -- config_hash is DERIVED, never client-invented: the seed transaction computes
 -- encode(extensions.digest(config_canonical,'sha256'),'hex') server-side.
@@ -57,26 +60,45 @@ CREATE INDEX IF NOT EXISTS idx_policy_registrations_epoch_status
     ON policy_registrations (effective_epoch, approval_status);
 
 -- ── Immutability-after-approval trigger ──────────────────────────────────────
--- RAISEs on any UPDATE of a protected column while the row IS approved. Status
--- transitions (approved -> retired/revoked) and touching approved_at are
--- allowed; the frozen parameterization is not.
+-- Two guards, closing the status-round-trip bypass:
+--   (a) 'draft' is a ONE-WAY ORIGIN — once a row leaves draft it can NEVER
+--       return to draft. This defeats the approved -> draft -> edit config ->
+--       re-approve (and approved -> retired -> edit -> re-approve) bypass.
+--   (b) The protected columns freeze whenever the row is NOT draft
+--       (approved / retired / revoked all frozen), so no status detour can
+--       carry a parameterization edit. effective_epoch is protected too — an
+--       approved row's epoch must not move.
+-- Allowed forward-only status transitions (draft -> approved -> retired /
+-- revoked, and approved_at edits) never touch a protected column, so they pass.
 CREATE OR REPLACE FUNCTION policy_registrations_immutable_after_approval()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF OLD.approval_status = 'approved' THEN
+    -- (a) draft is a one-way origin: no return to draft from a non-draft state.
+    IF OLD.approval_status <> 'draft' AND NEW.approval_status = 'draft' THEN
+        RAISE EXCEPTION
+            'policy_registrations: % cannot return to draft from % '
+            '(draft is a one-way origin state — the round-trip bypass is closed)',
+            OLD.policy_registration_id, OLD.approval_status
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+
+    -- (b) protected columns are frozen once the row has left draft.
+    IF OLD.approval_status <> 'draft' THEN
         IF NEW.policy_registration_id IS DISTINCT FROM OLD.policy_registration_id
            OR NEW.policy_config       IS DISTINCT FROM OLD.policy_config
            OR NEW.config_canonical    IS DISTINCT FROM OLD.config_canonical
            OR NEW.config_hash         IS DISTINCT FROM OLD.config_hash
            OR NEW.schema_version      IS DISTINCT FROM OLD.schema_version
+           OR NEW.effective_epoch     IS DISTINCT FROM OLD.effective_epoch
         THEN
             RAISE EXCEPTION
-                'policy_registrations: % is approved — policy_registration_id / '
+                'policy_registrations: % is % — policy_registration_id / '
                 'policy_config / config_canonical / config_hash / schema_version '
-                'are immutable (retire or revoke instead of re-parameterizing)',
-                OLD.policy_registration_id
+                '/ effective_epoch are immutable once the row leaves draft '
+                '(retire or revoke instead of re-parameterizing)',
+                OLD.policy_registration_id, OLD.approval_status
                 USING ERRCODE = 'restrict_violation';
         END IF;
     END IF;

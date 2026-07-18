@@ -37,7 +37,7 @@ Every varied value lies inside the 3-anchor CONVEX HULL `[min_anchor, max_anchor
 - Total rows: **50** (anchors 3, single-axis 39, two-axis 8)
 - Per anchor lineage (incl. the anchor row): aggressive=17, neutral=17, conservative=16
 - Axis coverage (times each axis is varied across all rows): stop_loss_pct=9, target_profit_pct=9, min_score_threshold=8, risk_multiplier=8, max_risk_pct_per_trade=4, budget_cap_pct=6, max_positions_open=5, max_suggestions_per_day=3, min_dte_to_exit=3
-- Hash distinctness: all **50** `config_canonical` strings and all **50** `config_hash` values are distinct (asserted here and in the seed's post-commit `DO` block).
+- Hash distinctness: all **50** `config_canonical` strings and all **50** `config_hash` values are distinct (asserted here and in the seed's in-transaction (pre-commit) `DO` block).
 
 ## Full grid
 

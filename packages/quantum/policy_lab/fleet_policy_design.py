@@ -31,7 +31,8 @@ Design contract:
     declared PolicyConfig type (float / int / str), then
     json.dumps(sort_keys=True, separators=(",", ":")). config_hash is the
     SHA-256 hex of config_canonical. All 50 canonical strings (and hashes) are
-    distinct (asserted here and in the seed's post-commit DO block).
+    distinct (asserted here and in the seed's in-transaction (pre-commit) DO
+    block).
 """
 
 from __future__ import annotations
@@ -512,7 +513,7 @@ def render_manifest() -> str:
     out.append(
         "- Hash distinctness: all **50** `config_canonical` strings and all "
         "**50** `config_hash` values are distinct (asserted here and in the "
-        "seed's post-commit `DO` block)."
+        "seed's in-transaction (pre-commit) `DO` block)."
     )
     out.append("")
     out.append("## Full grid")
@@ -564,7 +565,7 @@ def render_seed_sql() -> str:
     out.append("-- config_hash is DERIVED here (never client-invented): the INSERT computes")
     out.append("-- encode(extensions.digest(config_canonical,'sha256'),'hex') inside the")
     out.append("-- transaction. pgcrypto is installed (schema `extensions`, verified via MCP).")
-    out.append("-- The post-commit DO block re-asserts: exactly 50 rows, 50 distinct hashes,")
+    out.append("-- The in-transaction (pre-commit) DO block re-asserts: exactly 50 rows, 50 distinct hashes,")
     out.append("-- 50 distinct canonical strings, and hash==sha256(canonical) for every row —")
     out.append("-- any failure RAISEs and rolls the whole seed back.")
     out.append("-- =============================================================================")

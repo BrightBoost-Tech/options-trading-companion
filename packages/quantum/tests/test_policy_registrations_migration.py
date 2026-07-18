@@ -60,19 +60,45 @@ def test_unique_epoch_hash(sql):
     assert "UNIQUE (effective_epoch, config_hash)" in sql
 
 
+def _trigger_body(sql):
+    """The function body only (function name -> the DROP TRIGGER that follows).
+    Excludes the header comment + the COMMENTs at the end of the file."""
+    start = sql.index("RETURNS trigger")
+    end = sql.index("DROP TRIGGER IF EXISTS trg_policy_registrations_immutable")
+    return sql[start:end]
+
+
 def test_immutability_trigger_present(sql):
     assert ("CREATE OR REPLACE FUNCTION "
             "policy_registrations_immutable_after_approval()") in sql
     assert "BEFORE UPDATE ON policy_registrations" in sql
     assert "trg_policy_registrations_immutable" in sql
-    # the frozen columns are all named in the guard
-    guard = sql[sql.index("policy_registrations_immutable_after_approval()"):]
+    body = _trigger_body(sql)
+    # The frozen columns — now INCLUDING effective_epoch (LOW-2) — are all named.
     for col in ("policy_registration_id", "policy_config", "config_canonical",
-                "config_hash", "schema_version"):
-        assert f"NEW.{col}" in guard and f"OLD.{col}" in guard
-    assert "RAISE EXCEPTION" in guard
-    # only fires while the row IS approved
-    assert "OLD.approval_status = 'approved'" in guard
+                "config_hash", "schema_version", "effective_epoch"):
+        assert f"NEW.{col}" in body and f"OLD.{col}" in body
+    assert "RAISE EXCEPTION" in body
+    # Single-UPDATE freeze fires whenever the row is NOT draft (approved /
+    # retired / revoked) — NOT the old approved-only guard.
+    assert "OLD.approval_status <> 'draft'" in body
+
+
+def test_draft_is_one_way_origin_round_trip_blocked(sql):
+    """MEDIUM fix: the approved->draft->edit->re-approve (and retired/revoked)
+    round-trip bypass is closed — no return to draft from a non-draft state."""
+    body = _trigger_body(sql)
+    assert "NEW.approval_status = 'draft'" in body
+    assert "RAISE EXCEPTION" in body
+    # The old bypassable approved-only guard must be gone.
+    assert "OLD.approval_status = 'approved'" not in body
+
+
+def test_effective_epoch_frozen_after_approval(sql):
+    """LOW-2: an approved row's epoch must not move."""
+    body = _trigger_body(sql)
+    assert re.search(
+        r"NEW\.effective_epoch\s+IS DISTINCT FROM\s+OLD\.effective_epoch", body)
 
 
 def test_rls_enabled_and_service_role_only(sql):

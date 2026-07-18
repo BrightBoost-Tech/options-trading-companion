@@ -10,7 +10,7 @@
 -- config_hash is DERIVED here (never client-invented): the INSERT computes
 -- encode(extensions.digest(config_canonical,'sha256'),'hex') inside the
 -- transaction. pgcrypto is installed (schema `extensions`, verified via MCP).
--- The post-commit DO block re-asserts: exactly 50 rows, 50 distinct hashes,
+-- The in-transaction (pre-commit) DO block re-asserts: exactly 50 rows, 50 distinct hashes,
 -- 50 distinct canonical strings, and hash==sha256(canonical) for every row —
 -- any failure RAISEs and rolls the whole seed back.
 -- =============================================================================

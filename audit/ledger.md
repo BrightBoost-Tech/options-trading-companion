@@ -4,6 +4,41 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-18 — WEEKEND ORCHESTRATOR (Sat; fable + ≤6 opus; serialized production writes) · status:shipped
+
+Full record: `docs/review/weekend-results-2026-07-18.md`. Four data
+corrections committed serially, each opus-revalidated exact-set first,
+broker/alert checkpoint after each (broker 0/0 + 0 crit/high throughout):
+**F-CREDIT-SIGN applied** (fp b780271c…; 19 orders / 18 positions −14,367 /
+19 ledger adjustments −16,971 / 20 learning / 9 policy; census-zero after;
+2 win→loss flips QQQ −224.04 + AMD −242.00; shadow-only, streak breaker
+unaffected) · **six 04-09 stale orders → cancelled** (fp 04317fc1…) ·
+**seventh row a94a2761 → cancelled/local_validation_reject_never_sent**
+(investigation CONCLUSIVE + second-review PASS-WITH-AMENDMENT; plan fp
+5d5cd9fc…; 'rejected' rejected — codebase never persists it) · **five
+orphan job_runs → cancelled** (fp 40258ba9…; CAS-guarded). **Legacy-terminal
+boundary now FULLY CLEAN (0/0/0)** — the SEVEN activation blockers are
+resolved. Six code lanes merged w/ adversarial review + per-merge deploy
+verify: #1257 4b311180 (landmine defused) · #1256 25d0f494 + **migration
+20260718144818 APPLIED** (job_runs CHECK + 'partial'; zero rows changed;
+receipt 38e5ecd9…; NEVER REAPPLY) · #1258 72f689c0 (cost-recon artifact,
+zero readers) · #1259 7f393580 (stage-time leg greeks — the greeks envelope
+is now SINGLE-dormant: legs populated forward, caps still 0) · #1260
+264b720d (⑤ study: **INSUFFICIENT_EVIDENCE** — 100% challenger abstention,
+blocker = stage-seam iv/spot/delta capture, not model quality) · #1261
+e0a1584 (check_greeks null-safe + greeks_coverage; dormancy byte-proven).
+**Fleet: BLOCKED_FLEET_PROVISION** (env-gate FLEET_ACTIVATION_AUTHORIZED
+required by execute_provision + no 50 pre-registered policy ids; owner
+manifest in bundle `fleet-readiness-2026-07-18.md`; zero fleet writes;
+activation forbidden+untouched). **NEW findings:** ① nightly audit runner
+DIED 07-16 + 07-17 (no reports; 07-18 ran broker-blind) — runner
+reliability P1; ② BE deploy FAILED at e0a1584 despite clean container
+start (cause NOT-PROVEN; BE serving 264b720d; mixed backend at close —
+morning ritual verifies convergence after the docs merge); ③ erratum:
+job_runs terminal vocabulary is the six-status set (cancelled/dead_lettered
+ARE terminal). Pending naturals unchanged + new: first natural 'partial'
+row · challenger scorability (needs stage-seam iv/spot capture).
+
 ## 2026-07-18 — THREE MIGRATIONS APPLIED (Fable migration orchestrator, opus reviews) · status:shipped
 
 Applied serially 03:34–03:40Z, market closed, verbatim from main `aeab21d8`

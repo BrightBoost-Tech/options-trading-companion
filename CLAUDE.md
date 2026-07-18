@@ -382,8 +382,9 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   NON-DEFAULT branch and never reached main — replacements are draft PRs
   (backlog owns them). F-CREDIT-SIGN (07-15 nightly, HIGH) CONFIRMED at
   `b3cf45b`, fix in draft — internal-fill credit closes overstate realized
-  P&L until it merges; treat shadow realized_pl for credit internal fills as
-  suspect (§8-class liar until fixed). 07-18: the Friday sprint
+  P&L until it merges (fix merged #1240; the HISTORICAL book was corrected
+  07-18 — see the weekend entry below — shadow realized_pl is no longer
+  suspect). 07-18: the Friday sprint
   (#1246-#1253) is MERGED+DEPLOYED at `c51f41eb` — ⑤ foundation, cost-basis
   parity locks, payoff-capped stress, origin provenance, fleet transaction
   (dry-run-only; strict =1 gate), dispositions+quote-provenance writers.
@@ -392,8 +393,21 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   `candidate_terminal_dispositions`→20260718033912 ·
   `option_quote_provenance`→20260718034013 — **NEVER REAPPLY**; receipts in
   risk_alerts `migration_apply`); writers self-activate, natural runtime
-  proof pending. Zero fleet provisioning/activation; fleet activation
-  blockers = SEVEN rows. Draft-PR tracking lives
+  proof pending. **07-18 SAT weekend run** (`docs/review/
+  weekend-results-2026-07-18.md`): F-CREDIT-SIGN historical correction
+  APPLIED (fp b780271c…; 19/18/19/20/9 rows; −14,367 realized / −16,971
+  cash; census-zero) · the SEVEN activation blockers RESOLVED (six stale
+  orders fp 04317fc1… + seventh row fp 5d5cd9fc… → cancelled) · five
+  orphan job_runs reconciled (fp 40258ba9…) — **legacy-terminal boundary
+  CLEAN**. Merged+deployed: #1257 4b311180 · #1256 25d0f494 + migration
+  `20260718144818` job_runs-'partial' APPLIED (receipt 38e5ecd9…; NEVER
+  REAPPLY) · #1258 72f689c0 · #1259 7f393580 (stage-time leg greeks) ·
+  #1260 264b720d (⑤ study: INSUFFICIENT_EVIDENCE) · #1261 e0a1584
+  (check_greeks null-safe; ⚠ BE deploy FAILED on clean start — BE serves
+  264b720d pending the docs-merge redeploy). Fleet:
+  BLOCKED_FLEET_PROVISION (env gate + no 50 policy ids; owner manifest in
+  bundle). Zero fleet provisioning/activation; zero broker writes.
+  Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
 
@@ -561,12 +575,16 @@ unscheduled operator-triggered `replay_integrity_check` → `background`
 
 ## 8. KNOWN LIARS & SEAMS
 
-- **The greeks exposure envelope is DOUBLE-dormant** (verified 07-02): no
-  leg jsonb has EVER carried a `greeks` key (check_greeks sums zeros since
-  inception) AND all four caps default 0 = no-limit. Anything calling it
-  live protection — including old copies of §5 — is lying. Fix path:
-  populate greeks on legs at stage time (snapshots already carry them),
-  THEN decide caps. Backlogged; do not silently populate.
+- **The greeks exposure envelope is SINGLE-dormant since 07-18** (was
+  DOUBLE-dormant, verified 07-02): #1259 populates per-leg greeks at stage
+  time going forward (complete-finite dict or typed `greeks=None` +
+  `greeks_status` — never partial, never fabricated zeros), and #1261 made
+  check_greeks null-safe with a typed `greeks_coverage` field. BUT all four
+  caps still default 0 = no-limit, so it is STILL NOT live protection — and
+  the reported `portfolio_greeks` aggregate now shows non-zero values
+  computed with the D2-defective unsigned add (a lying display; the honest
+  consumer is `aggregate_greeks`). Arming caps is a separate owner decision
+  and must consume `greeks_coverage`; historical legs remain greeks-less.
 - **Shadow-cohort ledgers are partly fiction** (quantified 07-02,
   `docs/specs/shadow_fill_realism.md`): shadows fill 100% by construction
   at 5–17× live size; live fill rate ≈1/3 (10 of ~54 orders died
@@ -820,13 +838,16 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; migration status updated 07-18)
+## Current overnight standing (2026-07-16; updated through the 07-18 weekend run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
-  semantics. Fleet schema applied 07-17 (`20260717052208`) and the fleet
+  semantics. Fleet schema applied 07-17 (`20260717052208`); the fleet
   RPC + dispositions + quote-provenance migrations applied 07-18; **no fleet
-  is provisioned or active** (0 rows; seven activation blockers stand).
+  is provisioned or active** (0 rows). The seven activation blockers were
+  RESOLVED 07-18 (weekend run) — the legacy-terminal boundary is clean;
+  provisioning remains BLOCKED on the owner manifest (50 policy ids + the
+  `FLEET_ACTIVATION_AUTHORIZED=1` env window).
 - #1228 is a draft read-only persisted-tape hash/count verifier with an
   operator-triggered job path. It is unscheduled and does not prove full
   deterministic strategy replay.

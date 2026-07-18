@@ -85,7 +85,6 @@ UNDEFINED_RISK_STRATEGIES = [
 
 def normalize_agent_constraints(agent_constraints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     defaults = {
-        "banned_strategies": [],
         "max_position_pct": None,
         "require_defined_risk": False
     }
@@ -93,7 +92,6 @@ def normalize_agent_constraints(agent_constraints: Optional[Dict[str, Any]]) -> 
         return defaults
 
     return {
-        "banned_strategies": list(set(agent_constraints.get("banned_strategies", []))),
         "max_position_pct": agent_constraints.get("max_position_pct"),
         "require_defined_risk": bool(agent_constraints.get("require_defined_risk", False))
     }
@@ -233,12 +231,13 @@ def _compute_portfolio_weights(
 
     # Adaptive-caps block retired in PR #4 of the audit plan. The
     # guardrail_policy feedback loop had been silent since 2026-01-05
-    # (no writer since then). RiskEngine.apply_adaptive_caps + the
-    # dependent banned_strategies enforcement moved with it; agent
-    # constraints below (B3) still enforce bans independently.
+    # (no writer since then). RiskEngine.apply_adaptive_caps moved with
+    # it; the agent defined-risk constraint below (B3) is enforced
+    # independently.
 
-    # B3: Apply Agent Banned Strategies & Defined Risk
-    agent_banned = set(agent_con["banned_strategies"])
+    # B3: Apply Agent Defined-Risk requirement. When required, undefined-
+    # risk structures are excluded (bounds zeroed).
+    agent_banned = set()
     if agent_con["require_defined_risk"]:
         agent_banned.update(UNDEFINED_RISK_STRATEGIES)
 

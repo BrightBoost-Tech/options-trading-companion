@@ -70,7 +70,6 @@ from .options_utils import group_spread_positions, format_occ_symbol_readable, c
 # the take-profit rationale code below always took that branch.
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
-from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
@@ -2556,22 +2555,6 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     candidates = []
     scout_results = []
 
-    # Fetch user policy settings
-    banned_strategies = []
-    try:
-        # Try to fetch from settings table if it exists and has the column
-        # Fallback to empty if not found
-        settings_res = supabase.table("settings").select("banned_strategies").eq("user_id", user_id).single().execute()
-        if settings_res.data:
-            banned_strategies = settings_res.data.get("banned_strategies") or []
-    except Exception as e:
-        # settings table might not exist or column missing, non-critical
-        # Log once per run, not per user
-        logger.debug(f"banned_strategies not available for user {user_id[:8]}...: {type(e).__name__}")
-
-    # Initialize Policy for Final Gate
-    policy = StrategyPolicy(banned_strategies)
-
     rejection_stats = None
     # Lane 4B: per-candidate terminal disposition recorder (observe-only).
     # None until the SELECTED set exists; every write it makes is fail-soft.
@@ -2582,7 +2565,6 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             supabase_client=supabase,
             user_id=user_id,
             global_snapshot=global_snap,
-            banned_strategies=banned_strategies,
             portfolio_cash=deployable_capital,
             account_tier=_midday_tier.name,
         )
@@ -3888,17 +3870,6 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
             # Calculate fingerprint
             fingerprint = compute_legs_fingerprint(order_json)
-
-            # Final Policy Gate (should have been filtered upstream, but redundant check)
-            if not policy.is_allowed(strategy):
-                print(f"[Midday] Final Gate: Rejecting {ticker} {strategy} due to policy.")
-                # Lane 4B: durable final for the redundant-policy-gate death
-                # (verdict-block family).
-                if _ctd is not None:
-                    _ctd.record_final(cand, "rank_blocked", detail={
-                        "reason": "policy_final_gate",
-                    })
-                continue
 
             # v4: Build and sign lineage
             lineage_dict = lineage.build()

@@ -188,12 +188,6 @@ class TestScannerInstrumentation(unittest.TestCase):
         window = self.src[anchor:anchor + 400]
         self.assertIn("strategy=suggestion[", window)
 
-    def test_strategy_banned_attributes_to_strategy(self):
-        anchor = self.src.find('"strategy_banned"')
-        self.assertGreater(anchor, 0)
-        window = self.src[anchor:anchor + 200]
-        self.assertIn("strategy=suggestion[", window)
-
     def test_cycle_summary_log_emitted(self):
         """End-of-cycle structured log line carries both count
         dimensions and total fields.

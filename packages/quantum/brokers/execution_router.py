@@ -16,7 +16,7 @@ Environment:
 import logging
 import os
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,73 @@ class ExecutionMode(str, Enum):
     ALPACA_PAPER = "alpaca_paper"
     ALPACA_LIVE = "alpaca_live"
     SHADOW = "shadow"
+
+
+# ── Single-leg experiment hard routing guard ────────────────────────────────
+# The one-contract shadow-only single-leg EXPERIMENT (owner decision
+# SINGLE_LEG=ONE_CONTRACT_SHADOW_ONLY_EXPERIMENT) is structurally shadow-only:
+# a single-leg experiment order must NEVER reach a broker, regardless of
+# portfolio routing_mode or EXECUTION_MODE. This is the execution-seam half of
+# a two-layer guard (the generator refuses to emit a live-routed candidate;
+# this refuses to submit one even if a bug produced it). "shadow" here means
+# non-broker: internal_paper and shadow modes are fine; alpaca_paper/alpaca_live
+# and a live_eligible portfolio are broker-bound and hard-refused.
+SINGLE_LEG_EXPERIMENT = "single_leg"
+SHADOW_ONLY_ROUTING = "shadow_only"
+# Canonical live-routing value — matches position_scope.LIVE_ROUTING_MODE and
+# should_submit_to_broker below (the only routing that reaches the broker).
+LIVE_ROUTING_MODE = "live_eligible"
+_BROKER_SUBMIT_MODES = frozenset({ExecutionMode.ALPACA_PAPER.value, ExecutionMode.ALPACA_LIVE.value})
+
+
+class SingleLegLiveRoutingForbidden(RuntimeError):
+    """A single-leg experiment order was about to be treated as live-eligible /
+    broker-submittable. Typed refusal — the experiment is shadow-only by
+    construction; this never degrades into a silent no-op or a broker order."""
+
+
+def is_single_leg_experiment(order_request: Any) -> bool:
+    """True iff the order carries the explicit single-leg experiment marker.
+
+    Keys on the explicit ``experiment`` / ``strategy_experiment`` stamp the
+    generator writes — NOT on leg count alone, so a legitimate one-leg order
+    from some future non-experimental path is never caught by accident."""
+    if not isinstance(order_request, Mapping):
+        order_request = getattr(order_request, "__dict__", None) or {}
+        if not isinstance(order_request, Mapping):
+            return False
+    marker = order_request.get("experiment") or order_request.get("strategy_experiment")
+    return str(marker or "").strip().lower() == SINGLE_LEG_EXPERIMENT
+
+
+def assert_single_leg_shadow_only(
+    order_request: Any,
+    *,
+    execution_mode: Optional[str] = None,
+    routing_mode: Optional[str] = None,
+) -> None:
+    """Hard guard: a single-leg experiment order must be shadow-only and must
+    never reach a broker. No-op for any non-single-leg-experiment order.
+
+    Raises ``SingleLegLiveRoutingForbidden`` if a single-leg experiment order
+    (a) is missing its ``routing='shadow_only'`` marker (malformed — refuse
+    unconditionally), or (b) would reach a broker: EXECUTION_MODE is
+    alpaca_paper/alpaca_live, or the portfolio routing_mode is live_eligible."""
+    if not is_single_leg_experiment(order_request):
+        return
+    order_routing = str((order_request.get("routing") if isinstance(order_request, Mapping) else None) or "").strip().lower()
+    if order_routing != SHADOW_ONLY_ROUTING:
+        raise SingleLegLiveRoutingForbidden(
+            f"single-leg experiment order missing shadow_only routing marker "
+            f"(routing={order_routing!r}) — refusing to route"
+        )
+    mode = str(execution_mode or "").strip().lower()
+    portfolio_routing = str(routing_mode or "").strip().lower()
+    if mode in _BROKER_SUBMIT_MODES or portfolio_routing == LIVE_ROUTING_MODE:
+        raise SingleLegLiveRoutingForbidden(
+            f"single-leg experiment is shadow-only and cannot be broker-submitted "
+            f"(execution_mode={mode!r}, routing_mode={portfolio_routing!r})"
+        )
 
 
 def should_submit_to_broker(portfolio_id: str, supabase) -> bool:
@@ -194,6 +261,12 @@ class ExecutionRouter:
         Returns:
             Dict with execution_mode, status, and mode-specific fields.
         """
+        # Hard guard (FIRST, before any routing): a single-leg experiment order
+        # is shadow-only by construction and must never reach a broker. Raises a
+        # typed SingleLegLiveRoutingForbidden in a broker-submit mode — the
+        # broker path below is never reached for such an order.
+        assert_single_leg_shadow_only(order_request, execution_mode=self.mode.value)
+
         if self.mode == ExecutionMode.INTERNAL_PAPER:
             return self._execute_internal_paper(order_request, internal_order_id)
 

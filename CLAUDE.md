@@ -529,6 +529,26 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   UI BLOCKED_UI_FILE_OWNERSHIP · operator checkout hash ddb9e073 (drift = the
   nightly's own artifacts). ZERO migration / production-DB-write / broker / env /
   fleet mutations this run; ACTIVATE_FLEET=false; entries_paused untouched.
+  **07-19 EXTERNAL AUDIT v1.6 + REMEDIATION** (`docs/review/
+  external-full-audit-v1.6-results-2026-07-19.md` + `v1.6-remediation-results-
+  2026-07-19.md`; ledger 07-19 entries = exclusion memory): ten areas at pin
+  `20ca312e`, retained 1 HIGH / 4 MED / 5 LOW + notes, free-look 0, fleet
+  READY_FOR_SEPARATE_AUTHORIZATION, no loosening anywhere. MERGED+DEPLOYED:
+  #1303 `d6a3174e` (results docs; F-A4 = the ABSENT durable arm-decision/
+  would_flip evidence contract — generic `[RISK_BASIS_SHADOW]` lines never
+  satisfied the arm gate) · #1305 `8588754d` (**the HIGH fixed**: nightly runner
+  is disposable-worktree-only — truthy-`Path("")` dead fallback killed, all
+  destructive git through one re-verifying choke point, per-run-tagged durable
+  markers in `audit/runner-markers.log`, completion re-read from disk, UP-ping
+  only after artifacts validate; adversarial FAIL→repair→PASS; the 07-19
+  operator-checkout mutation + false-green ping class is dead IN CODE).
+  ⚠ LOCAL LANDING `BLOCKED_LOCAL_RUNNER_PULL`: the Task-Scheduler checkout still
+  runs the OLD runner until the operator reconciles its tracked ledger drift and
+  ff-pulls — until then each 00:00 CT run still resets that checkout. Six lane
+  PRs (A #1306 arm evidence · B #1307 HMAC canonical-prod + 8 suites unskipped ·
+  C #1304 holiday sessions · D #1310 lifecycle milestones · E #1309 OI known-at
+  · F #1308 divisibility) are BUILT + review-complete DRAFTS, merge-blocked by
+  the landing hard gate — merged code ≠ these; verify on GitHub before citing.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.

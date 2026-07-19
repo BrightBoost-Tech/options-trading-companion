@@ -10,7 +10,93 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — v1.6 REMEDIATION RUN CLOSED (authoritative standing; supersedes older queue text)
+
+Full record: `docs/review/v1.6-remediation-results-2026-07-19.md`; ledger 07-19 remediation entry
+= exclusion memory. **MERGED+DEPLOYED:** #1303 `d6a3174e` (v1.6 audit docs + the F-A4 arm-evidence
+rewording) · #1305 `8588754d` (**the v1.6 HIGH** — disposable-worktree-only nightly runner,
+per-run-tagged durable markers, fail-closed completion contract; adversarial FAIL→repair→PASS;
+55 tests). **LOCAL LANDING `BLOCKED_LOCAL_RUNNER_PULL`** — the operator checkout carries the
+nightly's own tracked 43-line ledger edit (archived + reproduced into main by this PR, with the
+swept `audit/reports/2026-07-19.md`); scheduled task verified (Ready, documented wrapper, next run
+07-20 00:00 — STILL OLD CODE until the pull). **Six lane PRs BUILT + review-complete,
+merge-blocked by the landing hard gate:** A #1306 arm evidence · B #1307 HMAC+unskips · C #1304
+holiday sessions · D #1310 lifecycle milestones · E #1309 OI known-at · F #1308 divisibility.
+Zero migration/DB/broker/env/fleet/control actions.
+
+Queue (verified outcomes only):
+1. **OPERATOR, BEFORE 00:00 CT TONIGHT:** reconcile the local `audit/ledger.md` edit (content now
+   in main) → `git checkout main && git fetch origin && git pull --ff-only` in the operator
+   checkout — this lands the FIXED runner for tonight's 00:00 run and clears the merge gate.
+2. **Then merge the six lanes in order** #1306→#1307→#1304→#1310→#1309→#1308 (update-branch +
+   current-head CI + all-services deploy SUCCESS + broker/alert check, each).
+3. **Monday ≥ 17:45Z:** `monday_evidence_reader` → review → fleet activation decision
+   (READY_FOR_SEPARATE_AUTHORIZATION; packet 1 + ratification 1 + separate token).
+4. **F-REDATE-0718 (nightly MEDIUM, reported):** adjudicate the 20 re-dated shadow `closed_at`
+   rows (paper-window contamination; live calibration excluded by `is_paper=false`).
+5. **Post-merge natural falsifiers:** first `risk_basis_arm_evidence` payload (Lane A) · first
+   fixed-runner nightly (per-run markers, fresh worktree, checkout untouched) · first lifecycle
+   milestone chain (Lane D) · holiday falsifier 2026-09-07 (Lane C).
+6. **Carried (unchanged):** ⑤/event-review natural accrual · taper band reconciliation · E19 v3
+   re-freeze · single-leg draft rows · TCM N=15 · UI after Palette · security P2 pair and
+   calendar P2 now SHIPPED-in-draft (Lanes B/C) — close their backlog lines when merged.
+
+## 2026-07-19 — EXTERNAL AUDIT v1.6 ADJUDICATED (superseded by the remediation standing above)
+
+Read-only ten-area current-state audit at pin `20ca312e` (five two-area opus agents, Fable-central
+adjudication; results: `docs/review/external-full-audit-v1.6-results-2026-07-19.md`, landed via a
+**draft** docs PR — not merged; the ledger 07-19 v1.6 entry is the exclusion memory). Source was
+the brief itself (`AUDIT_BRIEF_ONLY` — a spec, no embedded results; absence expected). **Zero
+code / test-outside-docs / migration / DB / broker / env / fleet / deploy / merge actions
+occurred.** Retained deltas are integrated EXACTLY ONCE, here:
+
+Re-ranked build order (folds the v1.6 deltas into the Sunday standing below):
+1. **nightly-runner P1 — now ROOT-CAUSED (HIGH: F-RUNNER-WORKTREE-DEADFALLBACK)** — truthy
+   `Path("")` at `audit/runner/nightly_runner.py:918` makes the `%LOCALAPPDATA%` worktree
+   fallback dead code ⇒ worktree=`.` ⇒ the 07-19 run mutated the OPERATOR CHECKOUT
+   (`checkout --force` + `reset --hard`, reflog-proven) and its cron.log markers were silently
+   swallowed (`:87-94` OSError-pass under the shim's own redirect lock) while the completion
+   contract read "met" and the dead-man UP-ping fired. Fix: `Path(env) if env else
+   _local_appdata_worktree()`; never trust `_end_marker_written` without a verified append
+   (route markers via child stdout); carry F-RUNNER-BROKER-CREDS + the provider ping check.
+   This fully explains the 07-19 WRAPPER_PARTIAL.
+2. **Monday ≥ 17:45Z (unchanged):** `monday_evidence_reader` → review → fleet activation
+   decision — v1.6 verdict **READY_FOR_SEPARATE_AUTHORIZATION** (packet 1 + ratification 1 +
+   separate explicit token; activation stays forbidden until then).
+3. **P0-B arm-gate blocker (NEW, MED — F-A4-RISKBASIS-SILENT):** the exact P0-B
+   arm-decision / `would_flip` evidence required for the observe→enforce decision has not
+   emitted or reached its expected durable evidence contract
+   (`services/risk_basis_shadow.py:31` · `risk_budget_engine.py:418` ·
+   `utilization_gate.py:353`). Historical generic `[RISK_BASIS_SHADOW]` lines (null_legacy /
+   heartbeat variants) do NOT satisfy that gate, and logs are ephemeral — build the durable
+   would-flip evidence before any P0-B arm decision; absent evidence cannot green-light an arm.
+4. **Security P2 pair (NEW):** (a) F-A9-1 — reconcile `task_signing_v4._is_production_mode()`
+   (`:59-79`, keys `ENV`/`ENABLE_DEV_AUTH_BYPASS`) with canonical
+   `security/config.is_production()` (`APP_ENV`/`RAILWAY_ENVIRONMENT*`); today an
+   APP_ENV-only prod worker fails OPEN on nonce-store outage (replay window = 300s TTL).
+   (b) F-A9-2 — un-skip the HMAC behavioral suites (clusters #768/#769/#774):
+   replay/expiry/scope/fail-open currently have ZERO CI reach (EXTENDS skip-discipline).
+5. **Calendar P2 (NEW, mitigated — F-A10-HOLIDAY):** `is_market_day()` is weekday-only with an
+   affirmatively false docstring (`jobs/handlers/utils.py:49-69`);
+   `brokers/safety_checks.py:100-108` holiday-blind. Broker closed-market rejection is the only
+   holiday guard on entries today; falsifier: `is_market_day(2026-11-26)` → True.
+6. **Carried from the Sunday standing (unchanged):** ⑤ + event-review natural accrual · taper
+   band reconciliation (`[900,1100]`→`[800,1000]` + ENGINE_VERSION bump) · E19 protocol v3
+   re-freeze (minimum 8) · single-leg two draft registry rows · TCM promotion review at N=15 ·
+   UI when Palette clears file ownership.
+
+LOW/NOTE tail (full detail in the results file; no build without a trigger): A1-G1 ranker-basis
+zero realized overlap · A3 disposition lifecycle values `staged`/`broker_submitted`/`filled`
+defined-not-wired (`candidate_disposition.py:82-85`) · A5 OI freshness unobservable (always
+`known_at_unavailable`; `quote_provenance.py:261-266`, truth layer `:1856`) · A2
+assignment/expiry custody DEFERRED-SAMPLE (revisit on the first ITM-at-expiry live event) · A4
+`check_greeks` divisibility (inert while caps 0) · CLAUDE.md size drift (70,827B vs the ≤40k
+self-cap, cap dropped from the header) · stale version-prefix comments · model-review
+fingerprint id-set content-blindness · `.Jules/`-vs-`.jules/` tracked-path case-collision
+(phantom `M` in fresh case-insensitive Windows checkouts — verified in the audit worktree;
+de-dup in a normal code PR). **Free-look: 0 promotions. No live-control loosening.**
+
+## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR CLOSED (superseded by the v1.6 audit standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `27204bd0` + docs; all four services
 deploy-verified per merge). **MERGED+DEPLOYED (5; serialized #1296→#1299→#1297→#1298→#1300, each

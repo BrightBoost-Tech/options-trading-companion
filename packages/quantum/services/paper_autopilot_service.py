@@ -411,6 +411,9 @@ class PaperAutopilotService:
                     daily_pnl=cb_daily_pnl,
                     weekly_pnl=cb_weekly_pnl,
                     config=cb_config,
+                    # OBSERVE-ONLY: dedups the greek-cap counterfactual flip-log
+                    # (§4 owner items 9+11). No decision reads this scope.
+                    observe_scope=f"autopilot:{user_id}",
                 )
                 if not cb_result.passed:
                     logger.critical(

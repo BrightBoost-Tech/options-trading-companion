@@ -4,6 +4,17 @@
 **Status:** Phase 1 diagnostic (read-only). Phase 2 implementation prompt drafted after operator review.
 **Operator goal:** extend from observed-single-strategy emission to four-strategy regime-aware selection (bear-put, iron condor, 0DTE bull put, cash-secured-put).
 
+> **CORRECTION (2026-07-18, Lane C / F-BAN-INTEGRITY):** the `banned_strategies`
+> env-arg / `StrategyPolicy` "strategy ban/fallback" mechanism described below
+> was a **phantom feature** — it had no real producer (a dead
+> `settings.banned_strategies` read that always degraded to `[]`; never an env
+> arg) and was **removed** (owner decision REMOVE_PHANTOM_FEATURE; packet
+> `docs/review/f-ban-integrity-decision-packet-2026-07-16.md`). `StrategyPolicy`
+> is deleted. Any future strategy-lifecycle/DEPRECATED-filtering design must NOT
+> assume `banned_strategies` exists; it must be built end-to-end (migration +
+> write surface + loud typed read failure). This diagnostic is retained as a
+> historical record; the "✅ exists — Strategy ban/fallback" row is no longer true.
+
 ---
 
 ## Executive summary

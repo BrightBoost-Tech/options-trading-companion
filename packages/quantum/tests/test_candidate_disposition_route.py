@@ -358,6 +358,8 @@ class TestH7AndAllocatorSeams(_RouteBase):
         self.assertEqual(len(finals), 1)
         self.assertEqual(finals[0]["disposition"], "h7_dropped")
         self.assertEqual(finals[0]["detail"]["reason"], "h7_prefilter")
+        # Typed subreason: the prefilter is a round-trip BP check.
+        self.assertEqual(finals[0]["detail"]["h7_subreason"], "roundtrip_bp")
         self.assertEqual(finals[0]["detail"]["available_bp"], 2000.0)
 
         ctd = self._cycle_counts(result)["candidate_disposition"]
@@ -410,7 +412,85 @@ class TestLoopDeathSeam(_RouteBase):
         self.assertEqual(finals[0]["disposition"], "h7_dropped")
         self.assertEqual(finals[0]["detail"]["reason"],
                          "unpriceable_candidate")
+        # Typed subreason: a data/priceability death sits in the quality_gate
+        # family (never reached sizing), NOT stamped the marketdata-gate
+        # sizing_outcome (it did not traverse the gate).
+        self.assertEqual(finals[0]["detail"]["h7_subreason"], "quality_gate")
+        self.assertNotIn("sizing_outcome", finals[0]["detail"])
         self.assertTrue(finals[0]["selected"])
+
+    def test_risk_budget_exhausted_gets_risk_budget_subreason(self):
+        """E2 (:~3502): final_risk_dollars<=0 -> h7_dropped + 'risk_budget'.
+
+        Origin injection at the risk-budget enforcement seam: the REAL
+        clamp_risk_budget (the function that caps a candidate's per-trade
+        allocation against the remaining global envelope) zeroes it, exactly
+        as an exhausted envelope would. remaining_global stays positive (the
+        real engine, $2,000 book) so the CYCLE-level skip never trips — the
+        per-candidate E2 branch does, and drives the REAL record_final."""
+        client = FakeSupabase()
+        self._seed(client)
+        cand = _scanner_candidate()  # priceable, sizes fine absent the clamp
+
+        result = self._drive(
+            client, [cand], cal_blob=None,
+            extra_patches=(
+                patch.object(_wo, "clamp_risk_budget",
+                             lambda *_a, **_k: 0.0),
+            ),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+
+        # Nothing persisted; the fate is durable.
+        self.assertEqual(
+            [r for r in client.tables.get("trade_suggestions", [])
+             if r.get("cohort_name") is None], [])
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["disposition"], "h7_dropped")
+        self.assertEqual(finals[0]["detail"]["reason"],
+                         "risk_budget_exhausted")
+        self.assertEqual(finals[0]["detail"]["h7_subreason"], "risk_budget")
+        self.assertTrue(finals[0]["selected"])
+        self.assertEqual(finals[0]["candidate_fingerprint"],
+                         candidate_fingerprint(cand))
+
+    def test_sized_to_zero_gets_sizing_zero_subreason(self):
+        """E3 (:~4064): the sizing engine returns contracts==0 (the dominant
+        selected-then-vanished death) -> h7_dropped + 'sizing_zero'.
+
+        Natural origin: a max_loss far above the $2,000 OBP. The H7 prefilter
+        is SHADOW by default (records nothing), so this h7-fit death surfaces
+        HERE as sized_to_zero — exactly the packet's Monday-evidence
+        prediction. MIDDAY_TEST_MODE pinned False so the contracts==0 stands
+        (test mode would override it to 1)."""
+        client = FakeSupabase()
+        self._seed(client)
+        cand = _scanner_candidate()
+        cand["max_loss_per_contract"] = 50000.0  # unaffordable -> contracts=0
+        expected_fp = candidate_fingerprint(cand)
+
+        result = self._drive(
+            client, [cand], cal_blob=None,
+            extra_patches=(
+                patch.object(_wo, "MIDDAY_TEST_MODE", False),
+            ),
+        )
+        self.assertTrue(result["ok"], result.get("notes"))
+
+        self.assertEqual(
+            [r for r in client.tables.get("trade_suggestions", [])
+             if r.get("cohort_name") is None], [])
+        finals = self._finals(client)
+        self.assertEqual(len(finals), 1)
+        final = finals[0]
+        self.assertEqual(final["disposition"], "h7_dropped")
+        self.assertEqual(final["detail"]["h7_subreason"], "sizing_zero")
+        # The 6 root causes stay in detail.reason verbatim (here: the
+        # round-trip verdict); we assert it is preserved, not its exact text.
+        self.assertTrue(final["detail"].get("reason"))
+        self.assertEqual(final["detail"]["available_bp"], 2000.0)
+        self.assertEqual(final["candidate_fingerprint"], expected_fp)
 
 
 class TestSchemaAbsentRoute(_RouteBase):
@@ -614,6 +694,8 @@ class TestQualityGateHardModeSeam(_RouteBase):
         final = finals[0]
         self.assertEqual(final["disposition"], "h7_dropped")
         self.assertEqual(final["detail"]["reason"], "quality_gate_e4_fatal")
+        # Typed subreason: the marketdata quality-gate family.
+        self.assertEqual(final["detail"]["h7_subreason"], "quality_gate")
         # Typed discriminator: excludes marketdata deaths from the overloaded
         # h7_dropped bucket without reason-string parsing (C2 pkt Option-A).
         self.assertEqual(final["detail"]["sizing_outcome"],
@@ -659,6 +741,7 @@ class TestQualityGateHardModeSeam(_RouteBase):
         self.assertEqual(final["disposition"], "h7_dropped")
         self.assertEqual(final["detail"]["reason"],
                          "quality_gate_e5_skip_policy")
+        self.assertEqual(final["detail"]["h7_subreason"], "quality_gate")
         self.assertEqual(final["detail"]["sizing_outcome"],
                          "marketdata_quality_gate")
         self.assertEqual(final["detail"]["effective_action"], "skip_policy")

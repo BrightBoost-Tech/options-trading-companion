@@ -202,6 +202,21 @@ class EnvelopeCheckResult:
     # contributing structure is missing that greek — never a fabricated 0 (H9).
     canonical_greeks: Dict[str, Any] = field(default_factory=dict)
 
+    # OBSERVE-ONLY greek-cap ALERT-ONLY counterfactual (owner items 9+11). Sits
+    # ALONGSIDE canonical_greeks; arms no cap, rejects no entry, scales no size,
+    # writes no risk_alerts row, reads no cap flag — ENFORCEMENT-FREE by
+    # construction. For a documented set of REFERENCE cap values (derived from
+    # existing EnvelopeConfig fields, never invented — see
+    # compute_greek_cap_counterfactual) it records, per tightness row, would_block
+    # (which cap / which greek), cap_headroom, and a typed-unavailable reason when
+    # the exposure cannot be honestly established. Empty until check_all_envelopes
+    # runs; every greek is typed UNAVAILABLE (never a fabricated 0) whenever the
+    # greeks aggregate is partial, the canonical cross-check is missing, or the two
+    # aggregates disagree in sign (H9). §8 double-dormancy: production legs carry
+    # no greeks today, so every reference row reads would_block=None (unavailable)
+    # until #1259's stage-time greek population accrues real data.
+    greek_cap_counterfactual: Dict[str, Any] = field(default_factory=dict)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -222,6 +237,7 @@ class EnvelopeCheckResult:
             "stress_unavailable": self.stress_unavailable,
             "greeks_coverage": self.greeks_coverage,
             "canonical_greeks": self.canonical_greeks,
+            "greek_cap_counterfactual": self.greek_cap_counterfactual,
         }
 
 
@@ -469,6 +485,322 @@ def aggregate_canonical_greeks(positions: List[Dict]) -> Dict[str, Any]:
         "sources": sorted({s for s in sources if s}),
         "as_of": sorted({a for a in as_of if a}),
     }
+
+
+# ---------------------------------------------------------------------------
+# Greek-cap ALERT-ONLY counterfactual (observe-only; owner items 9 + 11)
+# ---------------------------------------------------------------------------
+#
+# ENFORCEMENT-FREE BY CONSTRUCTION. This surface answers "what WOULD a greek cap
+# do at a documented reference threshold?" WITHOUT arming any cap: it rejects no
+# entry, scales no size, writes no risk_alerts row, and reads no cap flag. The
+# four production greek caps (config.max_portfolio_{delta,gamma,vega,theta}) stay
+# default-0 (dormant); this computes an INDEPENDENT counterfactual BESIDE them,
+# exactly as canonical_greeks sits beside portfolio_greeks. Making any of this
+# enforcement is a separate, future PR (ENABLE_LIVE_GREEK_CAPS stays false — no
+# cap flag is introduced here).
+#
+# BASIS: would_block compares against portfolio_greeks — the SAME value the armed
+# cap would read inside check_greeks (`abs(greeks[g]) > limit`) — so the
+# counterfactual models the ACTUAL enforcement code, not an idealized aggregate
+# (doctrine: the decision path is the only truth). Each greek's counterfactual is
+# CORROBORATED by the INDEPENDENT canonical signed aggregate: would_block is
+# asserted ONLY when the greeks aggregate is whole-book complete AND the canonical
+# value is present AND the two aggregates AGREE IN SIGN. A partial book, a missing
+# canonical value, or a sign divergence → typed UNAVAILABLE, never a fabricated
+# would_block / zero exposure (H9).
+#
+# REFERENCE CAP DERIVATION (never invented — every number INVERTS an existing
+# EnvelopeConfig field). Three tightness rows come from the three loss-envelope
+# fractions already in config; each fraction × equity is a dollar loss budget L,
+# translated into each greek's OWN unit through the envelope's OWN stress-model
+# move sizes, so a book sitting AT a cap loses exactly L under the doctrinal
+# scenario:
+#   tight   L = max_per_symbol_loss_pct × equity   (0.03 default)
+#   medium  L = max_daily_loss_pct      × equity   (0.05 default)
+#   loose   L = max_weekly_loss_pct     × equity   (0.10 default)
+#   delta_cap = L / stress_spy_down_pct
+#       inverts compute_stress_scenarios' spy_down loss (total_delta × spy_move):
+#       |delta_$| == delta_cap ⇒ modeled spy-down loss == L.
+#   vega_cap  = L / (stress_vix_spike_pct × 100)
+#       inverts the vix_spike impact (total_vega × vix_move × 100).
+#   theta_cap = L
+#       theta is $/day; one day's decay bounded by the day-scaled dollar budget.
+#   gamma_cap = L / stress_spy_down_pct**2
+#       convexity reference (gamma × move²) reusing the spy_down move basis — the
+#       SOFTEST-anchored of the four (the envelope has no first-class gamma
+#       scenario), labeled as such; no ½ convexity factor (deliberately
+#       conservative-tighter).
+# The reference caps INHERIT compute_stress_scenarios' unit convention (greek ×
+# fractional-move), so would_block reflects what the code WOULD actually do,
+# imperfections included — a counterfactual of the real path, not an idealization.
+
+# Which EnvelopeConfig loss-fraction feeds each tightness row (name, attr).
+_GREEK_CF_ROWS = (
+    ("tight", "max_per_symbol_loss_pct"),
+    ("medium", "max_daily_loss_pct"),
+    ("loose", "max_weekly_loss_pct"),
+)
+
+# Per-scope memory of the last observed would_block state per reference row, so a
+# flip-logger emits ONE INFO line only when a row's would_block CHANGES (no
+# per-cycle spam). Keyed by an opt-in caller scope; None scope never logs.
+_GREEK_CF_LAST_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def reset_greek_cf_state() -> None:
+    """Clear the flip-log dedup memory (test seam; also safe to call at boot)."""
+    _GREEK_CF_LAST_STATE.clear()
+
+
+def greek_cap_reference_rows(
+    equity: float, config: EnvelopeConfig
+) -> List[Dict[str, Any]]:
+    """The documented REFERENCE cap rows (tight / medium / loose).
+
+    Every cap INVERTS an existing EnvelopeConfig field (see the module header) —
+    no threshold is invented. A non-positive cap (equity ≤ 0, or a config
+    fraction / stress move of 0) carries NO usable reference and is emitted as
+    None, mirroring check_greeks' `limit > 0` gate — a would_block can never be
+    asserted against a non-positive cap.
+    """
+    spy_move = float(config.stress_spy_down_pct)
+    vix_move = float(config.stress_vix_spike_pct)
+    rows: List[Dict[str, Any]] = []
+    for name, frac_attr in _GREEK_CF_ROWS:
+        frac = float(getattr(config, frac_attr))
+        budget = frac * float(equity)
+        raw_caps = {
+            "delta": (budget / spy_move) if spy_move > 0 else None,
+            "gamma": (budget / (spy_move ** 2)) if spy_move > 0 else None,
+            "vega": (budget / (vix_move * 100)) if vix_move > 0 else None,
+            "theta": budget,
+        }
+        # Only a strictly-positive finite cap is a usable reference.
+        caps = {
+            g: (round(c, 4) if (c is not None and math.isfinite(c) and c > 0) else None)
+            for g, c in raw_caps.items()
+        }
+        rows.append({
+            "name": name,
+            "budget_fraction": round(frac, 6),
+            "budget_fraction_source": frac_attr,
+            "loss_budget_dollars": round(budget, 2),
+            "caps": caps,
+            "derivation": {
+                "delta": f"budget / stress_spy_down_pct  (L / {spy_move})",
+                "gamma": (
+                    f"budget / stress_spy_down_pct**2  (L / {spy_move}**2) — "
+                    "softest-anchored, no 1/2 convexity factor"
+                ),
+                "vega": f"budget / (stress_vix_spike_pct*100)  (L / ({vix_move}*100))",
+                "theta": "budget  (1:1 $/day vs the day-scaled loss budget)",
+            },
+        })
+    return rows
+
+
+def _greek_cf_availability(
+    greek: str,
+    portfolio_greeks: Dict[str, Any],
+    greeks_coverage: Dict[str, Any],
+    canonical: Dict[str, Any],
+) -> tuple:
+    """Return (available, exposure, canonical_value, reason) for one greek.
+
+    The exposure BASIS is portfolio_greeks[greek] — the value the armed cap would
+    compare. Availability is CORROBORATED by the independent canonical aggregate:
+    the greek is available only when the greeks aggregate is whole-book complete,
+    the exposure is finite, the canonical value is present + finite, AND the two
+    agree in sign. Anything else → typed UNAVAILABLE with a reason (never a
+    fabricated would_block, never a zero standing in for a missing measurement).
+    """
+    canon_raw = _finite_greek_value(canonical, greek)
+    if not greeks_coverage.get("complete"):
+        return (False, None, canon_raw, "greeks_coverage_incomplete")
+    exp = _finite_greek_value(portfolio_greeks, greek)
+    if exp is None:
+        return (False, None, canon_raw, "exposure_nonfinite")
+    if not canonical.get("complete") or canon_raw is None:
+        return (False, exp, None, "canonical_unavailable")
+    if exp != 0 and canon_raw != 0 and (exp > 0) != (canon_raw > 0):
+        # The cap's own basis and the honest signed aggregate disagree on
+        # direction — untrustworthy; flag, never decide (H9).
+        return (False, exp, canon_raw, "sign_mismatch")
+    return (True, exp, canon_raw, None)
+
+
+def _greek_cf_book_summary(positions: List[Dict]) -> Dict[str, Any]:
+    """Lightweight book descriptor for the counterfactual (strategy / book type).
+
+    `strategies` are the distinct persisted `strategy` labels present — None-
+    tolerant, never fabricated (an unlabeled book yields an empty list, not a
+    guessed structure type).
+    """
+    strategies = sorted(
+        {str(p.get("strategy")) for p in positions if p.get("strategy")}
+    )
+    return {"n_positions": len(positions), "strategies": strategies}
+
+
+def compute_greek_cap_counterfactual(
+    portfolio_greeks: Dict[str, Any],
+    greeks_coverage: Dict[str, Any],
+    canonical_greeks: Dict[str, Any],
+    positions: List[Dict],
+    equity: float,
+    config: EnvelopeConfig,
+) -> Dict[str, Any]:
+    """OBSERVE-ONLY greek-cap counterfactual — pure, never raises, arms nothing.
+
+    For each documented reference row (tight/medium/loose) and each greek, records
+    would_block (which cap / which greek), cap_headroom, and a typed-unavailable
+    reason when the exposure cannot be honestly established. Returns a JSON-
+    serializable dict. NEVER a fabricated 0 for a missing exposure (H9): a greek
+    whose aggregate is partial / sign-inconsistent / canonically-uncorroborated is
+    would_block=None with a reason, and the row is would_block=None when NO greek
+    is available.
+    """
+    if equity is None or not isinstance(equity, (int, float)) or \
+            not math.isfinite(equity) or equity <= 0:
+        return {
+            "enabled": True,
+            "basis": "portfolio_greeks",
+            "available": False,
+            "reason": "nonpositive_equity",
+            "reference_rows": [],
+        }
+
+    greeks = ("delta", "gamma", "vega", "theta")
+    availability: Dict[str, tuple] = {}
+    greek_detail: Dict[str, Any] = {}
+    for g in greeks:
+        ok, exp, canon, reason = _greek_cf_availability(
+            g, portfolio_greeks, greeks_coverage, canonical_greeks
+        )
+        availability[g] = (ok, exp)
+        greek_detail[g] = {
+            "available": ok,
+            "exposure": (round(exp, 4) if exp is not None else None),
+            "canonical": (round(canon, 4) if canon is not None else None),
+            "reason": reason,
+        }
+
+    rows_out: List[Dict[str, Any]] = []
+    for row in greek_cap_reference_rows(equity, config):
+        caps = row["caps"]
+        per_greek: Dict[str, Any] = {}
+        blocking: List[Dict[str, Any]] = []
+        unavailable_greeks: List[str] = []
+        any_available = False
+        for g in greeks:
+            cap = caps.get(g)
+            ok, exp = availability[g]
+            if cap is None:
+                per_greek[g] = {
+                    "cap": None,
+                    "exposure": (round(exp, 4) if (ok and exp is not None) else None),
+                    "headroom": None,
+                    "would_block": None,
+                    "reason": "no_reference_cap",
+                }
+                continue
+            if not ok:
+                per_greek[g] = {
+                    "cap": cap,
+                    "exposure": None,
+                    "headroom": None,
+                    "would_block": None,
+                    "reason": greek_detail[g]["reason"],
+                }
+                unavailable_greeks.append(g)
+                continue
+            any_available = True
+            would_block = abs(exp) > cap
+            per_greek[g] = {
+                "cap": cap,
+                "exposure": round(exp, 4),
+                "headroom": round(cap - abs(exp), 4),
+                "would_block": would_block,
+                "reason": None,
+            }
+            if would_block:
+                blocking.append({
+                    "greek": g, "cap": cap, "exposure": round(exp, 4),
+                })
+        row_would_block = (len(blocking) > 0) if any_available else None
+        rows_out.append({
+            "name": row["name"],
+            "budget_fraction": row["budget_fraction"],
+            "budget_fraction_source": row["budget_fraction_source"],
+            "loss_budget_dollars": row["loss_budget_dollars"],
+            "derivation": row["derivation"],
+            "caps": caps,
+            "per_greek": per_greek,
+            "would_block": row_would_block,
+            "blocking": blocking,
+            "unavailable_greeks": unavailable_greeks,
+        })
+
+    return {
+        "enabled": True,
+        "available": True,
+        "basis": "portfolio_greeks",
+        "corroborated_by": "canonical_signed_aggregate (complete + sign-agreement)",
+        "note": (
+            "OBSERVE-ONLY: arms no cap, rejects no entry, scales no size, writes "
+            "no alert; a would_block is a counterfactual, not an action."
+        ),
+        "size_multiplier": None,
+        "size_multiplier_note": (
+            "omitted — no greek→sizing semantic exists in the envelope; the "
+            "sizing_multiplier is weekly-loss-driven and independent of greeks, so "
+            "there is no honest greek-cap sizing counterfactual to report"
+        ),
+        "equity": round(float(equity), 2),
+        "coverage": {
+            "greeks_coverage_complete": bool(greeks_coverage.get("complete")),
+            "canonical_complete": bool(canonical_greeks.get("complete")),
+            "legs_total": greeks_coverage.get("legs_total"),
+            "legs_with_greeks": greeks_coverage.get("legs_with_greeks"),
+        },
+        "book": _greek_cf_book_summary(positions),
+        "greeks": greek_detail,
+        "reference_rows": rows_out,
+    }
+
+
+def _log_greek_cf_flips(
+    scope: Optional[str], counterfactual: Dict[str, Any]
+) -> List[str]:
+    """Emit ONE INFO line only when a reference row's would_block CHANGES.
+
+    Dedup keyed on `scope` (an opt-in caller book identity, e.g.
+    "monitor:<user>"). A None/empty scope NEVER logs — the jsonb field carries the
+    evidence and the flip-log is the secondary, dedup-gated surface. Returns the
+    list of flipped row names (test seam). The would_block state includes None
+    (typed-unavailable), so a book crossing into or out of unavailability also
+    flips exactly once.
+    """
+    if not scope:
+        return []
+    prior = _GREEK_CF_LAST_STATE.setdefault(scope, {})
+    flipped: List[str] = []
+    current: Dict[str, Any] = {}
+    for row in counterfactual.get("reference_rows", []):
+        name = row.get("name")
+        would_block = row.get("would_block")
+        current[name] = would_block
+        if name not in prior or prior[name] != would_block:
+            flipped.append(name)
+        prior[name] = would_block
+    if flipped:
+        logger.info(
+            "[GREEK_CAP_CF] scope=%s would_block state changed on rows=%s "
+            "(OBSERVE-ONLY, no enforcement): %s",
+            scope, flipped, {n: current[n] for n in flipped},
+        )
+    return flipped
 
 
 def check_concentration(
@@ -931,6 +1263,7 @@ def check_all_envelopes(
     weekly_pnl: float = 0.0,
     config: Optional[EnvelopeConfig] = None,
     event_signals: Optional[Dict] = None,
+    observe_scope: Optional[str] = None,
 ) -> EnvelopeCheckResult:
     """
     Run all envelope checks against current portfolio state.
@@ -942,6 +1275,11 @@ def check_all_envelopes(
         weekly_pnl: This week's cumulative P&L
         config: EnvelopeConfig (default: from env vars)
         event_signals: Dict of symbol → EventSignal for event concentration
+        observe_scope: Optional stable book identity (e.g. "monitor:<user>") used
+            ONLY to dedup the OBSERVE-ONLY greek-cap counterfactual flip-log — a
+            line fires only when a reference row's would_block CHANGES for that
+            scope. None (default) never logs; the counterfactual jsonb field is
+            populated regardless. Affects NO decision, NO violation, NO sizing.
 
     Returns:
         EnvelopeCheckResult with all violations and recommendations
@@ -971,6 +1309,30 @@ def check_all_envelopes(
             "[CANONICAL_GREEKS] observe-only aggregate failed: %s", exc
         )
         result.canonical_greeks = {"complete": False, "error": str(exc)}
+
+    # 1c. Greek-cap ALERT-ONLY counterfactual (OBSERVE-ONLY; owner items 9+11).
+    #     Sits beside canonical_greeks — arms no cap, rejects no entry, scales no
+    #     size, writes no alert, reads no cap flag. Fail-soft: a computation error
+    #     here must NEVER break the envelope check. The optional observe_scope only
+    #     gates the dedup flip-log (INFO on state change); the jsonb field is
+    #     populated either way.
+    try:
+        result.greek_cap_counterfactual = compute_greek_cap_counterfactual(
+            portfolio_greeks=result.portfolio_greeks,
+            greeks_coverage=result.greeks_coverage,
+            canonical_greeks=result.canonical_greeks,
+            positions=positions,
+            equity=equity,
+            config=config,
+        )
+        _log_greek_cf_flips(observe_scope, result.greek_cap_counterfactual)
+    except Exception as exc:  # observe-only; never break the envelope check
+        logger.warning(
+            "[GREEK_CAP_CF] observe-only counterfactual failed: %s", exc
+        )
+        result.greek_cap_counterfactual = {
+            "enabled": True, "available": False, "error": str(exc),
+        }
 
     # 2. Concentration
     conc_violations, concentration = check_concentration(

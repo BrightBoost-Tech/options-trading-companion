@@ -6,7 +6,6 @@ import os
 from typing import Optional, Union, List
 
 from .regime_engine_v3 import RegimeState
-from .strategy_policy import StrategyPolicy
 
 
 class StrategySelector:
@@ -18,7 +17,6 @@ class StrategySelector:
         iv_rank: float,
         days_to_expiry: int = 45,
         effective_regime: Optional[Union[RegimeState, str]] = None,
-        banned_strategies: Optional[List[str]] = None,
     ) -> dict:
         """
         Converts sentiment + volatility/regime context into a concrete options structure.
@@ -26,7 +24,6 @@ class StrategySelector:
         Inputs
         - sentiment: BULLISH | BEARISH | NEUTRAL | EARNINGS (case-insensitive)
         - effective_regime: RegimeState (preferred) OR legacy string ("normal"/"elevated"/"shock"/...)
-        - banned_strategies: List of strategy keys or categories to exclude.
 
         Output dict fields:
         - ticker, strategy, legs, rationale
@@ -35,9 +32,6 @@ class StrategySelector:
         s = (sentiment or "NEUTRAL").upper().strip()
         if s not in {"BULLISH", "BEARISH", "NEUTRAL", "EARNINGS"}:
             s = "NEUTRAL"
-
-        # Initialize Policy
-        policy = StrategyPolicy(banned_strategies)
 
         regime_state = self._coerce_regime(effective_regime, iv_rank)
 
@@ -65,54 +59,9 @@ class StrategySelector:
             },
         }
 
-        # Helper to apply suggestion safely with policy check
+        # Helper to apply a chosen suggestion.
         def apply_suggestion(strat: str, rationale: str, legs: list):
-            if policy.is_allowed(strat):
-                suggestion.update(strategy=strat, rationale=rationale, legs=legs)
-            else:
-                # If banned, we might want to fallback or just stay HOLD.
-                # For now, we revert to HOLD if the primary choice is banned.
-                # Ideally, we could try an alternative (e.g. Debit Spread instead of Credit Spread).
-
-                # Simple fallback logic:
-                # If Credit Spread is banned, try Debit Spread if direction matches.
-                # Note: This is a basic heuristic.
-
-                fallback_strat = None
-                fallback_legs = []
-                fallback_rationale = ""
-
-                if "SHORT_PUT_CREDIT_SPREAD" in strat:
-                    # Bullish credit banned -> Bullish debit
-                    fallback_strat = "LONG_CALL_DEBIT_SPREAD"
-                    fallback_rationale = f"{rationale} (Fallback: Credit banned). Using Debit Spread."
-                    fallback_legs = [
-                        {"side": "buy", "type": "call", "delta_target": 0.60},
-                        {"side": "sell", "type": "call", "delta_target": 0.30},
-                    ]
-                elif "SHORT_CALL_CREDIT_SPREAD" in strat:
-                    # Bearish credit banned -> Bearish debit
-                    fallback_strat = "LONG_PUT_DEBIT_SPREAD"
-                    fallback_rationale = f"{rationale} (Fallback: Credit banned). Using Debit Spread."
-                    fallback_legs = [
-                        {"side": "buy", "type": "put", "delta_target": -0.60},
-                        {"side": "sell", "type": "put", "delta_target": -0.30},
-                    ]
-                elif "IRON_CONDOR" in strat:
-                    # Neutral credit banned -> No good debit alternative for pure neutral income without credit
-                    # Could do Long Iron Condor (Debit) but that is a volatility play (Long Vega), not neutral/short-vol.
-                    # So fallback is HOLD.
-                    pass
-
-                if fallback_strat and policy.is_allowed(fallback_strat):
-                    suggestion.update(strategy=fallback_strat, rationale=fallback_rationale, legs=fallback_legs)
-                else:
-                    # Final fallback: HOLD
-                    reason = policy.get_rejection_reason(strat)
-                    suggestion.update(
-                        strategy="HOLD",
-                        rationale=f"Strategy {strat} banned. {reason or ''} No valid fallback."
-                    )
+            suggestion.update(strategy=strat, rationale=rationale, legs=legs)
 
 
         # 1) CHOP: range-bound first, regardless of directional lean
@@ -248,7 +197,6 @@ class StrategySelector:
         iv_rank: float,
         days_to_expiry: int = 45,
         effective_regime: Optional[Union[RegimeState, str]] = None,
-        banned_strategies: Optional[List[str]] = None,
         phase_exclusions_out: Optional[List[dict]] = None,
     ) -> List[dict]:
         """
@@ -274,7 +222,6 @@ class StrategySelector:
         if s not in {"BULLISH", "BEARISH", "NEUTRAL", "EARNINGS"}:
             s = "NEUTRAL"
 
-        policy = StrategyPolicy(banned_strategies)
         regime_state = self._coerce_regime(effective_regime, iv_rank)
 
         is_low_vol = (iv_rank is not None and iv_rank < 30) or regime_state == RegimeState.SUPPRESSED
@@ -409,7 +356,7 @@ class StrategySelector:
                         {"strategy": strat, "phase": _phase}
                     )
                 continue
-            if policy.is_allowed(strat) and len(candidates) < 3:
+            if len(candidates) < 3:
                 candidates.append({
                     "ticker": ticker,
                     "strategy": strat,

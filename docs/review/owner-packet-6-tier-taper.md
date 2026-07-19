@@ -1,5 +1,7 @@
 # Owner Packet 6 — Tier taper activation band
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** choose the taper band for the $1,000 micro↔small cliff before
 `ENABLE_LIVE_TIER_TAPER=1` is ever flipped — the **symmetric ±10% [$900,
 $1,100]** band (shipped DARK, #1283) or the **conservative never-loosen

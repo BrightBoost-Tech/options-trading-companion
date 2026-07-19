@@ -1,5 +1,7 @@
 # Owner Packet 4 — Single-leg experiment OPT-IN designation
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** designate which policies opt into the one-contract shadow-only
 single-leg (long_call / long_put) experiment (PR #1287, DARK). Today **0**
 policies opt in (verified DB) so the generator emits nothing. **This packet

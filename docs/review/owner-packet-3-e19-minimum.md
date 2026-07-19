@@ -1,5 +1,7 @@
 # Owner Packet 3 — E19-2B `MINIMUM_DISTINCT_SOURCE_EVENTS`
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** set the one missing number in the FROZEN E19-2B protocol
 (`docs/specs/e19_2b_preregistered_protocol.md` §7) — the minimum
 `COUNT(DISTINCT decision_event_id)` that must accrue under the `small_tier_v1`

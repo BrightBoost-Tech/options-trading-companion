@@ -1,5 +1,7 @@
 # Owner Packet 5 — TCM v2 promotion threshold (N)
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** pick the realized-evidence threshold **N** that must clear before
 `ENABLE_LIVE_TCM_MODEL` may be flipped, promoting the routing-aware commission
 (broker-routed options = $0) into the decision path. **This packet executes

@@ -1,5 +1,7 @@
 # Owner Packet 7 — Greek caps staged arming
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** choose a staged plan to eventually arm greek caps — **Plan A**
 (alert-only → soft-size → never-block) or **Plan B** (alert-only → hard-block
 tightest row only). **This packet executes nothing; caps stay 0 tonight.** The

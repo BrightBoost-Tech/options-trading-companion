@@ -1,5 +1,7 @@
 # Owner Packet 2 — H7 disposition ratification
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** ratify how a round-trip-BP / gate death (E4/E5 class) is recorded
 in `candidate_terminal_dispositions` — **retain** the current
 `h7_dropped`-parent + typed subreason, **or** promote gate deaths to a new

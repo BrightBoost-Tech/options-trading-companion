@@ -10,7 +10,53 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (closed at `27204bd0` + docs; all four services
+deploy-verified per merge). **MERGED+DEPLOYED (5; serialized #1296→#1299→#1297→#1298→#1300, each
+Fable-central adversarially reviewed):** #1296 `8a7908f1` (⑤ scorable-outcome join readiness —
+end-to-end producer→consumer contract test; **COMPLETE verdict, no join gap**; both spot source
+labels pinned) · #1299 `fdf5b55c` (TCM v2 multi-fill realized accrual — side-flip boundary;
+per-side **all-or-unavailable** sums; AMD proof `$1.30` true vs `$0.65` undercount; observe-only) ·
+#1297 `df87fe93` (single-leg one-contract selection — deterministic **EV→delta→debit→lexical**
+tie-breaker; **DARK, 0 opt-in, zero production callers**) · #1298 `4ffca2b1` (owner ratifications
+v1 — **7 decisions RECORDED not activated**; **E19 protocol hash UNTOUCHED**; **taper band conflict
+recorded** — engine `[900,1100]` vs ratified `[800,1000]`, reconciliation = later code step) ·
+#1300 `27204bd0` (Monday consolidated evidence reader — 12 sections, four-state honesty `OK`/
+`HONEST-EMPTY`/`FAILED-FETCH`/`NOT-FETCHED`; operator prompt
+`docs/review/monday-evidence-operator-prompt-2026-07-20.md`; read-only). **PHASE 1 (Sunday nightly
+under the wrapper) = WRAPPER_PARTIAL:** a VALID FULL audit report was produced (SHA-pinned
+`17141967`, 0 crit/high), but the runner's start/end markers, heartbeats, fresh-worktree path, and
+ping did **not** land in the operator `cron.log` (manifest `workspace.path='.'`, no
+`%LOCALAPPDATA%` worktree — the runner ran with `cwd='.'` semantics) ⇒ **nightly-runner P1 stays
+OPEN**; new finding **F-RUNNER-BROKER-CREDS** (scrubbed broker snapshot `available:false` — creds
+unset in the shim env). **PHASE 2 (fleet activation dry-run) = SIGNED_DRY_RUN_PASS:**
+`plan_activation` proven zero-write/no-env by code (`:639-685`); fingerprint `6f8d1499…` recomputed
+from the bundle AND rebuilt from pure DB truth to the SAME hash; **350/350 binding field-cells
+match**; counts byte-identical before/after (1 `pending_legacy_terminal` / 50 inactive / 0 active /
+0 bindings / 50 `shadow_only` / 0 activation receipts); **ACTIVATION STILL FORBIDDEN** — needs
+Monday evidence PASS + a separate token per ratification 1. **States:** single-leg DARK 0/50 opt-in
+· TCM v2 observe-only · taper DARK (**band reconciliation pending**) · greek caps 0 · OI no-gate ·
+E19-2B BLOCKED (ratified minimum **8** awaits protocol **v3 re-freeze**) · UI
+**BLOCKED_UI_FILE_OWNERSHIP** · operator checkout hash `ddb9e073` (drift = the nightly's own
+artifacts). **ZERO migration / production-DB-write / broker / env / fleet mutations this run;
+`ACTIVATE_FLEET=false`; `entries_paused` untouched.** Full record:
+`docs/review/sunday-implementation-results-2026-07-19.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **nightly-runner marker/worktree/ping fix + ping-provider check** (P1, morning) — fix the
+   fresh-worktree + markered-lifecycle wiring so the wrapper contract completes; confirm the 07-19
+   dead-man ping at the provider; carry F-RUNNER-BROKER-CREDS (shim broker creds unset).
+2. **Monday ≥ 17:45Z:** run `monday_evidence_reader` (operator prompt) → review → **fleet
+   activation decision** (packet 1 + ratification 1; standing = `READY_TO_ACTIVATE`).
+3. **⑤ + event-review natural accrual:** the scorable-outcome join is proven ready (#1296); the
+   first scorable close auto-triggers the model review.
+4. **Later code steps from the ratifications:** taper band reconciliation (`[900,1100]`→`[800,1000]`
+   + `ENGINE_VERSION` bump) · E19 protocol **v3 re-freeze** (adopt minimum 8) · single-leg draft
+   policy rows (two NEW `draft` registrations) · TCM promotion review at **N = 15**.
+5. **UI** when the Palette PR fleet clears the front-end file ownership.
+
+## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR CLOSED (superseded by the Sunday-implementation standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `4851ec8d` + docs; all four services
 deploy-verified per merge). **MERGED+DEPLOYED (6; serialized #1290→#1289→#1291→#1293→#1294→#1292,

@@ -4,6 +4,65 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
+
+Full record: `docs/review/sunday-implementation-results-2026-07-19.md`. **Five merges**, each
+adversarially (Fable-central) reviewed, serialized, per-merge all-services deploy SUCCESS
+(VERIFIED-GITHUB + VERIFIED-DEPLOYMENT). Serialized order #1296→#1299→#1297→#1298→#1300; final
+code main **`27204bd0`**. **ZERO broker / production-DB-write / migration / env / fleet mutations
+this run.**
+
+- **#1296 `8a7908f1`** ⑤ scorable-outcome join readiness — end-to-end producer→consumer contract
+  test; **COMPLETE verdict, no join gap** (the challenger-scorable spine is proven wired end to
+  end); both spot source labels pinned (scan-time capture vs typed-unavailable).
+- **#1299 `fdf5b55c`** TCM v2 multi-fill realized accrual — side-flip boundary handled; per-side
+  **all-or-unavailable** sums (a partial-known side types UNAVAILABLE, never summed as partial);
+  AMD proof `$1.30` true vs `$0.65` prior undercount; observe-only.
+- **#1297 `df87fe93`** single-leg one-contract selection — deterministic tie-breaker
+  **EV→delta→debit→lexical**; **DARK, 0 opt-in, zero production callers** (selection for opted-in
+  policies is the next slice; nothing selects today).
+- **#1298 `4ffca2b1`** owner ratifications v1 — **7 decisions RECORDED, none activated**; the
+  frozen **E19 protocol hash is UNTOUCHED** (immutability pin stays green); **taper band conflict
+  recorded** — engine `[900,1100]` (`BAND_PCT=0.10`) vs ratified `[800,1000]`; per the conflict
+  rule the engine is NOT altered, reconciliation = a later code step.
+- **#1300 `27204bd0`** Monday consolidated evidence reader — 12 natural-evidence sections,
+  **four-state honesty** per section (`OK` / `HONEST-EMPTY` / `FAILED-FETCH` / `NOT-FETCHED`; a
+  failed fetch is never scored zero, H9); operator prompt
+  `docs/review/monday-evidence-operator-prompt-2026-07-20.md`; read-only pure function.
+
+**Phase 1 — Sunday nightly under the wrapper: WRAPPER_PARTIAL.** The 07-19 00:00 CT shim launched
+the new runner and a VALID FULL audit report was produced (SHA-pinned `17141967`, **0 crit / 0
+high**), BUT the runner's start/end markers, heartbeats, fresh-worktree path, and completion ping
+did **not** land in the operator `cron.log` (manifest `workspace.path='.'`; **no `%LOCALAPPDATA%`
+worktree** — the runner ran with `cwd='.'` semantics). ⇒ **nightly-runner reliability P1 stays
+OPEN.** Morning items: (1) fix the marker / fresh-worktree wiring; (2) **check the 07-19 dead-man
+ping at the provider** (it did not reach the log). New finding **F-RUNNER-BROKER-CREDS** —
+scrubbed broker snapshot `available:false` (broker creds unset in the shim env; non-blocking, a
+morning wiring fix, not a trading-control issue).
+
+**Phase 2 — Fleet activation dry-run (signed replication): SIGNED_DRY_RUN_PASS.** `plan_activation`
+proven zero-write / no-env by CODE (`:639-685`); fingerprint `6f8d1499…` recomputed from the ops
+bundle **AND** rebuilt from pure DB truth to the SAME hash; **350/350 binding field-cells match**;
+fleet counts byte-identical before/after (1 `pending_legacy_terminal` / 50 inactive / 0 active / 0
+bindings / 50 `shadow_only` / **0 activation receipts**). **ACTIVATION STILL FORBIDDEN** — needs
+the Monday natural-evidence PASS + a separate explicit operator token per ratification 1
+(`FLEET_ACTIVATION_AUTHORIZED=1` + `execute_activation` confirm-literal + idempotency key + 50-slot
+payload + §4 attestation). Readiness is not authorization; recorded as read-only replication.
+
+**Dark/observe-only states (nothing armed):** single-leg DARK 0/50 opt-in · TCM v2 observe-only
+(ratified promotion N=15, a later review) · taper DARK (**band reconciliation pending**: engine
+`[900,1100]` vs ratified `[800,1000]`) · greek caps 0 (Plan A staged) · OI no-gate · E19-2B BLOCKED
+(ratified minimum **8** awaits protocol **v3 re-freeze** per its §13 procedure) · UI
+**BLOCKED_UI_FILE_OWNERSHIP** (Palette-owned). Operator checkout at hash **`ddb9e073`** — the only
+drift from main is the nightly's own artifacts (untracked dated report + local runner outputs), not
+a code divergence. `ACTIVATE_FLEET=false`; `entries_paused` untouched.
+
+**Owner decisions still OPEN (the seven ratification packets):** fleet ACTIVATION (first, after
+Monday PASS; + token + attestation) · `h7_dropped` retention (RETAINED, ratifies merged code, no
+step) · E19 §7 minimum adoption (protocol v3 re-freeze) · single-leg opt-in designation (two NEW
+draft rows) · TCM promotion at N=15 · taper band reconciliation + activation · greek-cap arming
+(Plan A stages).
+
 ## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/parallel-implementation-results-2026-07-19.md`. **Six merges**, each

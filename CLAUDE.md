@@ -494,6 +494,41 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   operator checkout clean-behind (5c6ae8bf…) · UI still Palette-owned. ZERO
   broker / production-DB-write / migration / env / fleet mutations this run;
   ACTIVATE_FLEET=false; entries_paused untouched.
+  **07-19 SUNDAY IMPLEMENTATION run** (`docs/review/
+  sunday-implementation-results-2026-07-19.md`): five merges, Fable-central
+  adversarial review + per-merge deploy each; serialized
+  #1296→#1299→#1297→#1298→#1300; final code main `27204bd0` — #1296 8a7908f1 ⑤
+  scorable-outcome join readiness (end-to-end producer→consumer contract test;
+  COMPLETE verdict, no join gap; both spot source labels pinned) · #1299
+  fdf5b55c TCM v2 multi-fill realized accrual (side-flip boundary; per-side
+  all-or-unavailable sums; AMD proof $1.30 vs $0.65 undercount; observe-only) ·
+  #1297 df87fe93 single-leg one-contract selection (deterministic
+  EV→delta→debit→lexical tie-breaker; DARK, 0 opt-in, zero production callers) ·
+  #1298 4ffca2b1 owner ratifications v1 (7 decisions RECORDED not activated; E19
+  protocol hash UNTOUCHED; taper band conflict recorded — engine [900,1100] vs
+  ratified [800,1000], reconciliation = later code step) · #1300 27204bd0 Monday
+  consolidated evidence reader (12 sections, four-state honesty
+  OK/HONEST-EMPTY/FAILED-FETCH/NOT-FETCHED; operator prompt
+  monday-evidence-operator-prompt-2026-07-20.md; read-only). **Phase 1 (Sunday
+  nightly under the wrapper) = WRAPPER_PARTIAL**: a VALID FULL audit report was
+  produced (SHA-pinned 17141967, 0 crit/high), but the runner's start/end
+  markers, heartbeats, fresh-worktree path, and ping did NOT land in the
+  operator cron.log (manifest workspace.path='.', no %LOCALAPPDATA% worktree —
+  cwd='.' semantics) ⇒ nightly-runner P1 stays OPEN; morning: fix marker/worktree
+  wiring + check the 07-19 dead-man ping at the provider; new finding
+  F-RUNNER-BROKER-CREDS (scrubbed snapshot available:false — creds unset in the
+  shim env). **Phase 2 (fleet activation dry-run) = SIGNED_DRY_RUN_PASS**:
+  plan_activation proven zero-write/no-env by code (:639-685); fingerprint
+  6f8d1499… recomputed from the bundle AND rebuilt from pure DB truth to the SAME
+  hash; 350/350 binding field-cells match; counts byte-identical before/after (1
+  pending_legacy_terminal / 50 inactive / 0 active / 0 bindings / 50 shadow_only /
+  0 activation receipts); **ACTIVATION STILL FORBIDDEN** — needs Monday evidence
+  PASS + a separate token per ratification 1. States: single-leg DARK 0/50 opt-in
+  · TCM v2 observe-only · taper DARK (band reconciliation pending) · greek caps 0
+  · OI no-gate · E19 BLOCKED (ratified minimum 8 awaits protocol v3 re-freeze) ·
+  UI BLOCKED_UI_FILE_OWNERSHIP · operator checkout hash ddb9e073 (drift = the
+  nightly's own artifacts). ZERO migration / production-DB-write / broker / env /
+  fleet mutations this run; ACTIVATE_FLEET=false; entries_paused untouched.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -934,7 +969,7 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-19 parallel-implementation run)
+## Current overnight standing (2026-07-16; updated through the 07-19 Sunday-implementation run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
@@ -959,6 +994,30 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
   ratio-blindness was RESOLVED 07-19 (#1290) — no greek defect remains
   pinned, though all four caps still default 0 (arming is a separate owner
   decision).
+- **07-19 Sunday-implementation run: the dry-run was re-signed
+  (`SIGNED_DRY_RUN_PASS`)** — fingerprint `6f8d1499…` recomputed from the ops
+  bundle AND rebuilt from pure DB truth to the SAME hash, 350/350 binding
+  field-cells match, counts byte-identical (READY_TO_ACTIVATE holds). **The
+  fleet is STILL NOT active** — activation now waits on ONE gate: a clean Monday
+  (2026-07-20) natural-runtime cycle read via `monday_evidence_reader`, then a
+  separate explicit operator token per ratification 1 (`FLEET_ACTIVATION_
+  AUTHORIZED=1` + `execute_activation` confirm-literal + idempotency key + 50-slot
+  payload + §4 attestation). Readiness ≠ authorization. The seven owner packets
+  are now RECORDED (ratifications v1, #1298 — RECORDED, activates NOTHING): fleet
+  activation (blocked on Monday PASS) · RETAIN `h7_dropped` (no step) · E19
+  minimum **8** (awaits protocol **v3 re-freeze**) · single-leg opt-in = two NEW
+  draft rows · TCM promotion **N=15** · taper band **`[800,1000]`** (⚠ conflicts
+  with the merged engine's `[900,1100]` — reconciliation is a later code step,
+  the engine is NOT altered) · greek caps Plan A staged.
+- **07-19 nightly-runner remains a P1 OPEN item (`WRAPPER_PARTIAL`).** The Sunday
+  00:00 CT shim produced a VALID clean FULL audit report (`17141967`, 0
+  crit/high), but the wrapper CONTRACT did not complete — start/end markers,
+  heartbeats, the fresh `%LOCALAPPDATA%` worktree, and the completion ping never
+  reached the operator `cron.log` (manifest `workspace.path='.'` — `cwd='.'`
+  semantics). Morning fix: repair the marker/worktree wiring + check the 07-19
+  dead-man ping at the provider. New finding **F-RUNNER-BROKER-CREDS** (scrubbed
+  broker snapshot `available:false` — broker creds unset in the shim env;
+  non-blocking, a wiring fix).
 - #1228 is a draft read-only persisted-tape hash/count verifier with an
   operator-triggered job path. It is unscheduled and does not prove full
   deterministic strategy replay.

@@ -4,6 +4,83 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — EXTERNAL FULL AUDIT v1.6 ADJUDICATION (fable orchestrator + 5 opus area agents; READ-ONLY) · status:reported
+
+Executed `docs/review/external-full-audit-v1.6-current.md` (source classification
+**AUDIT_BRIEF_ONLY** — the document is an audit SPEC; absence of embedded results is expected,
+not a finding). Pinned immutable basis **`20ca312e`** = origin/main, all three services
+deploy-verified at it; issuance baseline `fdf5b55c` → pin delta = this session's own reviewed
+merges #1296–#1302 (incl. the operator's #1301 brief-merge). Sunday market-closed window ⇒
+runtime adjudication READ-ONLY: natural absence = **DEFERRED-SAMPLE**, never INCONCLUSIVE;
+nothing was triggered. Baseline: broker flat 0/0 · 0 crit/high 72h (41 warn + 9 info) ·
+`entries_paused=false` · fleet 1 `pending_legacy_terminal` / 50 inactive / 0 bindings / 0
+receipts · registry 50/50 approved. Full results (draft PR, NOT merged):
+`docs/review/external-full-audit-v1.6-results-2026-07-19.md`. **ZERO code /
+test-outside-docs / migration / DB-write / broker / env / fleet / deploy / merge actions.**
+
+**Retained (ranked; 10 findings + notes):**
+1. **F-RUNNER-WORKTREE-DEADFALLBACK — HIGH** (A9; EXTENDS the OPEN nightly-runner P1 — the
+   root cause of 07-19 WRAPPER_PARTIAL): truthy `Path("")` at `nightly_runner.py:918` kills
+   the `%LOCALAPPDATA%` fallback ⇒ worktree=`.` ⇒ the runner ran `git checkout --force
+   --detach origin/main` + `reset --hard origin/main` against the OPERATOR CHECKOUT
+   (reflog-proven; tracked `audit/ledger.md` uncommitted edits are at risk on every nightly)
+   AND cron.log markers were dropped (sharing-violation append swallowed at `:87-94` under the
+   shim's own redirect lock) while `_end_marker_written` was set unconditionally ⇒ completion
+   contract "met" + dead-man UP-ping fired over an empty evidence sink — success
+   indistinguishable from silent death, the exact mode #1264 was built to kill. Proof
+   VERIFIED-CODE + reflog.
+2. **F-A4-RISKBASIS-SILENT — MED** (A4, NEW): the `[RISK_BASIS_SHADOW]` instrument has never
+   emitted (`services/risk_basis_shadow.py:31` / `risk_budget_engine.py:418` /
+   `utilization_gate.py:353`); its silence blocks the P0-B arm gate.
+3. **F-A9-1 — MED** (A9, NEW P2 security; proof INFERRED-from-code):
+   `task_signing_v4._is_production_mode()` (`:59-79`) diverges from canonical
+   `security/config.is_production()`; an APP_ENV-only prod worker fails OPEN on nonce-store
+   outage (replay window widens to the 300s TTL) while `audit_production_security()` reads
+   healthy.
+4. **F-A9-2 — MED** (A9; EXTENDS skip-discipline): HMAC/security behavioral suites are
+   module-skipped (#768: task_signing_v4/run_signed_task/admin_auth/security_v3 · #769:
+   is_localhost_spoofing · #774: security_headers/api_info_disclosure/optimizer_security) —
+   replay/expiry/scope/fail-open have zero CI reach; the un-skipped fleet route test covers
+   happy-path + unsigned→401 only.
+5. **F-A10-HOLIDAY — MED, mitigated** (A10, NEW P2 calendar): `is_market_day()` weekday-only
+   with an affirmatively false docstring (`jobs/handlers/utils.py:49-69`; consumers
+   `suggestions_open.py:77` / `suggestions_close.py:54`); `safety_checks.py:100-108`
+   holiday-blind. Mitigations: broker rejects closed-market orders; monitor + cooldown use the
+   holiday-aware broker clock.
+6. **A1-G1 — LOW**: ranker-basis zero realized overlap (detail in the results file).
+7. **A3-LIFECYCLE — LOW/NOTE**: disposition lifecycle values `staged`/`broker_submitted`/
+   `filled` defined-not-wired (`candidate_disposition.py:82-85`); lifecycle stops at persist.
+8. **A5-OI-KNOWNAT — LOW/NOTE**: OI freshness unobservable — `oi_freshness` always
+   `known_at_unavailable` (`quote_provenance.py:261-266`; truth layer `:1856` never sets
+   `open_interest_date`).
+9. **A2-ASSIGNMENT — LOW · DEFERRED-SAMPLE**: assignment/expiry custody NOT-PROVEN — no
+   natural sample exists; revisit on the first ITM-at-expiry live event.
+10. **A4-DIVISIBILITY — LOW-INERT**: `check_greeks` divisibility edge; inert while all caps 0.
+
+**NOTEs (not findings):** stale version-prefix comments (N1) · model-review fingerprint is
+id-set-only, content-blind (N2) · CLAUDE.md **70,827 B** vs the historical ≤40k self-cap (cap
+silently dropped from the header 07-16 rather than the file trimmed) · settings.json cosmetic
+`Write(audit/**)` warning · `secrets_audit.py` real but not CI-wired · **case-collision**: BOTH
+`.Jules/palette.md` AND `.jules/palette.md` are tracked (distinct blobs) — on a case-insensitive
+Windows checkout they collide into one file, so one of the two paths shows phantom `M` drift
+(VERIFIED in the fresh v1.6 audit worktree; restoring one re-dirties the other by construction;
+manifestation is checkout-order/ignorecase dependent — the operator checkout does not currently
+show it; fix = de-dup the tracked path in a normal code PR).
+
+**Free-look: 0 promotions** (≤2 budget unused — every candidate folded into an area finding or
+dedup'd). **Fleet verdict: READY_FOR_SEPARATE_AUTHORIZATION** (activation forbidden pending the
+Monday evidence PASS + separate token). **No live-control loosening recommended anywhere.**
+
+**Exclusion memory held (duplicates correctly NOT re-found; do not re-find these either):**
+WRAPPER_PARTIAL + F-RUNNER-BROKER-CREDS (now root-caused by finding 1) · taper band
+`[900,1100]`-vs-`[800,1000]` · shadow-fill fiction · greeks double-dormant · EXIT_EVAL_DEBUG
+partial fix · severity-taxonomy fragmentation · A4-detector single-convention · legacy-mode
+WARNING on designed client=None · winter-close blind hour (**RESOLVED** — DST-aware ET +
+broker-clock gating confirmed at the pin). **Clean re-verifications (cite, don't re-prove):**
+flag echo #1268 live in prod (30 flags, 0 parse errors) · fleet 4-gate fail-closed + registry
+immutability trigger + one-way draft · ratify≠activate (docs-only, 0 receipts) · #1300 reader
+read-only test-pinned · job_runs 519 succ / 0 failed / 0 partial (4d) · H8/H11 clean.
+
 ## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/sunday-implementation-results-2026-07-19.md`. **Five merges**, each

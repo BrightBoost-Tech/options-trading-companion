@@ -10,7 +10,59 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — EXTERNAL AUDIT v1.6 ADJUDICATED (authoritative standing; supersedes older queue text)
+
+Read-only ten-area current-state audit at pin `20ca312e` (five two-area opus agents, Fable-central
+adjudication; results: `docs/review/external-full-audit-v1.6-results-2026-07-19.md`, landed via a
+**draft** docs PR — not merged; the ledger 07-19 v1.6 entry is the exclusion memory). Source was
+the brief itself (`AUDIT_BRIEF_ONLY` — a spec, no embedded results; absence expected). **Zero
+code / test-outside-docs / migration / DB / broker / env / fleet / deploy / merge actions
+occurred.** Retained deltas are integrated EXACTLY ONCE, here:
+
+Re-ranked build order (folds the v1.6 deltas into the Sunday standing below):
+1. **nightly-runner P1 — now ROOT-CAUSED (HIGH: F-RUNNER-WORKTREE-DEADFALLBACK)** — truthy
+   `Path("")` at `audit/runner/nightly_runner.py:918` makes the `%LOCALAPPDATA%` worktree
+   fallback dead code ⇒ worktree=`.` ⇒ the 07-19 run mutated the OPERATOR CHECKOUT
+   (`checkout --force` + `reset --hard`, reflog-proven) and its cron.log markers were silently
+   swallowed (`:87-94` OSError-pass under the shim's own redirect lock) while the completion
+   contract read "met" and the dead-man UP-ping fired. Fix: `Path(env) if env else
+   _local_appdata_worktree()`; never trust `_end_marker_written` without a verified append
+   (route markers via child stdout); carry F-RUNNER-BROKER-CREDS + the provider ping check.
+   This fully explains the 07-19 WRAPPER_PARTIAL.
+2. **Monday ≥ 17:45Z (unchanged):** `monday_evidence_reader` → review → fleet activation
+   decision — v1.6 verdict **READY_FOR_SEPARATE_AUTHORIZATION** (packet 1 + ratification 1 +
+   separate explicit token; activation stays forbidden until then).
+3. **P0-B arm-gate blocker (NEW, MED — F-A4-RISKBASIS-SILENT):** the `[RISK_BASIS_SHADOW]`
+   comparison instrument has NEVER emitted (`services/risk_basis_shadow.py:31` ·
+   `risk_budget_engine.py:418` · `utilization_gate.py:353`) — diagnose the emission path
+   before any P0-B arm decision; an unarmed instrument cannot green-light an arm.
+4. **Security P2 pair (NEW):** (a) F-A9-1 — reconcile `task_signing_v4._is_production_mode()`
+   (`:59-79`, keys `ENV`/`ENABLE_DEV_AUTH_BYPASS`) with canonical
+   `security/config.is_production()` (`APP_ENV`/`RAILWAY_ENVIRONMENT*`); today an
+   APP_ENV-only prod worker fails OPEN on nonce-store outage (replay window = 300s TTL).
+   (b) F-A9-2 — un-skip the HMAC behavioral suites (clusters #768/#769/#774):
+   replay/expiry/scope/fail-open currently have ZERO CI reach (EXTENDS skip-discipline).
+5. **Calendar P2 (NEW, mitigated — F-A10-HOLIDAY):** `is_market_day()` is weekday-only with an
+   affirmatively false docstring (`jobs/handlers/utils.py:49-69`);
+   `brokers/safety_checks.py:100-108` holiday-blind. Broker closed-market rejection is the only
+   holiday guard on entries today; falsifier: `is_market_day(2026-11-26)` → True.
+6. **Carried from the Sunday standing (unchanged):** ⑤ + event-review natural accrual · taper
+   band reconciliation (`[900,1100]`→`[800,1000]` + ENGINE_VERSION bump) · E19 protocol v3
+   re-freeze (minimum 8) · single-leg two draft registry rows · TCM promotion review at N=15 ·
+   UI when Palette clears file ownership.
+
+LOW/NOTE tail (full detail in the results file; no build without a trigger): A1-G1 ranker-basis
+zero realized overlap · A3 disposition lifecycle values `staged`/`broker_submitted`/`filled`
+defined-not-wired (`candidate_disposition.py:82-85`) · A5 OI freshness unobservable (always
+`known_at_unavailable`; `quote_provenance.py:261-266`, truth layer `:1856`) · A2
+assignment/expiry custody DEFERRED-SAMPLE (revisit on the first ITM-at-expiry live event) · A4
+`check_greeks` divisibility (inert while caps 0) · CLAUDE.md size drift (70,827B vs the ≤40k
+self-cap, cap dropped from the header) · stale version-prefix comments · model-review
+fingerprint id-set content-blindness · `.Jules/`-vs-`.jules/` tracked-path case-collision
+(phantom `M` in fresh case-insensitive Windows checkouts — verified in the audit worktree;
+de-dup in a normal code PR). **Free-look: 0 promotions. No live-control loosening.**
+
+## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR CLOSED (superseded by the v1.6 audit standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `27204bd0` + docs; all four services
 deploy-verified per merge). **MERGED+DEPLOYED (5; serialized #1296→#1299→#1297→#1298→#1300, each

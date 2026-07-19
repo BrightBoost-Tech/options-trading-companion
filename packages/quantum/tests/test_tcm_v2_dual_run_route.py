@@ -172,7 +172,9 @@ def _drive(route, combo_quote=None):
         ctx.enter_context(mock.patch.object(pe, "emit_trade_event", lambda *a, **k: None))
         ctx.enter_context(mock.patch.object(pe, "_apply_options_level_preflight", lambda *a, **k: None))
         ctx.enter_context(mock.patch.object(er, "get_execution_mode", lambda: exec_mode))
-        ctx.enter_context(mock.patch.object(er, "should_submit_to_broker", lambda pid, sb: should_submit))
+        # Signature mirror: should_submit_to_broker(portfolio_id, supabase, order=None)
+        # — the entry site threads order=order_row for the single-leg veto (PR #1292).
+        ctx.enter_context(mock.patch.object(er, "should_submit_to_broker", lambda pid, sb, order=None: should_submit))
         ctx.enter_context(mock.patch.object(pe, "_process_orders_for_user", lambda *a, **k: None))
         ctx.enter_context(mock.patch.dict("os.environ", env, clear=False))
         ctx.enter_context(mock.patch.object(aoh, "build_alpaca_order_request", lambda row: {}))

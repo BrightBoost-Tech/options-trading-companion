@@ -340,7 +340,11 @@ def _drive(route, snaps, suggestion=None, suggestion_id=None):
         # populate + insert (internal/dry/shadow skip it internally anyway).
         ctx.enter_context(mock.patch.object(pe, "_apply_options_level_preflight", lambda *a, **k: None))
         ctx.enter_context(mock.patch.object(er, "get_execution_mode", lambda: exec_mode))
-        ctx.enter_context(mock.patch.object(er, "should_submit_to_broker", lambda pid, sb: should_submit))
+        # Signature mirrors the real should_submit_to_broker(portfolio_id, supabase,
+        # order=None) — the entry site now threads order=order_row for the single-leg
+        # experiment veto (PR #1292). The fake still drives the real routing decision
+        # (returns `should_submit`); it just accepts the optional order= kwarg.
+        ctx.enter_context(mock.patch.object(er, "should_submit_to_broker", lambda pid, sb, order=None: should_submit))
         ctx.enter_context(mock.patch.object(pe, "_process_orders_for_user", lambda *a, **k: None))
         ctx.enter_context(mock.patch.dict("os.environ", env, clear=False))
         # Patch ATTRIBUTES on the real (pre-imported) modules so the live submit

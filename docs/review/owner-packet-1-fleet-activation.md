@@ -1,5 +1,7 @@
 # Owner Packet 1 — Shadow Fleet ACTIVATION (`small_tier_v1`)
 
+> **RATIFIED 2026-07-19** → see owner-ratifications-2026-07-19.md
+
 **Decision:** authorize activation of the 50 × $2,000 `small_tier_v1` shadow
 fleet. **This packet decides nothing and executes nothing** — activation
 remains forbidden to the loop and to every agent; only the operator, via the

@@ -158,6 +158,39 @@ close_o AS (
   FROM paper_orders po
   WHERE po.status = 'filled'
   ORDER BY po.position_id, po.filled_at DESC
+),
+-- FILL INVENTORY (TCM-v2 multi-fill accrual, Lane B): the COMPLETE ordered
+-- set of ALL filled orders per position, not just the earliest-open/latest-
+-- close pair above. The accrual splits this inventory at the first side-flip
+-- (entry = leading run of the opening side; close = the flip fill and every
+-- fill after it) and aggregates commission over EVERY fill in each side, so a
+-- position whose entry or close filled across multiple orders (18 live
+-- positions carry >2 filled orders, up to 6) is covered fill-complete instead
+-- of collapsing intermediate fills. Each order object carries its OWN tcm
+-- stamp / fees / routing so per-order commission is aggregated honestly.
+fills AS (
+  SELECT po.position_id,
+         json_agg(json_build_object(
+           'order_id',        po.id::text,
+           'side',            po.side,
+           'filled_qty',      po.filled_qty,
+           'requested_qty',   po.requested_qty,
+           'avg_fill_price',  po.avg_fill_price,
+           'requested_price', po.requested_price,
+           'fees_usd',        po.fees_usd,
+           'execution_mode',  po.execution_mode,
+           'has_alpaca_oid',  (po.alpaca_order_id IS NOT NULL),
+           'broker_status',   po.broker_status,
+           'tcm',             po.tcm,
+           'order_json',      po.order_json,
+           'filled_at',       to_char(po.filled_at AT TIME ZONE 'UTC',
+                                'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'has_credit_sign_correction',
+                              (po.order_json ? 'f_credit_sign_correction')
+         ) ORDER BY po.filled_at ASC, po.id ASC) AS fill_orders
+  FROM paper_orders po
+  WHERE po.status = 'filled' AND po.position_id IS NOT NULL
+  GROUP BY po.position_id
 )
 SELECT json_build_object(
   'schema_version', 1,
@@ -208,13 +241,17 @@ FROM (
     -- the accrual types the v2 side UNAVAILABLE, never zero.
     co.tcm                                                 AS close_tcm,
     -- PERSISTED ranker fee estimate (present only on ranked suggestions)
-    ts.ranking_costs                                       AS ranking_costs
+    ts.ranking_costs                                       AS ranking_costs,
+    -- COMPLETE fill inventory (multi-fill accrual, Lane B). NULL only if the
+    -- position has no filled orders at all; otherwise a time-ordered array.
+    COALESCE(fl.fill_orders, '[]'::json)                   AS fill_orders
   FROM cp
   LEFT JOIN open_o  oo  ON oo.position_id = cp.position_id
   LEFT JOIN close_o co  ON co.position_id = cp.position_id
                        AND co.filled_at > oo.filled_at
   LEFT JOIN trade_suggestions ts ON ts.id = cp.suggestion_id
   LEFT JOIN policy_lab_cohorts plc ON plc.id = cp.cohort_id
+  LEFT JOIN fills fl ON fl.position_id = cp.position_id
 ) x;
 """.strip()
 
@@ -965,6 +1002,16 @@ class TcmV2AccrualExample:
     close_gap_fraction: Optional[float]
     current_minus_realized: CostDelta          # current − realized commission
     v2_minus_realized: CostDelta               # proposed v2 − realized commission
+    # MULTI-FILL COVERAGE (Lane B). fill_count = number of CONTRIBUTING
+    # (nonzero-qty) filled orders aggregated into THIS side; quantity is their
+    # summed filled_qty (partial fills sum). On the legacy single-order path
+    # (no fill inventory) fill_count defaults to 1 and quantity is the position
+    # quantity — byte-identical to the pre-multi-fill behavior.
+    fill_count: int = 1
+    zero_fill_rows: int = 0                     # degenerate replay/no-op rows dropped from sums
+    position_quantity: Optional[float] = None  # pp.quantity context (never the sum)
+    multiplier: float = OPTION_MULTIPLIER      # explicit option multiplier (×100)
+    has_credit_sign_correction: bool = False   # any contributing order carried F-CREDIT-SIGN (noted, NOT re-corrected)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -974,15 +1021,25 @@ class TcmV2AccrualExample:
             "cohort": self.cohort,
             "fill_realism": self.fill_realism,
             "side": self.side,
+            "entry_or_close": self.side,          # task-named alias
             "routing": self.routing,
             "routing_source": self.routing_source,
             "strategy": self.strategy,
             "leg_count": self.leg_count,
+            "legs": self.leg_count,               # task-named alias
             "quantity": self.quantity,
+            "position_quantity": self.position_quantity,
+            "multiplier": self.multiplier,
+            "fill_count": self.fill_count,
+            "zero_fill_rows": self.zero_fill_rows,
+            "has_credit_sign_correction": self.has_credit_sign_correction,
             "model_version": self.model_version,
             "v2_stamp_present": self.v2_stamp_present,
             "known_at": self.known_at,
             "source": self.source,
+            "current_model": self.current_model_cost.as_dict(),   # task-named alias
+            "tcm_v2": self.tcm_v2_cost.as_dict(),                  # task-named alias
+            "realized": self.realized_commission.as_dict(),       # task-named alias
             "current_model_cost": self.current_model_cost.as_dict(),
             "tcm_v2_cost": self.tcm_v2_cost.as_dict(),
             "realized_commission": self.realized_commission.as_dict(),
@@ -990,6 +1047,8 @@ class TcmV2AccrualExample:
             "close_gap_fraction": self.close_gap_fraction,
             "current_minus_realized": self.current_minus_realized.as_dict(),
             "v2_minus_realized": self.v2_minus_realized.as_dict(),
+            "current_error": self.current_minus_realized.as_dict(),  # task-named alias
+            "v2_error": self.v2_minus_realized.as_dict(),            # task-named alias
         }
 
 
@@ -1064,14 +1123,32 @@ def _accrual_example_for_side(
         close_gap_fraction=gap_fraction,
         current_minus_realized=current_minus_realized,
         v2_minus_realized=v2_minus_realized,
+        fill_count=1,
+        position_quantity=qty,
     )
 
 
 def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
-    """Map ONE db row to its entry + close TCM v2 accrual examples. The close
-    example exists ONLY when a distinct close order filled (single-fill
-    positions yield an entry example only). Pure; never raises on a partial
-    row (missing pieces type UNAVAILABLE)."""
+    """Map ONE db row to its entry + close TCM v2 accrual examples.
+
+    MULTI-FILL PATH (Lane B): when the row carries a ``fill_orders`` inventory
+    (the complete time-ordered set of filled orders — the new STUDY_SQL
+    column), commission is aggregated over EVERY contributing fill in each side
+    (fill-complete coverage; the 18 live positions with >2 filled orders no
+    longer collapse their intermediate fills). See
+    ``_accrual_examples_from_inventory``.
+
+    LEGACY PATH: with no inventory (older payloads / the pre-multi-fill fixture
+    shape) it falls back to the earliest-open/latest-close representative grain
+    below — byte-identical to the pre-multi-fill behavior.
+
+    The close example exists ONLY when a distinct close side is present
+    (single-fill positions yield an entry example only). Pure; never raises on
+    a partial row (missing pieces type UNAVAILABLE)."""
+    inventory = row.get("fill_orders")
+    if isinstance(inventory, list) and inventory:
+        return _accrual_examples_from_inventory(row, inventory)
+
     cohort = classify_cohort(row.get("cohort_name"))
     realism = fill_realism(row.get("fill_source"))
     qty = _coerce_float(row.get("quantity"))
@@ -1104,6 +1181,303 @@ def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
     return examples
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MULTI-FILL INVENTORY PATH (Lane B) — fill-complete commission accrual.
+#
+# The legacy path above collapses a position to its earliest-open + latest-
+# close order, dropping every intermediate fill (the reviewer's #1289 flag: 18
+# live positions carry >2 filled orders, up to 6). This path consumes the full
+# ``fill_orders`` inventory and aggregates commission over EVERY contributing
+# fill of each side.
+#
+# BOUNDARY ADJUDICATION (honest, derived from the data, not a hard-coded rule):
+#   fills are time-ordered by filled_at; the OPENING side is the side of the
+#   first nonzero fill (the position-creating order); the ENTRY set is the
+#   leading run of that side; the FIRST fill whose side flips is the CLOSE
+#   boundary and it — plus every fill after it — is the CLOSE set. A single-
+#   side position (no flip) yields an entry example only. This matches the
+#   observed shapes exactly: credit opens (sell→buy-to-close), debit opens
+#   (buy→sell-to-close), and multi-order partial closes.
+#
+# AGGREGATION: per-side commission is the SUM of the per-ORDER frozen-TCM /
+# proposed-v2 / realized-broker commissions over the side's CONTRIBUTING
+# (nonzero-qty) fills — quantity and multiplier explicit, fill_count emitted.
+# A side total is AVAILABLE only when EVERY contributing order's component is
+# available (H9: a partial total is UNAVAILABLE, never a silent undercount);
+# realized is broker-true only, so a side with ANY internal fill types realized
+# UNAVAILABLE. Zero-qty rows (replay / no-op retries — 4 in the live set) are
+# dropped from the sums and counted separately in ``zero_fill_rows``.
+#
+# IDEMPOTENCY: orders are deduped by order_id (a duplicated inventory entry
+# collapses) before splitting; the whole path is a PURE function of the payload
+# (re-run = byte-identical). Distinct order_ids that happen to carry identical
+# content are NOT merged — replay fictions are SURFACED via fill_count/quantity
+# (docs/specs/shadow_fill_realism.md), never silently corrected.
+#
+# CORRECTION MARKERS: F-CREDIT-SIGN rows are already the corrected magnitude —
+# ``has_credit_sign_correction`` NOTES their presence; commission is abs()'d and
+# the close fill-gap reuses the frozen sign-correct extractor, so nothing is
+# re-corrected.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _norm_side(side: Any) -> str:
+    return str(side or "").strip().lower()
+
+
+def _split_fill_inventory(
+    orders: List[Any],
+) -> Tuple[List[Mapping[str, Any]], List[Mapping[str, Any]]]:
+    """(entry_orders, close_orders) split at the first side-flip. Deduped by
+    order_id (idempotent) and time-ordered by (filled_at, order_id)."""
+    seen: set = set()
+    deduped: List[Mapping[str, Any]] = []
+    for o in orders:
+        if not isinstance(o, Mapping):
+            continue
+        oid = str(o.get("order_id") or "")
+        if oid and oid in seen:
+            continue  # duplicated inventory entry — collapse (idempotency)
+        if oid:
+            seen.add(oid)
+        deduped.append(o)
+    ordered = sorted(
+        deduped,
+        key=lambda o: (str(o.get("filled_at") or ""), str(o.get("order_id") or "")),
+    )
+    if not ordered:
+        return [], []
+    # Opening side = side of the first NONZERO fill (the position-creating
+    # order); a leading zero-qty artifact never defines the side.
+    entry_side: Optional[str] = None
+    for o in ordered:
+        if _abs(o.get("filled_qty")):
+            entry_side = _norm_side(o.get("side"))
+            break
+    if entry_side is None:
+        entry_side = _norm_side(ordered[0].get("side"))
+    # The close boundary is the first NONZERO fill whose side flips away from
+    # the opening side; a zero-qty artifact (replay / no-op) never marks the
+    # boundary and never defines a side.
+    boundary = len(ordered)
+    for i, o in enumerate(ordered):
+        if _abs(o.get("filled_qty")) and _norm_side(o.get("side")) != entry_side:
+            boundary = i
+            break
+    return ordered[:boundary], ordered[boundary:]
+
+
+def _sum_components_total(
+    name: str,
+    comps: List[CostComponent],
+    cost_side: CostSide,
+    source: CostSource,
+    basis: CostBasisKind,
+    prov: Optional[Provenance],
+    side_qty: Optional[float],
+) -> CostComponent:
+    """SUM a side's per-order commission components into one TOTAL-USD
+    component. Available ONLY when every component is available (H9: a partial
+    total is UNAVAILABLE, never a silent undercount). Empty → UNAVAILABLE."""
+    if not comps:
+        return CostComponent.make_unavailable(
+            name, source, cost_side, basis, CostUnit.TOTAL,
+            "no_contributing_fills", quantity=side_qty, provenance=prov,
+        )
+    total = 0.0
+    reasons: List[str] = []
+    for c in comps:
+        if c.available and c.amount_usd is not None:
+            total += float(c.amount_usd)
+        else:
+            reasons.append(c.unavailable_reason or "unavailable")
+    if reasons:
+        n_ok = len(comps) - len(reasons)
+        uniq = ",".join(sorted(set(reasons)))
+        return CostComponent.make_unavailable(
+            name, source, cost_side, basis, CostUnit.TOTAL,
+            f"incomplete_side:{n_ok}/{len(comps)}_available[{uniq}]"[:180],
+            quantity=side_qty, provenance=prov,
+        )
+    return CostComponent(
+        name=name, source=source, side=cost_side, basis=basis,
+        unit=CostUnit.TOTAL, amount_usd=total, quantity=side_qty,
+        provenance=prov,
+    )
+
+
+def _inventory_side_example(
+    row: Mapping[str, Any], side: str, side_orders: List[Mapping[str, Any]],
+    cohort: str, realism: str, pos_qty: Optional[float],
+) -> TcmV2AccrualExample:
+    """Build ONE aggregated accrual example for a side from its fill inventory."""
+    cost_side = _side_enum(side)
+    contributing = [o for o in side_orders if _abs(o.get("filled_qty"))]
+    zero_rows = len(side_orders) - len(contributing)
+    fill_count = len(contributing)
+    side_qty = sum(_abs(o.get("filled_qty")) or 0.0 for o in contributing) or None
+    has_correction = any(
+        bool(o.get("has_credit_sign_correction")) for o in side_orders
+    )
+
+    stamps = [_v2_stamp(o.get("tcm")) for o in contributing]
+    stamped = [s for s in stamps if s is not None]
+
+    # current model commission — SUM of per-order frozen TCM fees.
+    current_cost = _sum_components_total(
+        "current_model_cost",
+        [_current_model_commission_component(o.get("tcm"), side) for o in contributing],
+        cost_side, CostSource.TCM, CostBasisKind.ESTIMATED,
+        _CURRENT_MODEL_COMMISSION_PROV, side_qty,
+    )
+
+    # proposed v2 commission — SUM of per-order stamps. When NO order carries a
+    # stamp (all pre-#1278, the live multi-fill reality today) type one clean
+    # UNAVAILABLE rather than an "incomplete" aggregate.
+    if not contributing:
+        v2_cost = CostComponent.make_unavailable(
+            "tcm_v2_cost", CostSource.TCM, cost_side, CostBasisKind.ESTIMATED,
+            CostUnit.TOTAL, "no_contributing_fills", quantity=side_qty,
+            provenance=Provenance(model_version=_V2_VERSION_UNAVAILABLE),
+        )
+    elif not stamped:
+        v2_cost = CostComponent.make_unavailable(
+            "tcm_v2_cost", CostSource.TCM, cost_side, CostBasisKind.ESTIMATED,
+            CostUnit.TOTAL, "no_v2_stamp_pre_1278", quantity=side_qty,
+            provenance=Provenance(model_version=_V2_VERSION_UNAVAILABLE),
+        )
+    else:
+        v2_prov = Provenance(
+            model_version=str(stamped[0].get("model_version") or "tcm_v2_proposal/unknown"),
+            source_detail=str(stamped[0].get("source") or "unknown_source"),
+        )
+        v2_cost = _sum_components_total(
+            "tcm_v2_cost",
+            [_v2_proposed_commission_component(s, side) for s in stamps],
+            cost_side, CostSource.TCM, CostBasisKind.ESTIMATED, v2_prov, side_qty,
+        )
+
+    # realized broker commission — SUM per routing (broker-true only).
+    realized_commission = _sum_components_total(
+        "realized_commission",
+        [
+            _realized_commission_component(
+                "realized_commission", cost_side, o.get("execution_mode"),
+                o.get("has_alpaca_oid"), o.get("broker_status"), o.get("fees_usd"),
+            )
+            for o in contributing
+        ],
+        cost_side, CostSource.REALIZED, CostBasisKind.REALIZED,
+        _COMMISSION_PROV, side_qty,
+    )
+
+    # carried realized spread/fill-gap context — the FINAL contributing close
+    # order (latest filled) is the representative; entry side has none.
+    if side == "close" and contributing:
+        rep = contributing[-1]
+        rep_oj = rep.get("order_json") if isinstance(rep.get("order_json"), Mapping) else None
+        spread_gap, gap_fraction = _realized_fill_gap_component(
+            side, rep_oj, rep.get("avg_fill_price"), side_qty,
+        )
+    else:
+        spread_gap, gap_fraction = _realized_fill_gap_component(side, None, None, side_qty)
+
+    current_minus_realized = _delta(
+        "current_minus_realized", current_cost, realized_commission,
+        note=("TOTAL USD commission summed over ALL entry/close fills; current "
+              "frozen TCM − realized broker commission; positive = over-charge"),
+    )
+    v2_minus_realized = _delta(
+        "v2_minus_realized", v2_cost, realized_commission,
+        note=("TOTAL USD commission summed over ALL fills; proposed v2 − "
+              "realized broker commission; 0 on all-broker fills = tracks realized"),
+    )
+
+    # version segregation key — unanimous stamp version, sentinel, or mixed.
+    versions = sorted({
+        str(s.get("model_version") or "tcm_v2_proposal/unknown") for s in stamped
+    })
+    if not versions:
+        model_version = _V2_VERSION_UNAVAILABLE
+    elif len(versions) == 1:
+        model_version = versions[0]
+    else:
+        model_version = "mixed:" + "+".join(versions)
+
+    first_stamp = stamped[0] if stamped else None
+    side_broker = bool(contributing) and all(
+        _broker_routed(o.get("execution_mode"), o.get("has_alpaca_oid"),
+                       o.get("broker_status"))
+        for o in contributing
+    )
+    routing, routing_source = _accrual_routing(first_stamp, side_broker, cohort)
+
+    leg_count: Optional[int] = None
+    for s in stamped:
+        if s.get("leg_count") is not None:
+            try:
+                leg_count = int(s["leg_count"])
+                break
+            except (TypeError, ValueError):
+                leg_count = None
+    if leg_count is None:
+        rc = row.get("ranking_costs")
+        if isinstance(rc, Mapping) and rc.get("leg_count") is not None:
+            try:
+                leg_count = int(rc["leg_count"])
+            except (TypeError, ValueError):
+                leg_count = None
+
+    record_id = str(row.get("record_id"))
+    return TcmV2AccrualExample(
+        example_id=f"{record_id}:{side}",
+        record_id=record_id,
+        suggestion_id=str(row.get("suggestion_id") or ""),
+        cohort=cohort,
+        fill_realism=realism,
+        side=side,
+        routing=routing,
+        routing_source=routing_source,
+        strategy=str(row.get("strategy") or "unknown"),
+        leg_count=leg_count,
+        quantity=side_qty,
+        model_version=model_version,
+        v2_stamp_present=bool(stamped),
+        known_at=str(row.get("closed_at") or ""),
+        source=("tcm_v2_proposal@stage" if stamped else "no_v2_stamp"),
+        current_model_cost=current_cost,
+        tcm_v2_cost=v2_cost,
+        realized_commission=realized_commission,
+        realized_spread_or_fill_gap=spread_gap,
+        close_gap_fraction=gap_fraction,
+        current_minus_realized=current_minus_realized,
+        v2_minus_realized=v2_minus_realized,
+        fill_count=fill_count,
+        zero_fill_rows=zero_rows,
+        position_quantity=pos_qty,
+        has_credit_sign_correction=has_correction,
+    )
+
+
+def _accrual_examples_from_inventory(
+    row: Mapping[str, Any], inventory: List[Any],
+) -> List[TcmV2AccrualExample]:
+    """Entry + close aggregated accrual examples from a fill inventory. The
+    close example exists only when a side-flip produced a close set."""
+    cohort = classify_cohort(row.get("cohort_name"))
+    realism = fill_realism(row.get("fill_source"))
+    pos_qty = _coerce_float(row.get("quantity"))
+    entry_orders, close_orders = _split_fill_inventory(inventory)
+    examples = [
+        _inventory_side_example(row, "entry", entry_orders, cohort, realism, pos_qty)
+    ]
+    if close_orders:
+        examples.append(
+            _inventory_side_example(row, "close", close_orders, cohort, realism, pos_qty)
+        )
+    return examples
+
+
 def _dedup_examples(
     examples: List[TcmV2AccrualExample],
 ) -> List[TcmV2AccrualExample]:
@@ -1133,6 +1507,10 @@ class TcmV2VersionBucket:
     realized_commission_unavailable: int
     current_minus_realized: DeltaStat
     v2_minus_realized: DeltaStat
+    # multi-fill coverage: how many examples aggregated >1 contributing fill
+    # (the fill-complete coverage this lane adds), and the total fills covered.
+    n_multi_fill: int = 0
+    fills_covered: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1141,6 +1519,8 @@ class TcmV2VersionBucket:
             "n_examples": self.n_examples,
             "n_entry": self.n_entry,
             "n_close": self.n_close,
+            "n_multi_fill": self.n_multi_fill,
+            "fills_covered": self.fills_covered,
             "v2_stamp_present": self.v2_stamp_present,
             "v2_stamp_absent": self.v2_stamp_absent,
             "realized_commission_known": self.realized_commission_known,
@@ -1171,6 +1551,8 @@ def _build_v2_bucket(
         n_examples=len(examples),
         n_entry=sum(1 for e in examples if e.side == "entry"),
         n_close=sum(1 for e in examples if e.side == "close"),
+        n_multi_fill=sum(1 for e in examples if (e.fill_count or 0) > 1),
+        fills_covered=sum((e.fill_count or 0) for e in examples),
         v2_stamp_present=sum(1 for e in examples if e.v2_stamp_present),
         v2_stamp_absent=sum(1 for e in examples if not e.v2_stamp_present),
         realized_commission_known=sum(
@@ -1313,6 +1695,11 @@ def _render_tcm_v2_accrual(report: TcmV2AccrualReport) -> List[str]:
     L.append("- Buckets are keyed on (cohort, v2 `model_version`): a version "
              "bump lands post-bump examples in a NEW bucket — versions never "
              "pool. IDEMPOTENT: pure function of the DB; re-run = same output.")
+    L.append("- MULTI-FILL (Lane B): each example aggregates commission over "
+             "ALL contributing fills of its side (split at the first side-flip; "
+             "zero-qty replay rows dropped). `fill_count`/`quantity` are "
+             "emitted per example; a side total is UNAVAILABLE unless every "
+             "contributing fill is priced (no silent undercount).")
     L.append("")
     if not report.buckets:
         L.append("_No eligible TCM v2 accrual examples in the payload._")
@@ -1325,6 +1712,9 @@ def _render_tcm_v2_accrual(report: TcmV2AccrualReport) -> List[str]:
                  f"(entry {b.n_entry} / close {b.n_close}) · "
                  f"v2 stamp present {b.v2_stamp_present} / "
                  f"absent {b.v2_stamp_absent}")
+        L.append(f"- Fill coverage: **{b.fills_covered}** contributing fills "
+                 f"across these examples · {b.n_multi_fill} multi-fill "
+                 "(>1 fill aggregated — fill-complete, no collapse)")
         L.append(f"- Realized commission: {b.realized_commission_known} KNOWN "
                  f"(broker) / {b.realized_commission_unavailable} UNAVAILABLE "
                  "(internal)")

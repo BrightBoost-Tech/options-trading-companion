@@ -164,6 +164,11 @@ def derive_binding_manifest(approved_ids) -> Dict[int, str]:
     """Server-authoritative slot→id binding: slot N ← the Nth approved id in
     ``ORDER BY policy_registration_id ASC``.
 
+    Ordering is Python codepoint (``sorted``), which the RPC pins to match via
+    ``ORDER BY policy_registration_id COLLATE "C" ASC`` (byte/codepoint order).
+    The two are therefore structurally equal regardless of the DB's default
+    locale — see 20260719020000_harden_shadow_fleet_activation_rpc.sql.
+
     Requires exactly ``MICRO_ACCOUNT_COUNT`` distinct approved ids (the fleet
     has exactly 50 slots; an ambiguous count can never bind) — raises otherwise.
     """

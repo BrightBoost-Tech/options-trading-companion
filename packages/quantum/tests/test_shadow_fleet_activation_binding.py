@@ -128,6 +128,51 @@ class TestCanonicalSerializationParity:
         assert m == _fixture_mapping()
 
 
+# ── A'. Collation determinism (COLLATE "C" == Python codepoint) ──────────────
+
+class TestCollationDeterminism:
+    """FIX 1. The RPC orders the derivation by ``COLLATE "C"`` (byte/codepoint),
+    which equals the Python client's codepoint ``sorted`` for the id charset.
+    The canary is a set spanning ``[A-Za-z0-9_-]`` with case / digit / underscore
+    / hyphen contention — precisely where a locale-aware collation
+    (en_US.UTF-8: case-insensitive primary weight, punctuation largely ignored)
+    reorders the SAME set. No live Postgres is available, so ``COLLATE "C"``
+    ordering is modelled by byte order (``s.encode()``); the drift-lock
+    (TestHardenMigrationDriftLock) pins the literal ``COLLATE "C"`` in the SQL."""
+
+    # Mixed case, a leading underscore, a leading digit, and hyphen/underscore
+    # contention — codepoint order and en_US.UTF-8 order diverge on this set.
+    CANARY = [
+        "Zeta_01", "alpha-9", "Alpha_9", "beta-10", "beta_2",
+        "gamma-1", "GAMMA_1", "_lead", "9nine", "A-dash",
+    ]
+
+    def test_collate_c_equals_python_codepoint_ordering(self):
+        # COLLATE "C" is byte order; every canary id is ASCII, so byte order ==
+        # Unicode codepoint order == Python sorted(). This is the invariant the
+        # SQL COLLATE "C" pin guarantees against the client's codepoint sort.
+        codepoint = sorted(self.CANARY)
+        collate_c = sorted(self.CANARY, key=lambda s: s.encode("utf-8"))
+        assert codepoint == collate_c
+
+    def test_canary_reorders_under_a_locale_aware_collation(self):
+        # A case-insensitive (locale-like) ordering reorders the SAME canary —
+        # proving the collation choice is load-bearing and COLLATE "C" /
+        # codepoint is the deterministic one the fingerprint depends on. Without
+        # the pin, the SQL derivation could silently diverge from the attested
+        # (codepoint) fingerprint and brick activation.
+        codepoint = sorted(self.CANARY)
+        locale_like = sorted(self.CANARY, key=str.lower)
+        assert codepoint != locale_like
+
+    def test_real_registry_fingerprint_unchanged_under_collate_c(self):
+        # COLLATE "C" == codepoint for the real 50 approved ids, so the derived
+        # binding and its fingerprint are byte-identical to the pre-collation
+        # value — the pin is a structural guarantee, not a value change.
+        assert sfa.binding_manifest_fingerprint(_real_mapping()) == \
+            "1cd004b5167429cf469652bdd04b16d522b0f8b87d98d5a9aa68481c19231a76"
+
+
 # ── B. Faithful Python mirror of the RPC's binding decision (drift-locked) ───
 
 class RpcRaise(Exception):
@@ -459,12 +504,39 @@ class TestHardenMigrationDriftLock:
     def test_fixed_search_path(self, sql):
         assert "SET search_path = public, extensions, pg_temp" in sql
 
-    def test_server_derived_order_by_id_asc(self, sql):
-        assert sql.count("ORDER BY policy_registration_id ASC") >= 2  # derive + UPDATE
+    def test_server_derived_order_is_collation_pinned(self, sql):
+        # FIX 1: the derivation orders by COLLATE "C" (byte/codepoint), matching
+        # the Python client's codepoint sort structurally — NOT a bare, locale-
+        # dependent ORDER BY. No un-collated id ordering may remain.
+        assert 'ORDER BY policy_registration_id COLLATE "C" ASC' in sql
+        assert "ORDER BY policy_registration_id ASC" not in sql  # no bare order
+        # The audit registry fingerprint is collation-pinned too.
+        assert 'ORDER BY policy_registration_id COLLATE "C")' in sql
+
+    def test_bind_update_driven_from_verified_derived_map(self, sql):
+        # FIX 2: the bind UPDATE reads the already-fingerprinted v_derived_map,
+        # NOT a fresh re-query — so a concurrent approved INSERT can't shift the
+        # committed binding away from the attested fingerprint.
+        code = "\n".join(l.split("--", 1)[0] for l in sql.splitlines())
+        assert "jsonb_each_text(v_derived_map)" in code
+        # The bind UPDATE targets shadow_micro_accounts from the derived map.
+        assert re.search(
+            r"UPDATE\s+shadow_micro_accounts\s+sma[\s\S]*?"
+            r"FROM\s*\(\s*SELECT\s+\(r\.key\)::int\s+AS\s+slot,\s+r\.value\s+AS\s+pid"
+            r"\s+FROM\s+jsonb_each_text\(v_derived_map\)\s+r\s*\)\s+d",
+            code)
 
     def test_canonical_string_builder_matches_python(self, sql):
-        # The exact format() the Python mirror reproduces.
+        # FIX 3: pin BOTH the inner element format() AND the outer wrapper
+        # ('[' || string_agg(..., ',' ORDER BY slot) || ']') the Python mirror
+        # reproduces — the full serialization, not just the element.
         assert 'format(\'[%s,"%s"]\', slot, policy_registration_id)' in sql
+        code = "\n".join(l.split("--", 1)[0] for l in sql.splitlines())
+        assert re.search(
+            r"'\['\s*\|\|\s*string_agg\(\s*"
+            r"format\('\[%s,\"%s\"\]', slot, policy_registration_id\),\s*"
+            r"','\s+ORDER BY slot\)\s*\|\|\s*'\]'",
+            code)
 
     def test_charset_guard_present(self, sql):
         assert "'^[A-Za-z0-9_-]+$'" in sql

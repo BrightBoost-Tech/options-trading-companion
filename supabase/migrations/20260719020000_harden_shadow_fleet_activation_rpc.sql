@@ -19,12 +19,21 @@
 -- THE FIX (all inside the single activation transaction):
 --   * The binding is SERVER-DERIVED, not trusted from the payload: slot N <- the
 --     Nth of the 50 approved policy_registrations rows for the fleet epoch,
---     ORDER BY policy_registration_id ASC. This structurally eliminates
---     bypasses (1)(2)(3): a permutation, an unregistered id, or a draft/retired/
---     revoked id can never equal the derived set.
+--     ORDER BY policy_registration_id COLLATE "C" ASC. This structurally
+--     eliminates bypasses (1)(2)(3): a permutation, an unregistered id, or a
+--     draft/retired/revoked id can never equal the derived set. COLLATE "C" is
+--     byte/codepoint order, matching the Python client's codepoint `sorted`
+--     EXACTLY — not merely coincidentally under the DB default en_US.UTF-8 — so
+--     a glibc collation-version change or a future case/underscore-contended id
+--     set can never silently reorder the SQL derivation vs the attested
+--     (codepoint) fingerprint and permanently brick activation.
 --   * The approved rows are LOCKED (FOR UPDATE) before derivation, and count +
 --     derivation + binding all read that locked set — closing bypass (4)
---     (mid-flight retirement TOCTOU) by re-reading under lock in-txn.
+--     (mid-flight retirement TOCTOU) by re-reading under lock in-txn. The bind
+--     UPDATE is driven off the already-verified/fingerprinted v_derived_map (not
+--     a fresh re-query), so a concurrent approved-row INSERT under READ
+--     COMMITTED cannot shift the committed binding away from the fingerprinted
+--     mapping.
 --   * A binding-manifest fingerprint is recomputed server-side over the derived
 --     mapping and must equal the operator-attested p_expected_binding_fingerprint
 --     (new required param) — closing bypass (6). The canonical serialization is
@@ -310,13 +319,20 @@ BEGIN
     END IF;
 
     -- Server-derived binding: slot N <- the Nth approved id ORDER BY
-    -- policy_registration_id ASC. Derive the map AND the canonical manifest
-    -- string in one pass. The canonical string mirrors the client's
+    -- policy_registration_id COLLATE "C" ASC. Derive the map AND the canonical
+    -- manifest string in one pass. The canonical string mirrors the client's
     -- canonical_binding_manifest byte-for-byte:
     --   [[<slot>,"<id>"],...]  (compact, ORDER BY slot).
+    -- COLLATE "C" is byte/codepoint order; the client sorts ids by Python
+    -- codepoint (str `sorted`). Pinning "C" makes the two structurally equal
+    -- (not merely coincidentally equal under the DB's default en_US.UTF-8) so a
+    -- glibc collation-version change or a future case/underscore-contended id
+    -- set can never silently reorder the SQL derivation out from under the
+    -- operator-attested (codepoint) fingerprint.
     WITH approved AS (
         SELECT policy_registration_id,
-               row_number() OVER (ORDER BY policy_registration_id ASC) AS slot
+               row_number() OVER (
+                   ORDER BY policy_registration_id COLLATE "C" ASC) AS slot
           FROM policy_registrations
          WHERE effective_epoch = v_fleet.epoch_name
            AND approval_status = 'approved'
@@ -353,15 +369,16 @@ BEGIN
         RAISE EXCEPTION
             'shadow_fleet_activate: payload_binding_mismatch '
             '(operator slot map != server-derived ORDER BY '
-            'policy_registration_id ASC binding)';
+            'policy_registration_id COLLATE "C" ASC binding)';
     END IF;
 
     -- Registry-content fingerprint (audit-only; NOT operator-attested): binds
-    -- the exact parameterization identity behind the ids, ORDER BY id.
+    -- the exact parameterization identity behind the ids, ORDER BY id (same
+    -- COLLATE "C" determinism as the binding derivation).
     SELECT
         '[' || string_agg(
                    format('["%s","%s"]', policy_registration_id, config_hash),
-                   ',' ORDER BY policy_registration_id)
+                   ',' ORDER BY policy_registration_id COLLATE "C")
              || ']',
         array_agg(DISTINCT schema_version ORDER BY schema_version)
       INTO v_registry_canonical, v_schema_versions
@@ -374,17 +391,21 @@ BEGIN
     -- ── Effective boundary: DB time, captured once, same transaction ────────
     v_effective_at := now();
 
-    -- Bind from the SERVER-DERIVED mapping (NOT the payload).
+    -- Bind from the ALREADY-VERIFIED / ALREADY-FINGERPRINTED v_derived_map — NOT
+    -- a fresh re-query of policy_registrations. Under READ COMMITTED a
+    -- concurrent approved-row INSERT between the fingerprint check above and
+    -- this UPDATE could otherwise shift the derivation (still exactly 50 rows,
+    -- so the count gate would pass) while the receipt records the stale
+    -- fingerprint. Driving the bind off v_derived_map makes the COMMITTED
+    -- binding provably the mapping the attested fingerprint was computed over.
+    -- (The approved rows remain locked FOR UPDATE from above.)
     UPDATE shadow_micro_accounts sma
-       SET policy_registration_id = d.policy_registration_id,
+       SET policy_registration_id = d.pid,
            state = 'active',
            activated_at = v_effective_at
       FROM (
-          SELECT row_number() OVER (ORDER BY policy_registration_id ASC) AS slot,
-                 policy_registration_id
-            FROM policy_registrations
-           WHERE effective_epoch = v_fleet.epoch_name
-             AND approval_status = 'approved'
+          SELECT (r.key)::int AS slot, r.value AS pid
+            FROM jsonb_each_text(v_derived_map) r
       ) d
      WHERE sma.fleet_id = v_fleet.id
        AND sma.slot_number = d.slot
@@ -447,8 +468,10 @@ COMMENT ON FUNCTION rpc_shadow_fleet_activate(uuid, text, jsonb, jsonb, text) IS
     'Atomically activates the small_tier_v1 shadow fleet with an IN-TRANSACTION '
     'registry+epoch+manifest binding (V17-2). The slot->policy binding is '
     'SERVER-DERIVED (slot N <- Nth approved policy_registrations id for the '
-    'fleet epoch, ORDER BY policy_registration_id ASC) under a FOR UPDATE lock, '
-    'never trusted from the payload; a recomputed binding-manifest fingerprint '
+    'fleet epoch, ORDER BY policy_registration_id COLLATE "C" ASC == the '
+    'client codepoint sort) under a FOR UPDATE lock, bound off the verified '
+    'v_derived_map, never trusted from the payload; a recomputed '
+    'binding-manifest fingerprint '
     'must equal the operator-attested p_expected_binding_fingerprint (canonical '
     'serialization shared byte-for-byte with the Python client); the operator '
     'payload must equal the derived binding. Preserves the attestation gate, '

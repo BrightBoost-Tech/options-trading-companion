@@ -320,29 +320,41 @@ def fetch_committed_capital() -> float:
     return structure_commitment_usd(legs)
 
 
-def candidate_cost_usd(suggestion: Dict[str, Any]) -> float:
-    """The candidate's entry debit in dollars: ``limit_price × contracts ×
-    100`` from the suggestion's ``order_json``. Raises
-    :class:`UtilizationGateError` when not derivable as a positive number —
-    fail-closed (a candidate we can't price must not slip the gate)."""
+def candidate_bases(suggestion: Dict[str, Any]) -> Tuple[float, Optional[float]]:
+    """The two P0-B risk bases a candidate is compared on:
+
+    - ``premium`` (current/decision basis) = ``limit_price × contracts × 100``
+      from ``order_json``.
+    - ``honest`` (defined-risk basis) = ``max_loss_total`` (suggestion or
+      ``sizing_metadata``); ``None`` when unavailable (H9 — never fabricated).
+
+    For a DEBIT structure premium == max_loss; for a CREDIT structure / IC the
+    premium UNDER-states max loss (the QQQ-IC ~$149 vs ~$372 case)."""
     oj = suggestion.get("order_json") or {}
     try:
         limit_price = float(oj.get("limit_price") or 0)
         contracts = float(oj.get("contracts") or 0)
     except (TypeError, ValueError):
         limit_price, contracts = 0.0, 0.0
-    cost = limit_price * contracts * 100.0   # current (premium) basis
-    # P0-B shadow: the honest candidate cost is its defined-risk max_loss_total
-    # (for a DEBIT structure premium == max_loss; for a CREDIT structure/IC the
-    # premium UNDER-states max loss — the QQQ-IC ~$149 vs ~$372 case). Observe-
-    # only; honest becomes decisive only under RISK_BASIS_MAX_LOSS_ENABLED.
-    _honest = suggestion.get("max_loss_total")
-    if _honest is None:
-        _honest = (suggestion.get("sizing_metadata") or {}).get("max_loss_total")
+    premium = limit_price * contracts * 100.0
+    honest = suggestion.get("max_loss_total")
+    if honest is None:
+        honest = (suggestion.get("sizing_metadata") or {}).get("max_loss_total")
     try:
-        _honest = float(_honest) if _honest is not None else None
+        honest = float(honest) if honest is not None else None
     except (TypeError, ValueError):
-        _honest = None
+        honest = None
+    return premium, honest
+
+
+def candidate_cost_usd(suggestion: Dict[str, Any]) -> float:
+    """The candidate's entry debit in dollars: ``limit_price × contracts ×
+    100`` from the suggestion's ``order_json``. Raises
+    :class:`UtilizationGateError` when not derivable as a positive number —
+    fail-closed (a candidate we can't price must not slip the gate)."""
+    oj = suggestion.get("order_json") or {}
+    cost, _honest = candidate_bases(suggestion)   # current (premium) basis + honest
+    # P0-B shadow: honest becomes decisive only under RISK_BASIS_MAX_LOSS_ENABLED.
     from packages.quantum.services.risk_basis_shadow import (
         log_risk_basis_shadow, choose_basis,
     )
@@ -390,6 +402,7 @@ def evaluate_entry(
     symbol: str,
     candidate_cost: float,
     supabase: Any = None,
+    arm_bases: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute pro-forma utilization for one candidate entry and LOG the
     evaluation (committed, OBP, candidate, utilization %, decision — every
@@ -398,7 +411,14 @@ def evaluate_entry(
     Returns the evaluation dict when allowed. Raises
     :class:`EntryUtilizationBlocked` when ``utilization > cap`` and
     :class:`UtilizationGateError` when any input is unreadable (fail-closed).
-    """
+
+    ``arm_bases`` (OBSERVE-ONLY, default None → byte-identical): a
+    ``{premium_usd, honest_usd, context}`` dict from :func:`candidate_bases`.
+    When supplied AND an ``arm_evidence_scope`` is active, records ONE durable
+    arm-evidence row for this candidate — would the utilization ALLOW/BLOCK
+    decision flip if the honest defined-risk basis replaced premium, against
+    the REAL cap in play. Recorded on BOTH the allow and block branches; never
+    affects the decision (the raise/return below is unchanged)."""
     cap = max_utilization_pct()  # config error surfaces before broker IO
     committed = fetch_committed_capital()
     obp = _get_obp(user_id, supabase=supabase)
@@ -428,6 +448,40 @@ def evaluate_entry(
         symbol, committed, obp, candidate_cost, pool, utilization,
         utilization * 100.0, cap, "ALLOW" if allowed else "BLOCK",
     )
+    # F-A4-RISKBASIS-SILENT (2026-07-19): durable arm evidence for the
+    # utilization consumer — recorded on BOTH branches, BEFORE the block raise,
+    # against the REAL cap. OBSERVE-ONLY, wrapped so it can never perturb the
+    # decision. No-op when arm_bases is None (byte-identical) or no scope active.
+    if arm_bases is not None:
+        try:
+            from packages.quantum.services.risk_basis_shadow import (
+                record_arm_evidence as _ug_arm,
+            )
+            _prem = arm_bases.get("premium_usd")
+            _hon = arm_bases.get("honest_usd")
+            _cur = _prem if _prem is not None else candidate_cost
+            _wf = None
+            if _hon is not None and pool > 0:
+                _cur_ok = ((committed + float(_cur)) / pool) <= cap
+                _hon_ok = ((committed + float(_hon)) / pool) <= cap
+                _wf = (_cur_ok != _hon_ok)
+            _ug_arm(
+                "utilization_gate_candidate",
+                current_usd=_cur, honest_usd=_hon,
+                threshold_pct=cap, would_flip_override=_wf,
+                position_count=1,
+                coverage_readable=(1 if _hon is not None else 0),
+                coverage_total=1,
+                context={
+                    **(arm_bases.get("context") or {}),
+                    "committed": round(committed, 2), "obp": round(obp, 2),
+                    "pool": round(pool, 2),
+                    "utilization": round(utilization, 4),
+                    "cap": cap, "allowed": allowed,
+                },
+            )
+        except Exception:  # pragma: no cover - observe-only guard
+            pass
     if not allowed:
         raise EntryUtilizationBlocked(
             symbol, utilization, cap, committed, obp, candidate_cost

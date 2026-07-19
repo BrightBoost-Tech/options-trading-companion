@@ -4,6 +4,138 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — v1.6 REMEDIATION ORCHESTRATOR (fable + opus; serialized) · status:partial-shipped
+
+Full record: `docs/review/v1.6-remediation-results-2026-07-19.md`. Authorization: code/test/docs
+merges only; ZERO migration / production-DB-write / broker / env / fleet / control actions (held).
+
+- **#1303 `d6a3174e` MERGED+DEPLOYED** — v1.6 audit results docs, with the operator-directed
+  F-A4-RISKBASIS-SILENT rewording (the finding is the ABSENT durable arm-decision/`would_flip`
+  evidence contract; historical generic `[RISK_BASIS_SHADOW]` lines — null_legacy/heartbeat
+  variants for `rbe_open_book`-class consumers — do NOT satisfy the arm gate). All four services
+  SUCCESS at `d6a3174e`.
+- **#1305 `8588754d` MERGED+DEPLOYED — the v1.6 HIGH (F-RUNNER-WORKTREE-DEADFALLBACK)**:
+  disposable-worktree-only nightly runner (blank/whitespace env → real `%LOCALAPPDATA%` fallback;
+  resolve-before-use; typed geometry refusals incl. equals/inside-operator/cwd/missing ownership
+  marker; ALL destructive git through one re-verifying choke point `run_destructive_git`; operator
+  checkout byte-preserved), typed `AppendResult` marker writes (never swallowed), durable sidecar
+  `audit/runner-markers.log` with **per-run tag scoping** (`[run=date-pid-rand]` — a prior night's
+  markers can never satisfy tonight's contract), completion re-read from disk, UP-ping only after
+  all artifacts validate, `/fail` ping naming the missing artifact class, missing run-SHA fails
+  closed. Independent opus adversarial review: **FAIL (1 BLOCKER: cross-run marker accumulation →
+  false UP ping; + 3 MINOR) → repaired → re-verified PASS with independent falsifier probes.**
+  55 route-driven tests (real temp git repos/filesystems). Self-test on merged content: 55 passed.
+- **LOCAL OPERATIONAL LANDING: `BLOCKED_LOCAL_RUNNER_PULL`.** The operator checkout carries a
+  TRACKED modification — the 00:00 CT nightly (OLD runner, cwd='.') appended its 07-19 FULL-audit
+  entry (43 lines, incl. **F-REDATE-0718 MEDIUM**) to `audit/ledger.md` on a detached HEAD at
+  `17141967`. Per the landing contract: no stash/reset — status+diff archived
+  (`%TEMP%\otc-friday-post-close-2026-07-17\v16-remediation\`), and **this PR reproduces both the
+  nightly's ledger entry (below) and the swept `audit/reports/2026-07-19.md` into main**, so
+  tonight's old-runner reset cannot destroy them. **⚠ OPERATOR BEFORE 00:00 CT TONIGHT:** commit or
+  reconcile the local `audit/ledger.md` edit, then `git fetch origin && git pull --ff-only` (or
+  re-checkout main) — the fixed runner only protects the checkout AFTER the local pull. Scheduled
+  task verified read-only (Ready; documented wrapper; workdir pinned; next run 07-20 00:00).
+- **Six lane PRs BUILT + review-complete, MERGE-BLOCKED by the landing hard gate** (merge order
+  fixed; each needs update-branch + current-head CI at merge time): Lane A #1306 `82ddee38`
+  risk-basis arm evidence (durable `job_runs.result.cycle_metadata.risk_basis_arm_evidence`;
+  utilization comparison moved to the REAL cap seam in `evaluate_entry`; typed
+  `not_applicable_empty_book`; persist-fail → partial; enforcement dark) · Lane B #1307 `69a0b2bf`
+  HMAC canonical prod detector + unconditional prod fail-closed nonce outage (typed 503) + ALL
+  EIGHT #768/#769/#774 suites unskipped green (6210/0 local) · Lane C #1304 `d4c2dd97` holiday
+  market sessions (broker calendar → typed `MarketSession`; entries fail closed; exits proceed;
+  safety_checks true 9:30–16:00 ET + holiday/half-day) · Lane D #1310 `49e640e0` lifecycle
+  milestones (schema-contract PASS — values already in the CHECK; append-only `detail.lifecycle`
+  history; monotonic/idempotent; observe-only) · Lane E #1309 `2ffaeb89` OI known-at provenance
+  (neither provider payload carries an OI date today — typed `provider_date_unavailable` stays
+  truthful; observation-date vs retrieved-at separated; freshness only from real dates) · Lane F
+  #1308 `7597a8a5` greek divisibility (one shared `_full_count_ratio` predicate; non-divisible leg
+  → typed uncovered both consumers; byte-identity proven; caps dormant).
+- Safety held at every step: broker flat 0/0 · 0 new critical/high · `entries_paused=false` ·
+  fleet untouched (1 `pending_legacy_terminal`/50 inactive/0 bindings/0 receipts).
+- NOT build slots (unchanged): A1-G1 (natural post-07-16 realized overlap) · A2-ASSIGNMENT
+  (DEFERRED-SAMPLE) · UI (Palette-owned) · fleet activation (Monday evidence + separate token) ·
+  N1/N2/CLAUDE-size notes.
+
+## 2026-07-19 — EXTERNAL FULL AUDIT v1.6 ADJUDICATION (fable orchestrator + 5 opus area agents; READ-ONLY) · status:reported
+
+Executed `docs/review/external-full-audit-v1.6-current.md` (source classification
+**AUDIT_BRIEF_ONLY** — the document is an audit SPEC; absence of embedded results is expected,
+not a finding). Pinned immutable basis **`20ca312e`** = origin/main, all three services
+deploy-verified at it; issuance baseline `fdf5b55c` → pin delta = this session's own reviewed
+merges #1296–#1302 (incl. the operator's #1301 brief-merge). Sunday market-closed window ⇒
+runtime adjudication READ-ONLY: natural absence = **DEFERRED-SAMPLE**, never INCONCLUSIVE;
+nothing was triggered. Baseline: broker flat 0/0 · 0 crit/high 72h (41 warn + 9 info) ·
+`entries_paused=false` · fleet 1 `pending_legacy_terminal` / 50 inactive / 0 bindings / 0
+receipts · registry 50/50 approved. Full results (draft PR, NOT merged):
+`docs/review/external-full-audit-v1.6-results-2026-07-19.md`. **ZERO code /
+test-outside-docs / migration / DB-write / broker / env / fleet / deploy / merge actions.**
+
+**Retained (ranked; 10 findings + notes):**
+1. **F-RUNNER-WORKTREE-DEADFALLBACK — HIGH** (A9; EXTENDS the OPEN nightly-runner P1 — the
+   root cause of 07-19 WRAPPER_PARTIAL): truthy `Path("")` at `nightly_runner.py:918` kills
+   the `%LOCALAPPDATA%` fallback ⇒ worktree=`.` ⇒ the runner ran `git checkout --force
+   --detach origin/main` + `reset --hard origin/main` against the OPERATOR CHECKOUT
+   (reflog-proven; tracked `audit/ledger.md` uncommitted edits are at risk on every nightly)
+   AND cron.log markers were dropped (sharing-violation append swallowed at `:87-94` under the
+   shim's own redirect lock) while `_end_marker_written` was set unconditionally ⇒ completion
+   contract "met" + dead-man UP-ping fired over an empty evidence sink — success
+   indistinguishable from silent death, the exact mode #1264 was built to kill. Proof
+   VERIFIED-CODE + reflog.
+2. **F-A4-RISKBASIS-SILENT — MED** (A4, NEW): the exact P0-B arm-decision / `would_flip`
+   evidence required for the observe→enforce decision has not emitted or reached its expected
+   durable evidence contract (`services/risk_basis_shadow.py:31` / `risk_budget_engine.py:418` /
+   `utilization_gate.py:353`). Historical generic `[RISK_BASIS_SHADOW]` lines (e.g.
+   `basis=null_legacy` / heartbeats for `rbe_open_book`-class consumers) do not satisfy that
+   gate, and log lines are ephemeral — the P0-B arm gate cannot clear on what exists today.
+3. **F-A9-1 — MED** (A9, NEW P2 security; proof INFERRED-from-code):
+   `task_signing_v4._is_production_mode()` (`:59-79`) diverges from canonical
+   `security/config.is_production()`; an APP_ENV-only prod worker fails OPEN on nonce-store
+   outage (replay window widens to the 300s TTL) while `audit_production_security()` reads
+   healthy.
+4. **F-A9-2 — MED** (A9; EXTENDS skip-discipline): HMAC/security behavioral suites are
+   module-skipped (#768: task_signing_v4/run_signed_task/admin_auth/security_v3 · #769:
+   is_localhost_spoofing · #774: security_headers/api_info_disclosure/optimizer_security) —
+   replay/expiry/scope/fail-open have zero CI reach; the un-skipped fleet route test covers
+   happy-path + unsigned→401 only.
+5. **F-A10-HOLIDAY — MED, mitigated** (A10, NEW P2 calendar): `is_market_day()` weekday-only
+   with an affirmatively false docstring (`jobs/handlers/utils.py:49-69`; consumers
+   `suggestions_open.py:77` / `suggestions_close.py:54`); `safety_checks.py:100-108`
+   holiday-blind. Mitigations: broker rejects closed-market orders; monitor + cooldown use the
+   holiday-aware broker clock.
+6. **A1-G1 — LOW**: ranker-basis zero realized overlap (detail in the results file).
+7. **A3-LIFECYCLE — LOW/NOTE**: disposition lifecycle values `staged`/`broker_submitted`/
+   `filled` defined-not-wired (`candidate_disposition.py:82-85`); lifecycle stops at persist.
+8. **A5-OI-KNOWNAT — LOW/NOTE**: OI freshness unobservable — `oi_freshness` always
+   `known_at_unavailable` (`quote_provenance.py:261-266`; truth layer `:1856` never sets
+   `open_interest_date`).
+9. **A2-ASSIGNMENT — LOW · DEFERRED-SAMPLE**: assignment/expiry custody NOT-PROVEN — no
+   natural sample exists; revisit on the first ITM-at-expiry live event.
+10. **A4-DIVISIBILITY — LOW-INERT**: `check_greeks` divisibility edge; inert while all caps 0.
+
+**NOTEs (not findings):** stale version-prefix comments (N1) · model-review fingerprint is
+id-set-only, content-blind (N2) · CLAUDE.md **70,827 B** vs the historical ≤40k self-cap (cap
+silently dropped from the header 07-16 rather than the file trimmed) · settings.json cosmetic
+`Write(audit/**)` warning · `secrets_audit.py` real but not CI-wired · **case-collision**: BOTH
+`.Jules/palette.md` AND `.jules/palette.md` are tracked (distinct blobs) — on a case-insensitive
+Windows checkout they collide into one file, so one of the two paths shows phantom `M` drift
+(VERIFIED in the fresh v1.6 audit worktree; restoring one re-dirties the other by construction;
+manifestation is checkout-order/ignorecase dependent — the operator checkout does not currently
+show it; fix = de-dup the tracked path in a normal code PR).
+
+**Free-look: 0 promotions** (≤2 budget unused — every candidate folded into an area finding or
+dedup'd). **Fleet verdict: READY_FOR_SEPARATE_AUTHORIZATION** (activation forbidden pending the
+Monday evidence PASS + separate token). **No live-control loosening recommended anywhere.**
+
+**Exclusion memory held (duplicates correctly NOT re-found; do not re-find these either):**
+WRAPPER_PARTIAL + F-RUNNER-BROKER-CREDS (now root-caused by finding 1) · taper band
+`[900,1100]`-vs-`[800,1000]` · shadow-fill fiction · greeks double-dormant · EXIT_EVAL_DEBUG
+partial fix · severity-taxonomy fragmentation · A4-detector single-convention · legacy-mode
+WARNING on designed client=None · winter-close blind hour (**RESOLVED** — DST-aware ET +
+broker-clock gating confirmed at the pin). **Clean re-verifications (cite, don't re-prove):**
+flag echo #1268 live in prod (30 flags, 0 parse errors) · fleet 4-gate fail-closed + registry
+immutability trigger + one-way draft · ratify≠activate (docs-only, 0 receipts) · #1300 reader
+read-only test-pinned · job_runs 519 succ / 0 failed / 0 partial (4d) · H8/H11 clean.
+
 ## 2026-07-19 — SUNDAY IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/sunday-implementation-results-2026-07-19.md`. **Five merges**, each
@@ -62,6 +194,48 @@ Monday PASS; + token + attestation) · `h7_dropped` retention (RETAINED, ratifie
 step) · E19 §7 minimum adoption (protocol v3 re-freeze) · single-leg opt-in designation (two NEW
 draft rows) · TCM promotion at N=15 · taper band reconciliation + activation · greek-cap arming
 (Plan A stages).
+## 2026-07-19 — FULL AUDIT (Sunday; first wrapper-flow run; broker-blind) · status:reported
+
+Report: `audit/reports/2026-07-19.md`. Run SHA `17141967` all three services; DB-clock grounded
+Sunday 00:01 CT; 0 critical/high 72h; 18 SQL / 0 broker / 4 subagents. Findings (status:reported):
+
+- **F-REDATE-0718 (A3, MEDIUM):** the 07-18 F-CREDIT-SIGN correction re-inserted the 20 corrected
+  shadow learning rows into `learning_trade_outcomes_v3` with `closed_at`=2026-07-18 (correction
+  time) instead of true close times (positions + `learning_feedback_loops` preserve truth; values
+  consistent 24/24). ≈ +$33,856 phantom 20-close cluster dated 07-18 enters
+  `go_live_validation_service.py:335,525,1089,1459,2413,2673,2917` paper windows +
+  `walk_forward_autotune.py:410` + `context_endpoints.py:43,53`. Live calibration EXCLUDED
+  (`calibration_service.py:390-391` is_paper=false), model review (#1286) unaffected (id-set
+  fingerprint), signal_accuracy live-only. Fix: operator-gated re-stamp from `paper_positions`
+  truth via trace_id (fingerprint like the weekend corrections).
+- **F-RUNNER-BROKER-CREDS (A4, LOW-MED, operator):** first wrapper run otherwise PROVEN (manifest,
+  fresh worktree, wake lock, completion contract) but the broker snapshot fail-softed
+  `available:false` — `broker_snapshot.py:132-135` reads `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` from
+  process env only; no fallback; no documented setup step; headless runs stay broker-blind until
+  the operator places read-only creds in the Task-Scheduler env + docs the step.
+- **A9 LOW (latent):** `safety_checks.py:279` hardcodes rejection_reason "Portfolio routing_mode
+  flipped…" on a path that (post-#1292) also carries the single-leg veto — a veto row would record
+  a false cause. Correct critical fires alongside (`execution_router.py:146-166`); 1-line PR; dark
+  while 0/50 opt-ins.
+
+Verifications CLOSED (cite, don't re-find): **E6/P0-A broker-ack-close invariant SHIPPED**
+(`paper_exit_evaluator.py:2286-2333` + backstop :2335-2379; runtime falsifier = next natural live
+close failure, INCONCLUSIVE until then) · **F-CREDIT-SIGN code fix confirmed at HEAD**
+(:2387-2399) **+ data corrections VERIFIED-DB** (QQQ c1c9ad04 = −224.04; v3↔lfl 24/24) · fleet/
+registry state verified (50/50/50-hash; 1 fleet pending_legacy_terminal; 50 accounts; orders census
+all-terminal = packet §3) · migration/seed/provision receipts all present (8 info rows) · first
+natural `ranking_costs` row (Friday suggestion; `vrp_ranking` NULL = INCONCLUSIVE) · new weekend
+writers CLEAN (dispositions/provenance/greek-cap/flag-echo honesty content-verified) · single-leg
+veto dark at 4 sites, multi-leg byte-identical · taper DARK · P0-B decisive basis still premium
+(`RISK_BASIS_MAX_LOSS_ENABLED` default OFF). Clarification: **winsorize/outlier-cap is NOT-BUILT**
+(no implementation in `calibration_service.py`; the [0.5,1.5] clamp :527/:543 is the only outlier
+control) — the "8th-close winsorize gate" is a decide-whether-to-build owner review, queued with
+the clamp review (floor binding: `_overall` 0.5/0.5, sample 8, error 65.34, stable 07-15/16/17).
+Calibration floor-pinned since the 07-10 relearn (pool at 8 since 07-08 18:00Z — the 07-14/07-15
+closes were shadow). Pending carried: #1198 INFO line + thesis price_basis (needs an RTH day) ·
+Monday naturals (dispositions/provenance first rows; morning dry-run re-check) · A10→SECURITY
+rotation proposal standing (A11, owner-gated). Sunday fleet-activation gate (packet-1 prereq 1):
+met from this run's side — clean dated report at `17141967`.
 
 ## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
 

@@ -60,8 +60,20 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 "executed_count": 0,
             }
 
-        # Execute top suggestions
-        result = service.execute_top_suggestions(user_id)
+        # Execute top suggestions.
+        #
+        # F-A4-RISKBASIS-SILENT (2026-07-19): open a per-cycle arm-evidence
+        # scope so the utilization-gate comparison seam (buried in
+        # _execute_per_cohort) records durable P0-B arm evidence; drain it into
+        # job_runs.result.cycle_metadata.risk_basis_arm_evidence (no migration).
+        # OBSERVE-ONLY — decisions are byte-identical; a persist fault folds to
+        # counts.errors → the runner classifies the run 'partial' (never silent).
+        from packages.quantum.services import risk_basis_shadow as rbs
+        with rbs.arm_evidence_scope(cycle_id=f"paper_auto_execute:{user_id}") as _arm:
+            result = service.execute_top_suggestions(user_id)
+        result = rbs.persist_arm_evidence(
+            result, _arm.rows, _arm.errors, cycle_id=_arm.cycle_id
+        )
 
         logger.info(
             f"[PAPER_AUTO_EXECUTE] Complete for user {user_id}. "
@@ -71,7 +83,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         )
 
         return {
-            "ok": result.get("status") == "ok",
+            "ok": result.get("status") == "ok"
+            and not int((result.get("counts") or {}).get("errors") or 0),
             **result,
         }
 

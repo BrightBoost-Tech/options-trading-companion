@@ -68,6 +68,40 @@ MARK_START = "nightly-audit start"
 MARK_END = "nightly-audit end"
 MARK_HEARTBEAT = "nightly-audit heartbeat"
 
+# File the runner writes into a worktree IT created, to prove the worktree is a
+# disposable runner-owned tree and never the operator checkout. Destructive git
+# (checkout --force / reset --hard / worktree remove) is only ever allowed
+# against a path that carries this marker (on reuse) or that the runner is about
+# to create fresh (F-RUNNER-WORKTREE-DEADFALLBACK item 3/5).
+AUDIT_WORKTREE_MARKER = ".otc-audit-worktree-marker"
+
+# Typed append-result statuses — cron/marker writes NEVER swallow their failure
+# anymore (the old `except OSError: pass` let a lost marker read as "written",
+# after which the dead-man UP-ping fired over an empty evidence sink).
+APPEND_OK = "ok"
+APPEND_SHARING_VIOLATION = "sharing_violation"  # WinError 32 — the shim holds cron.log via >>
+APPEND_LOCKED = "locked"                        # WinError 33 / read-only / other permission
+APPEND_MISSING_DIR = "missing_dir"
+APPEND_SHORT_WRITE = "short_write"
+APPEND_ERROR = "error"
+
+# Completion-contract artifact classes (named so a partial/failed run says which
+# durable artifact was missing, and the /fail ping can carry the class list).
+ARTIFACT_START_MARKER = "start_marker"
+ARTIFACT_TRANSCRIPT = "transcript"
+ARTIFACT_REPORT = "report"
+ARTIFACT_MANIFEST = "manifest"
+ARTIFACT_END_MARKER = "end_marker"
+ARTIFACT_CHILD_EXIT = "child_exit"
+
+
+class WorktreeSafetyError(RuntimeError):
+    """The audit worktree cannot be used safely — it equals, sits inside, or was
+    resolved to the operator checkout / process cwd, or an existing worktree
+    lacks the runner-owned ownership marker. Raised BEFORE any git command runs;
+    it makes the run fail (typed, loud) rather than mutate the operator checkout.
+    """
+
 
 # ---------------------------------------------------------------------------
 # time / logging helpers
@@ -84,14 +118,72 @@ def local_date_str(now: Optional[datetime.datetime] = None) -> str:
     return (now or datetime.datetime.now()).strftime("%Y-%m-%d")
 
 
-def append_line(path: Path, line: str) -> None:
-    """Append a single line to a log file, best-effort (never raises)."""
+@dataclasses.dataclass
+class AppendResult:
+    """Typed outcome of a single-line append. ``ok`` is the only success."""
+
+    status: str
+    path: str
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == APPEND_OK
+
+
+def classify_append_error(exc: OSError) -> str:
+    """Map an OSError from a marker/cron append to a typed status.
+
+    Windows surfaces a cmd ``>>``-held file as ERROR_SHARING_VIOLATION (32) or
+    ERROR_LOCK_VIOLATION (33) when it populates ``winerror``; some CPython
+    builds instead map the sharing violation to ``EACCES`` with ``winerror``
+    unset — that still classifies as a locked/denied sink (never ``ok``,
+    never swallowed).
+    """
+    win = getattr(exc, "winerror", None)
+    if win == 32:
+        return APPEND_SHARING_VIOLATION
+    if win == 33:
+        return APPEND_LOCKED
+    if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+        return APPEND_MISSING_DIR
+    if isinstance(exc, PermissionError):
+        return APPEND_LOCKED
+    return APPEND_ERROR
+
+
+def append_line(path: Path, line: str) -> AppendResult:
+    """Append a single line to a log file, returning a TYPED result.
+
+    NEVER swallows silently. A Windows sharing violation (WinError 32 — the shim
+    holds cron.log open via its own ``>>`` redirect), a lock violation (33), a
+    missing parent directory, a short write, or any other OSError is classified
+    and returned so the caller records it and does NOT treat a lost marker as
+    written. This is the F-RUNNER-WORKTREE-DEADFALLBACK item-3 fix: the old
+    ``except OSError: pass`` dropped every marker, after which
+    ``_end_marker_written`` was set unconditionally and the dead-man UP-ping
+    fired over an empty evidence sink.
+    """
+    encoded = (line.rstrip("\n") + "\n").encode("utf-8")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(line.rstrip("\n") + "\n")
-    except OSError:
-        pass
+    except OSError as exc:  # noqa: BLE001
+        return AppendResult(APPEND_MISSING_DIR, str(path), f"{type(exc).__name__}: {exc}")
+    try:
+        with open(path, "ab") as fh:
+            written = fh.write(encoded)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass  # durability best-effort; the write itself succeeded
+        if written != len(encoded):
+            return AppendResult(
+                APPEND_SHORT_WRITE, str(path), f"wrote {written}/{len(encoded)} bytes"
+            )
+        return AppendResult(APPEND_OK, str(path))
+    except OSError as exc:
+        return AppendResult(classify_append_error(exc), str(path), f"{type(exc).__name__}: {exc}")
 
 
 def write_json_atomic(path: Path, obj: Any) -> None:
@@ -269,6 +361,81 @@ def _default_git_run(args: List[str]) -> str:
     ).stdout
 
 
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    """True if ``child`` is ``parent`` or lives under it (Py3.8-safe)."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _dir_nonempty(path: Path) -> bool:
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
+def verify_worktree_geometry(operator_repo: Path, worktree: Path) -> Path:
+    """Resolve and geometry-check the audit worktree; raise WorktreeSafetyError.
+
+    Refuses (typed, loud) when the worktree — after ``Path.resolve()`` — equals
+    the operator checkout, lives inside it, or equals the process cwd (the
+    ``Path(".")`` accident that mutated the operator checkout on 07-19). Returns
+    the RESOLVED worktree path so every downstream git command uses a
+    canonical, non-operator path. Never mutates anything.
+    """
+    op = Path(operator_repo).resolve()
+    wt = Path(worktree).resolve()
+    cwd = Path.cwd().resolve()
+    if wt == op:
+        raise WorktreeSafetyError(
+            f"audit worktree resolves to the operator checkout ({wt}) — refusing"
+        )
+    if _is_relative_to(wt, op):
+        raise WorktreeSafetyError(
+            f"audit worktree ({wt}) is inside the operator checkout ({op}) — refusing"
+        )
+    if wt == cwd:
+        raise WorktreeSafetyError(
+            f"audit worktree resolves to the process cwd ({wt}) — refusing "
+            "(the Path('.') dead-fallback accident)"
+        )
+    return wt
+
+
+def run_destructive_git(
+    git_run: GitRun,
+    worktree_target: Path,
+    operator_repo: Path,
+    args: List[str],
+) -> str:
+    """The ONLY route for checkout --force / reset --hard / worktree remove.
+
+    Re-verifies (geometry) that ``worktree_target`` is NOT the operator checkout,
+    not inside it, and not the cwd IMMEDIATELY before executing — a structural
+    guarantee (item 12) that no destructive git can ever land on the operator
+    checkout regardless of caller mistakes.
+    """
+    verify_worktree_geometry(operator_repo, worktree_target)
+    return git_run(args)
+
+
+def _ensure_worktree_marker(worktree: Path) -> None:
+    """Stamp the runner-owned ownership marker into a worktree the runner owns."""
+    try:
+        worktree.mkdir(parents=True, exist_ok=True)
+        (worktree / AUDIT_WORKTREE_MARKER).write_text(
+            "This worktree is owned and recycled by audit/runner/nightly_runner.py.\n"
+            "Its presence authorizes the runner's destructive git refresh. Do not\n"
+            "put anything you care about here — it is reset --hard to origin/main.\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 @dataclasses.dataclass
 class WorkspaceInfo:
     path: str
@@ -293,46 +460,95 @@ def refresh_audit_worktree(
     prior_report_date: Optional[str] = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> WorkspaceInfo:
-    """Fetch origin/<branch> and force a DEDICATED worktree to that tip.
+    """Fetch origin/<branch>, resolve it to an IMMUTABLE SHA, and force a
+    DEDICATED, DISPOSABLE worktree to that SHA — never the operator checkout.
 
-    The operator checkout is READ-ONLY here: we only `git -C <operator_repo>
-    fetch` (which never touches its working tree) and `git -C <operator_repo>
-    worktree add <dedicated_path>`. All checkout/reset --force operations run
-    ONLY against the dedicated worktree path. If the fetch or refresh fails, we
-    mark the workspace `stale=True` LOUDLY so the audit knows it may be reading
-    old code (the old silent-stale-checkout failure, now surfaced).
+    Ordering and invariants (F-RUNNER-WORKTREE-DEADFALLBACK):
+      * Both paths are ``Path.resolve()``-canonicalized (item 2) and the
+        worktree is geometry-verified (item 3) BEFORE any git command runs. A
+        worktree that equals / is inside the operator checkout, or resolves to
+        the cwd, RAISES WorktreeSafetyError — the run fails, it never mutates
+        the operator checkout.
+      * The operator checkout is READ-ONLY: only ``git -C <op> fetch`` and
+        ``rev-parse`` (which never touch its working tree) and ``worktree add``
+        (which writes only into the dedicated path) run against it (item 6).
+      * The worktree is pinned to the resolved SHA (item 4), detached.
+      * checkout --force / reset --hard run ONLY via ``run_destructive_git``
+        against the verified disposable path (items 5, 12), and ONLY when the
+        worktree already carries the runner-owned ownership marker (item 3).
+      * A fresh worktree gets the ownership marker stamped after creation.
+    If the fetch or refresh fails we mark ``stale=True`` LOUDLY; a safety
+    violation is NOT stale — it propagates so the run fails.
     """
     log = log or (lambda _m: None)
     target = f"{remote}/{branch}"
-    info = WorkspaceInfo(path=str(worktree), target_ref=target, prior_report_date=prior_report_date)
+
+    # (item 2 + 3) resolve + geometry check BEFORE any git command. Raises
+    # WorktreeSafetyError — the caller lets it propagate to a failed run.
+    op_resolved = Path(operator_repo).resolve()
+    wt = verify_worktree_geometry(op_resolved, worktree)
+    info = WorkspaceInfo(path=str(wt), target_ref=target, prior_report_date=prior_report_date)
 
     try:
-        git_run(["-C", str(operator_repo), "fetch", "--prune", remote, branch])
+        git_run(["-C", str(op_resolved), "fetch", "--prune", remote, branch])
         log(f"fetched {target}")
     except Exception as exc:  # noqa: BLE001
         info.stale = True
         info.error = f"fetch failed: {exc}"
         log(f"WARNING fetch failed — worktree may be stale: {exc}")
 
+    # (item 4) pin to an immutable SHA, not the moving ref.
+    target_sha: Optional[str] = None
     try:
-        is_worktree = (worktree / ".git").exists()
-        if not is_worktree:
-            git_run(
-                ["-C", str(operator_repo), "worktree", "add", "--force",
-                 "--detach", str(worktree), target]
-            )
-            log(f"created audit worktree at {worktree}")
-        else:
-            git_run(["-C", str(worktree), "checkout", "--force", "--detach", target])
-            git_run(["-C", str(worktree), "reset", "--hard", target])
-            log(f"refreshed audit worktree at {worktree} -> {target}")
+        target_sha = git_run(["-C", str(op_resolved), "rev-parse", target]).strip() or None
     except Exception as exc:  # noqa: BLE001
         info.stale = True
-        info.error = (info.error + "; " if info.error else "") + f"worktree refresh failed: {exc}"
-        log(f"WARNING worktree refresh failed — may be stale: {exc}")
+        info.error = (info.error + "; " if info.error else "") + f"resolve {target} failed: {exc}"
+        log(f"WARNING could not resolve {target} to a SHA: {exc}")
+
+    if target_sha:
+        try:
+            is_worktree = (wt / ".git").exists()
+            has_marker = (wt / AUDIT_WORKTREE_MARKER).exists()
+            if is_worktree:
+                # REUSE — must be a runner-owned disposable worktree (item 3).
+                if not has_marker:
+                    raise WorktreeSafetyError(
+                        f"existing worktree {wt} lacks the runner ownership marker "
+                        f"{AUDIT_WORKTREE_MARKER} — refusing to reset --hard it"
+                    )
+                run_destructive_git(
+                    git_run, wt, op_resolved,
+                    ["-C", str(wt), "checkout", "--force", "--detach", target_sha],
+                )
+                run_destructive_git(
+                    git_run, wt, op_resolved,
+                    ["-C", str(wt), "reset", "--hard", target_sha],
+                )
+                log(f"refreshed audit worktree at {wt} -> {target} ({target_sha[:8]})")
+            else:
+                # CREATE — refuse to clobber a non-empty, unowned directory.
+                if _dir_nonempty(wt) and not has_marker:
+                    raise WorktreeSafetyError(
+                        f"refusing to create audit worktree over non-empty unowned "
+                        f"directory {wt} (no {AUDIT_WORKTREE_MARKER})"
+                    )
+                run_destructive_git(
+                    git_run, wt, op_resolved,
+                    ["-C", str(op_resolved), "worktree", "add", "--force",
+                     "--detach", str(wt), target_sha],
+                )
+                _ensure_worktree_marker(wt)
+                log(f"created audit worktree at {wt} -> {target} ({target_sha[:8]})")
+        except WorktreeSafetyError:
+            raise  # loud, typed — makes the run fail; never downgraded to stale
+        except Exception as exc:  # noqa: BLE001
+            info.stale = True
+            info.error = (info.error + "; " if info.error else "") + f"worktree refresh failed: {exc}"
+            log(f"WARNING worktree refresh failed — may be stale: {exc}")
 
     try:
-        info.sha = git_run(["-C", str(worktree), "rev-parse", "HEAD"]).strip() or None
+        info.sha = git_run(["-C", str(wt), "rev-parse", "HEAD"]).strip() or None
         if info.sha:
             info.short_sha = info.sha[:8]
     except Exception as exc:  # noqa: BLE001
@@ -341,12 +557,12 @@ def refresh_audit_worktree(
 
     # Commit subjects since the prior report (best-effort — never fail the run).
     try:
-        log_args = ["-C", str(worktree), "log", "--no-merges", "--pretty=format:%h %s"]
+        log_args = ["-C", str(wt), "log", "--no-merges", "--pretty=format:%h %s"]
         if prior_report_date:
             log_args.append(f"--since={prior_report_date} 00:00")
         else:
             log_args.append("-30")
-        log_args.append(target)
+        log_args.append(target_sha or target)
         out = git_run(log_args).strip()
         info.commit_subjects_since_prior_report = [
             ln for ln in out.splitlines() if ln.strip()
@@ -429,7 +645,6 @@ def spawn_and_monitor(
     child_argv: Sequence[str],
     cwd: Optional[Path],
     transcript_path: Path,
-    cron_log: Path,
     timeout_sec: int,
     heartbeat_sec: int,
     grace_sec: int,
@@ -437,7 +652,9 @@ def spawn_and_monitor(
     env: Optional[Dict[str, str]] = None,
 ) -> ChildResult:
     """Spawn the child as an explicit process, stream stdout+stderr to the
-    transcript, emit heartbeats to cron.log, and enforce the hard timeout."""
+    transcript, emit heartbeats through ``log`` (the runner-owned marker sink,
+    NOT a second open on cron.log — that double-open was the sharing-violation
+    source), and enforce the hard timeout."""
     log = log or (lambda _m: None)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -465,10 +682,8 @@ def spawn_and_monitor(
         def _heartbeat() -> None:
             while not stop_heartbeat.wait(heartbeat_sec):
                 elapsed = int(time.monotonic() - start)
-                append_line(
-                    cron_log,
-                    f"---- {_utc_ts()} {MARK_HEARTBEAT} (elapsed {elapsed}s, "
-                    f"child PID {proc.pid} alive) ----",
+                log(
+                    f"{MARK_HEARTBEAT} (elapsed {elapsed}s, child PID {proc.pid} alive)"
                 )
 
         hb = threading.Thread(target=_heartbeat, name="nightly-heartbeat", daemon=True)
@@ -528,42 +743,101 @@ def structural_report_check(
 @dataclasses.dataclass
 class ContractResult:
     met: bool
+    status: str  # "met" | "partial" | "failed"
     manifest_exists: bool
     report_ok: bool
     report_reasons: List[str]
-    end_marker_written: bool
+    start_marker_present: bool
+    end_marker_present: bool
+    transcript_present: bool
     child_exit_zero: bool
     child_exit_code: int
     timed_out: bool
+    missing_artifacts: List[str]
 
     def summary(self) -> str:
         return (
-            f"met={self.met} manifest={self.manifest_exists} report_ok={self.report_ok} "
-            f"end_marker={self.end_marker_written} exit0={self.child_exit_zero} "
-            f"(code={self.child_exit_code}, timed_out={self.timed_out})"
+            f"status={self.status} met={self.met} manifest={self.manifest_exists} "
+            f"report_ok={self.report_ok} start_marker={self.start_marker_present} "
+            f"end_marker={self.end_marker_present} transcript={self.transcript_present} "
+            f"exit0={self.child_exit_zero} (code={self.child_exit_code}, "
+            f"timed_out={self.timed_out}) missing={self.missing_artifacts}"
         )
+
+
+def _read_text_safe(path: Path) -> str:
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    return ""
 
 
 def evaluate_completion_contract(
     manifest_path: Path,
     report_path: Path,
+    marker_log: Path,
+    transcript_path: Path,
     run_sha: Optional[str],
     child: ChildResult,
-    end_marker_written: bool,
 ) -> ContractResult:
+    """Evaluate the contract from DURABLE evidence RE-READ FROM DISK — never an
+    in-memory boolean (item 8). The old code trusted ``_end_marker_written``,
+    which was set unconditionally even when the append was silently swallowed;
+    here we re-read the marker sink and confirm the start AND end markers
+    actually landed. Any missing artifact class → partial/failed, and the
+    dead-man UP-ping is withheld upstream.
+    """
+    marker_text = _read_text_safe(marker_log)
+    start_present = MARK_START in marker_text
+    end_present = MARK_END in marker_text
+
     manifest_exists = manifest_path.exists()
     report_ok, reasons = structural_report_check(report_path, run_sha)
+    try:
+        transcript_present = transcript_path.exists() and transcript_path.stat().st_size > 0
+    except OSError:
+        transcript_present = False
     child_exit_zero = child.exit_code == 0 and not child.timed_out
-    met = manifest_exists and report_ok and end_marker_written and child_exit_zero
+
+    missing: List[str] = []
+    if not start_present:
+        missing.append(ARTIFACT_START_MARKER)
+    if not transcript_present:
+        missing.append(ARTIFACT_TRANSCRIPT)
+    if not report_ok:
+        missing.append(ARTIFACT_REPORT)
+    if not manifest_exists:
+        missing.append(ARTIFACT_MANIFEST)
+    if not end_present:
+        missing.append(ARTIFACT_END_MARKER)
+    if not child_exit_zero:
+        missing.append(ARTIFACT_CHILD_EXIT)
+
+    met = not missing
+    if met:
+        status = "met"
+    elif child_exit_zero and start_present:
+        # child ran clean and we have a start marker, but some artifact did not
+        # land — the audit ran but did not fully complete.
+        status = "partial"
+    else:
+        status = "failed"
+
     return ContractResult(
         met=met,
+        status=status,
         manifest_exists=manifest_exists,
         report_ok=report_ok,
         report_reasons=reasons,
-        end_marker_written=end_marker_written,
+        start_marker_present=start_present,
+        end_marker_present=end_present,
+        transcript_present=transcript_present,
         child_exit_zero=child_exit_zero,
         child_exit_code=child.exit_code,
         timed_out=child.timed_out,
+        missing_artifacts=missing,
     )
 
 
@@ -573,10 +847,13 @@ def write_failure_artifact(
     contract: ContractResult,
     workspace: WorkspaceInfo,
     transcript_path: Path,
+    marker_log: Optional[Path] = None,
+    marker_failures: Optional[List[Dict[str, Any]]] = None,
+    fatal_error: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> None:
     lines = [
-        f"# RUNNER ALERT — nightly-audit incomplete — {run_date}",
+        f"# RUNNER ALERT — nightly-audit incomplete ({contract.status}) — {run_date}",
         "",
         f"Written by audit/runner/nightly_runner.py at {_utc_ts(now)} because the",
         "completion contract was NOT met. The success ping was WITHHELD, so the",
@@ -585,9 +862,12 @@ def write_failure_artifact(
         "",
         "## Contract",
         f"- {contract.summary()}",
+        f"- MISSING ARTIFACT CLASSES: {contract.missing_artifacts}",
         f"- manifest_exists: {contract.manifest_exists}",
         f"- report_ok: {contract.report_ok}  reasons: {contract.report_reasons}",
-        f"- end_marker_written: {contract.end_marker_written}",
+        f"- start_marker_present: {contract.start_marker_present}",
+        f"- end_marker_present: {contract.end_marker_present}",
+        f"- transcript_present: {contract.transcript_present}",
         f"- child_exit_zero: {contract.child_exit_zero} (code={contract.child_exit_code}, timed_out={contract.timed_out})",
         "",
         "## Workspace",
@@ -598,7 +878,15 @@ def write_failure_artifact(
         "",
         "## Evidence",
         f"- per-run transcript: {transcript_path}",
-        "- cron.log: search for tonight's start/heartbeat markers",
+        f"- marker sink (start/heartbeat/end): {marker_log}",
+        "- cron.log: the shim's `>>` capture of the runner's stdout narration",
+    ]
+    if fatal_error:
+        lines += ["", "## Fatal error (run aborted before completion)", f"- {fatal_error}"]
+    if marker_failures:
+        lines += ["", "## Marker-sink write failures (NOT swallowed)"]
+        lines += [f"- {mf.get('status')}: {mf.get('error')} :: {mf.get('line')}" for mf in marker_failures]
+    lines += [
         "",
         "## Likely causes (in order)",
         "1. Host slept mid-run despite the wake lock (check `powercfg /requests`",
@@ -606,6 +894,7 @@ def write_failure_artifact(
         "2. Child (claude) crashed or was killed (non-zero/negative exit).",
         "3. Audit produced no report or a malformed one (see report_reasons).",
         "4. Timeout tripped (timed_out=true) — audit hung.",
+        "5. Worktree-safety refusal or marker-sink lock (see the sections above).",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -613,13 +902,18 @@ def write_failure_artifact(
 # ---------------------------------------------------------------------------
 # ping
 # ---------------------------------------------------------------------------
-PingRun = Callable[[str], int]
+# (url, message?) -> curl exit code. The UP ping GETs the base URL; a
+# partial/failure DOWN ping GETs "<base>/fail" and POSTs a no-secret message
+# naming the missing artifact classes (healthchecks.io logs the body).
+PingRun = Callable[..., int]
 
 
-def _default_ping(url: str) -> int:
-    return subprocess.run(
-        ["curl", "-fsS", "-m", "10", url], capture_output=True
-    ).returncode
+def _default_ping(url: str, message: Optional[str] = None) -> int:
+    args = ["curl", "-fsS", "-m", "10"]
+    if message:
+        args += ["--data-raw", message]
+    args.append(url)
+    return subprocess.run(args, capture_output=True).returncode
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +931,12 @@ class RunnerConfig:
     manifest_dir: Path
     snapshot_dir: Path
     lock_path: Path
+    # Runner-owned DURABLE marker sink (start / heartbeat / end). Distinct from
+    # cron.log so the runner never opens the file the shim holds via `>>`
+    # (that double-open was the sharing violation). The completion contract
+    # re-reads THIS file from disk. cron.log still receives the runner's stdout
+    # narration via the shim's `>>` capture — the runner never opens it directly.
+    marker_log: Optional[Path] = None
     reports_subpath: str = "audit/reports"
     settings_subpath: str = "audit/nightly-settings.json"
     remote: str = "origin"
@@ -659,10 +959,38 @@ class NightlyRunner:
         self.cfg = config
         self.pid = os.getpid()
         self._end_marker_written = False
+        self._marker_failures: List[Dict[str, Any]] = []
+        self._fatal_error: Optional[str] = None
+        # Serializes marker-sink appends: the heartbeat thread and the main
+        # thread both emit through _emit_raw; independent `ab` handles race and
+        # interleave (Windows has no atomic-append guarantee across handles).
+        self._emit_lock = threading.Lock()
 
-    # -- small helpers ----------------------------------------------------
-    def _log(self, msg: str) -> None:
-        append_line(self.cfg.cron_log, f"==== {_utc_ts()} runner: {msg} ====")
+    # -- marker sink ------------------------------------------------------
+    def _marker_log(self) -> Path:
+        # Default to a runner-owned sidecar in the operator audit dir if the
+        # config didn't set one (the shim never opens this file).
+        return self.cfg.marker_log or (self.cfg.operator_repo / "audit" / "runner-markers.log")
+
+    def _emit_raw(self, line: str) -> AppendResult:
+        """Write one EXACT line to the durable marker sink AND mirror it to the
+        runner's stdout (the shim's `>>` capture puts that in cron.log for
+        humans). Serialized so concurrent emits (heartbeat + main thread) never
+        interleave. A non-ok append is RECORDED, never swallowed."""
+        with self._emit_lock:
+            res = append_line(self._marker_log(), line)
+            if not res.ok:
+                self._marker_failures.append(
+                    {"line": line[-120:], "status": res.status, "error": res.error}
+                )
+            try:
+                print(line, flush=True)
+            except Exception:  # noqa: BLE001 — stdout closed/redirected; sink is authoritative
+                pass
+            return res
+
+    def _log(self, msg: str) -> AppendResult:
+        return self._emit_raw(f"==== {_utc_ts()} runner: {msg} ====")
 
     def _worktree_audit_dir(self) -> Path:
         return self.cfg.audit_worktree / "audit"
@@ -698,11 +1026,11 @@ class NightlyRunner:
             return snap
 
     def _write_end_marker(self, exit_code: int) -> None:
-        append_line(
-            self.cfg.cron_log,
-            f"==== {_utc_ts()} {MARK_END} (exit {exit_code}) ====",
-        )
-        self._end_marker_written = True
+        # Reflects the TYPED append result — NOT set unconditionally (item 3).
+        # The contract re-reads the sink from disk regardless, so a swallowed
+        # append can no longer read as "written".
+        res = self._emit_raw(f"==== {_utc_ts()} {MARK_END} (exit {exit_code}) ====")
+        self._end_marker_written = res.ok
 
     # -- phases -----------------------------------------------------------
     def _preflight(self) -> Tuple[WorkspaceInfo, Dict[str, Any]]:
@@ -779,13 +1107,16 @@ class NightlyRunner:
                 "timeout_sec": self.cfg.timeout_sec,
             },
             "contract": {
+                "evidence": "ALL re-read from disk (not in-memory booleans)",
                 "required": [
-                    "preflight manifest exists",
+                    "start marker present in the runner-owned marker sink",
+                    "per-run transcript exists and is nonzero",
                     "report exists + nonzero + '# AUDIT' header + references run SHA",
-                    "unconditional end marker written",
+                    "preflight manifest exists",
+                    "end marker present in the runner-owned marker sink",
                     "child exit code 0 (not timed out)",
-                    "success ping sent or explicitly unavailable",
-                ]
+                    "UP ping sent ONLY when every artifact above validated; else /fail",
+                ],
             },
         }
         write_json_atomic(self._manifest_worktree(), manifest)
@@ -818,36 +1149,55 @@ class NightlyRunner:
             except Exception as exc:  # noqa: BLE001
                 self._log(f"ALERT copy-back failed: {exc}")
 
-    def _do_ping(self, contract_met: bool) -> None:
-        if not contract_met:
-            self._log("completion contract NOT met — success ping WITHHELD")
+    def _do_ping(self, contract: ContractResult) -> None:
+        """UP-ping ONLY when the contract is met (every artifact re-read from
+        disk). On partial/failure, WITHHOLD the UP ping and — if a ping URL is
+        configured — send a DOWN ping to "<base>/fail" whose no-secret body
+        names the missing artifact classes (items 10 + 11)."""
+        if contract.met:
+            if not self.cfg.ping_url:
+                self._log("contract met; NIGHTLY_AUDIT_PING_URL unset — ping explicitly unavailable (no-op)")
+                return
+            try:
+                rc = self.cfg.ping_run(self.cfg.ping_url, None)
+                self._log(f"contract met; success (UP) ping sent (curl exit {rc})")
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"contract met; UP ping attempt errored: {exc}")
             return
+
+        self._log(
+            f"completion contract NOT met ({contract.status}) — UP ping WITHHELD; "
+            f"missing artifact classes: {contract.missing_artifacts}"
+        )
         if not self.cfg.ping_url:
-            self._log("contract met; NIGHTLY_AUDIT_PING_URL unset — ping explicitly unavailable (no-op)")
             return
         try:
-            rc = self.cfg.ping_run(self.cfg.ping_url)
-            self._log(f"contract met; success ping sent (curl exit {rc})")
+            fail_url = self.cfg.ping_url.rstrip("/") + "/fail"
+            msg = "nightly-audit " + contract.status + "; missing artifact classes: " + ",".join(
+                contract.missing_artifacts
+            )
+            rc = self.cfg.ping_run(fail_url, msg)
+            self._log(f"DOWN (/fail) ping sent (curl exit {rc})")
         except Exception as exc:  # noqa: BLE001
-            self._log(f"contract met; ping attempt errored: {exc}")
+            self._log(f"DOWN ping attempt errored: {exc}")
 
     # -- orchestrator -----------------------------------------------------
     def run(self) -> int:
         lock = SingleInstanceLock(self.cfg.lock_path, pid=self.pid)
         if not lock.acquire():
-            append_line(
-                self.cfg.cron_log,
+            self._emit_raw(
                 f"==== {_utc_ts()} {MARK_START} ABORTED — another nightly run holds "
-                f"the lock ({self.cfg.lock_path}) ====",
+                f"the lock ({self.cfg.lock_path}) ===="
             )
             return 3  # duplicate run
 
+        transcript_path = self.cfg.transcript_dir / f"{self.cfg.report_date}-{self.pid}.log"
         exit_code = 1
         workspace = WorkspaceInfo(path=str(self.cfg.audit_worktree), target_ref="?")
         child = ChildResult(exit_code=-1, timed_out=False, duration_sec=0.0)
         try:
-            append_line(self.cfg.cron_log, "=" * 68)
-            append_line(self.cfg.cron_log, f"==== {_utc_ts()} {MARK_START} (runner v{RUNNER_VERSION}, PID {self.pid}) ====")
+            self._emit_raw("=" * 68)
+            self._emit_raw(f"==== {_utc_ts()} {MARK_START} (runner v{RUNNER_VERSION}, PID {self.pid}) ====")
 
             wake_factory = self.cfg.wake_lock_factory or (lambda log: WakeLock(log))
             with wake_factory(self._log):
@@ -857,8 +1207,7 @@ class NightlyRunner:
                 child = spawn_and_monitor(
                     self.cfg.child_argv,
                     self.cfg.child_cwd,
-                    self.cfg.transcript_dir / f"{self.cfg.report_date}-{self.pid}.log",
-                    self.cfg.cron_log,
+                    transcript_path,
                     self.cfg.timeout_sec,
                     self.cfg.heartbeat_sec,
                     self.cfg.grace_sec,
@@ -867,20 +1216,29 @@ class NightlyRunner:
                 )
                 self._copy_report_back()
             exit_code = child.exit_code
+        except WorktreeSafetyError as exc:
+            # Typed, loud worktree-safety refusal — the run FAILS before it can
+            # touch the operator checkout (items 3, 9). Never downgraded.
+            self._fatal_error = f"WorktreeSafetyError: {exc}"
+            self._log(f"WORKTREE SAFETY REFUSAL — run FAILED: {exc}")
+            exit_code = 1
         except Exception as exc:  # noqa: BLE001
+            self._fatal_error = f"{type(exc).__name__}: {exc}"
             self._log(f"UNEXPECTED runner error: {type(exc).__name__}: {exc}")
             exit_code = 1
         finally:
             # UNCONDITIONAL end marker with the exact child exit code.
             self._write_end_marker(child.exit_code)
 
-            # Completion contract (evaluated after the end marker exists).
+            # Completion contract — every artifact RE-READ FROM DISK (item 8),
+            # evaluated after the end marker was appended to the sink.
             contract = evaluate_completion_contract(
                 self._manifest_worktree(),
                 self._operator_report(),
+                self._marker_log(),
+                transcript_path,
                 workspace.sha,
                 child,
-                self._end_marker_written,
             )
             self._log(f"completion contract: {contract.summary()}")
             if not contract.met:
@@ -890,12 +1248,15 @@ class NightlyRunner:
                         self.cfg.report_date,
                         contract,
                         workspace,
-                        self.cfg.transcript_dir / f"{self.cfg.report_date}-{self.pid}.log",
+                        transcript_path,
+                        marker_log=self._marker_log(),
+                        marker_failures=self._marker_failures,
+                        fatal_error=self._fatal_error,
                     )
                     self._log("failure artifact written: audit/ALERT-<date>-runner.md")
                 except Exception as exc:  # noqa: BLE001
                     self._log(f"failure-artifact write failed: {exc}")
-            self._do_ping(contract.met)
+            self._do_ping(contract)
             lock.release()
 
         return exit_code
@@ -914,8 +1275,16 @@ def _local_appdata_worktree() -> Path:
 def build_production_config(
     operator_repo: Path, selftest: bool = False
 ) -> RunnerConfig:
+    operator_repo = Path(operator_repo).resolve()
     audit_dir = operator_repo / "audit"
-    worktree = Path(os.environ.get("AUDIT_WORKTREE_DIR", "")) or _local_appdata_worktree()
+    # ITEM 1 — a blank OR whitespace AUDIT_WORKTREE_DIR counts as UNSET. The old
+    # `Path(os.environ.get(..., "")) or _local_appdata_worktree()` was DEAD:
+    # Path("") is WindowsPath('.') which is TRUTHY, so the %LOCALAPPDATA%
+    # fallback never ran and the worktree resolved to "." (the operator
+    # checkout). Geometry resolution/verification happens later, in
+    # refresh_audit_worktree (item 2), before any git command.
+    _wt_env = os.environ.get("AUDIT_WORKTREE_DIR", "")
+    worktree = Path(_wt_env) if _wt_env and _wt_env.strip() else _local_appdata_worktree()
     report_date = local_date_str()
 
     if selftest:
@@ -952,6 +1321,7 @@ def build_production_config(
         child_argv=child_argv,
         child_cwd=child_cwd,
         cron_log=audit_dir / "cron.log",
+        marker_log=audit_dir / "runner-markers.log",
         transcript_dir=audit_dir / "transcripts",
         manifest_dir=audit_dir / "manifests",
         snapshot_dir=audit_dir / "snapshots",

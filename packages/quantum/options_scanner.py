@@ -1033,6 +1033,41 @@ def _get_ask_flat(c):
 def _get_premium_flat(c):
     return c.get("price") or c.get("close")
 
+
+def _build_oi_by_contract(chain: Optional[List[Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+    """Lane H (observe-first): map bare-OCC contract → typed exact-leg OI.
+
+    Feeds ONLY the quote-provenance recorder's OI counterfactual — NEVER
+    consulted by any gate, selector, ranker, or sizer. Fail-soft (returns
+    {} on any error). Preserves the 0-vs-absent distinction: an explicit
+    OI of 0 maps to 0 (a real listed-but-untraded value), an absent key to
+    None (typed UNAVAILABLE downstream). Reads both the nested TruthLayer
+    chain (top-level ``oi``/``volume``/``source``, verified
+    market_data_truth_layer.py:1781/1856) and — defensively — the legacy
+    flat Polygon fallback chain, which carries NO OI (→ None).
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        for c in (chain or []):
+            if not isinstance(c, dict):
+                continue
+            ticker = c.get("contract") or c.get("ticker")
+            if not ticker:
+                continue
+            key = str(ticker)
+            key = key[2:] if key.startswith("O:") else key
+            out[key] = {
+                "oi": c.get("oi", c.get("open_interest")),
+                "volume": c.get("volume"),
+                "source": c.get("source") or "unknown",
+                "oi_known_at": c.get("open_interest_date") or c.get("oi_known_at"),
+            }
+    except Exception:
+        logger.debug("_build_oi_by_contract failed (non-fatal)", exc_info=True)
+        return {}
+    return out
+
+
 def _apply_agent_constraints(candidate: Dict[str, Any], portfolio_cash: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """
     Applies agent veto and constraints to the candidate.
@@ -3398,6 +3433,15 @@ def scan_for_opportunities(
                 rej_stats.record("no_chain", strategy=suggestion["strategy"])
                 return None
 
+            # Lane H (observe-first): exact-leg OI map for the quote-provenance
+            # recorder's hypothetical-floor counterfactual. Built ONCE per
+            # symbol from the chain; consumed ONLY by the recorder (no gate).
+            # Fail-soft — never breaks the scan.
+            try:
+                _oi_by_contract = _build_oi_by_contract(chain)
+            except Exception:
+                _oi_by_contract = {}
+
             # Normalize Strategy Key early (needed before expiry selection for condor path)
             raw_strategy = suggestion["strategy"]
             strategy_key = raw_strategy.lower().replace(" ", "_")
@@ -3969,6 +4013,7 @@ def scan_for_opportunities(
                             entry_cost_share=entry_cost_share,
                             max_loss_share=max_loss_share,
                             legs=legs,
+                            oi_by_contract=_oi_by_contract,
                         )
                     except Exception:
                         logger.debug("quote_provenance spread record failed",
@@ -4008,6 +4053,7 @@ def scan_for_opportunities(
                     entry_cost_share=entry_cost_share,
                     max_loss_share=max_loss_share,
                     legs=legs,
+                    oi_by_contract=_oi_by_contract,
                 )
             except Exception:
                 logger.debug("quote_provenance spread record failed",

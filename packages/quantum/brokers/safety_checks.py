@@ -267,7 +267,9 @@ def approve_order(
     # Defensive — shadow_only orders shouldn't reach live_approval_queue,
     # but routing_mode flips during pending approval are now handled.
     from packages.quantum.brokers.execution_router import should_submit_to_broker
-    if not should_submit_to_broker(order["portfolio_id"], supabase):
+    # order=order so the submit-seam single-leg experiment hard veto can block a
+    # broker submit regardless of routing_mode. Byte-identical for non-experiment.
+    if not should_submit_to_broker(order["portfolio_id"], supabase, order=order):
         supabase.table("paper_orders") \
             .update({"execution_mode": "shadow_blocked"}) \
             .eq("id", order["id"]) \

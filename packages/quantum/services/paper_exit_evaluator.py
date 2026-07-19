@@ -2002,7 +2002,7 @@ class PaperExitEvaluator:
                         should_submit_to_broker,
                     )
                     _live_submit = should_submit_to_broker(
-                        position["portfolio_id"], supabase
+                        position["portfolio_id"], supabase, order=position
                     )
                 except Exception:
                     _live_submit = True  # fail toward validating the live path
@@ -2214,7 +2214,11 @@ class PaperExitEvaluator:
                 # path gated too. Block Alpaca submit; PR2b will handle the
                 # shadow close fill machinery.
                 from packages.quantum.brokers.execution_router import should_submit_to_broker
-                if not should_submit_to_broker(position["portfolio_id"], supabase):
+                # order=position: the submit-seam single-leg experiment hard veto
+                # blocks a live broker close of a (bug-produced) single-leg
+                # experiment position — it closes via the internal-fill fallback
+                # below instead. Byte-identical for every non-experiment position.
+                if not should_submit_to_broker(position["portfolio_id"], supabase, order=position):
                     # PR2a: mark routing decision (preserved through fill —
                     # _commit_fill only writes filled-state fields, not
                     # execution_mode).

@@ -360,6 +360,12 @@ def persist_arm_evidence(result, rows, errors, cycle_id="cycle"):
     try:
         payload = _build_arm_payload(cycle_id, rows, folded_errors)
     except Exception as e:
+        # H9 loud-partial (docs/loud_error_doctrine.md): a persist fault may
+        # never be SILENT and may never CRASH the trade job. Fold it to
+        # counts.errors below (→ runner classifies 'partial') AND surface it
+        # loudly — logger.error with context PLUS a durable risk_alert (the
+        # fold alone is invisible to the AST gate and to an operator reading
+        # only alerts).
         payload = {
             "cycle_id": cycle_id,
             "status": "error",
@@ -368,6 +374,28 @@ def persist_arm_evidence(result, rows, errors, cycle_id="cycle"):
         }
         folded_errors = folded_errors + [
             f"arm_evidence_persist_failed:{type(e).__name__}"]
+        logger.error(
+            "[RISK_BASIS_ARM] persist failed cycle=%s: %s: %s — folding to "
+            "counts.errors (job partial)", cycle_id, type(e).__name__, e)
+        try:
+            from packages.quantum.observability.alerts import (
+                alert, _get_admin_supabase,
+            )
+            alert(
+                _get_admin_supabase(),
+                alert_type="risk_basis_arm_evidence_persist_failed",
+                severity="warning",
+                message=(f"risk-basis arm evidence persist failed "
+                         f"({type(e).__name__}) — run folds to partial"),
+                metadata={"cycle_id": cycle_id,
+                          "error_class": type(e).__name__,
+                          "error_message": str(e)[:300]},
+            )
+        except Exception:
+            # alert egress is best-effort; the loud logger.error above and the
+            # counts.errors fold below still make the failure non-silent.
+            logger.warning(
+                "[RISK_BASIS_ARM] persist-failure alert emit failed (non-fatal)")
 
     cm = result.get("cycle_metadata")
     if not isinstance(cm, dict):

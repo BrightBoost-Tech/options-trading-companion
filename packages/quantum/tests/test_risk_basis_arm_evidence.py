@@ -297,15 +297,23 @@ class TestPersistence:
         assert payload["status"] == "empty"   # measured-empty marker, not absent
         assert payload["rows"] == []
 
-    def test_durable_write_failure_folds_to_partial(self, monkeypatch):
+    def test_durable_write_failure_is_loud_and_folds_to_partial(self, monkeypatch):
         # Inject at the deepest persist callee: payload build raises.
         def _boom(cycle_id, rows, errors):
             raise RuntimeError("serialize failed")
 
+        alerts = []
         monkeypatch.setattr(rbs, "_build_arm_payload", _boom)
+        # H9 loud-partial: the swallow must EMIT (no real DB write in tests).
+        monkeypatch.setattr("packages.quantum.observability.alerts.alert",
+                            lambda *a, **k: alerts.append(k))
+        monkeypatch.setattr(
+            "packages.quantum.observability.alerts._get_admin_supabase",
+            lambda: object())
         result = {"executed_count": 3, "counts": {"errors": 0}}
         out = rbs.persist_arm_evidence(result, [{"consumer": "x"}], [], cycle_id="c")
-        # never silent: folded to a typed error → runner classifies 'partial'
+        # never silent: a durable alert fired AND it folded to counts.errors
+        assert alerts and alerts[0]["alert_type"] == "risk_basis_arm_evidence_persist_failed"
         assert out["counts"]["errors"] == 1
         assert _classify_handler_return(out) == "partial"
         # the DECISION output is untouched by the persistence fault
@@ -392,6 +400,12 @@ class TestHandlerWiring:
             raise RuntimeError("serialize failed")
 
         monkeypatch.setattr(rbs, "_build_arm_payload", _boom)
+        # keep the loud-partial alert off the wire in tests
+        monkeypatch.setattr("packages.quantum.observability.alerts.alert",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(
+            "packages.quantum.observability.alerts._get_admin_supabase",
+            lambda: object())
         out = pae.run({"user_id": "u"})
         # never silent: folded to counts.errors → runner classifies 'partial'
         assert int(out["counts"]["errors"]) >= 1

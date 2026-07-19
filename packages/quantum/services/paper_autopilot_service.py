@@ -830,6 +830,10 @@ class PaperAutopilotService:
         total_processed = 0
         # #72-H5b: aggregation list for per-cohort per-suggestion failures
         _cohort_per_suggestion_failures = []
+        # A3-LIFECYCLE (v1.6): candidate lifecycle-milestone tallies, surfaced
+        # in the result for job_runs.result visibility (observe-only,
+        # fail-soft; the executor NEVER changes behavior for these writes).
+        _milestone_counts: Dict[str, int] = {}
 
         # Debug: also query ALL pending suggestions regardless of cohort to see what exists
         all_pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
@@ -1149,6 +1153,64 @@ class PaperAutopilotService:
                         "processed": proc.get("processed", 0),
                     })
                     total_processed += proc.get("processed", 0)
+
+                    # A3-LIFECYCLE (v1.6): advance the candidate's lifecycle
+                    # disposition at the executor seam (observe-only, fail-soft,
+                    # cross-job via suggestion_id). staged (always) →
+                    # broker_submitted (only when the ORDER's own
+                    # execution_mode is alpaca_live — shadow_only stages as
+                    # shadow_blocked and NEVER touches the broker) → filled
+                    # (only when the order is already filled, i.e. an internal
+                    # synchronous fill; a live order is not filled yet — its
+                    # fill advances later at the broker-poll seam). A
+                    # blocked/non-executable row can never advance (predecessor
+                    # guarded); monotonic + idempotent; a missing row/table is a
+                    # typed counted no-op. NEVER alters staging/fill behavior.
+                    try:
+                        from packages.quantum.services.candidate_disposition import (
+                            advance_candidate_milestone as _adv_ms,
+                        )
+                        _adv_ms(
+                            supabase, sid, "staged",
+                            ids={"order_id": order_id},
+                            extra={"cohort": cohort_name},
+                            counters=_milestone_counts,
+                        )
+                        _ord_row: Dict[str, Any] = {}
+                        try:
+                            _ord_res = supabase.table("paper_orders").select(
+                                "execution_mode, status, client_order_id, "
+                                "alpaca_order_id"
+                            ).eq("id", order_id).limit(1).execute()
+                            _ord_row = (_ord_res.data or [{}])[0] or {}
+                        except Exception:
+                            _ord_row = {}
+                        if _ord_row.get("execution_mode") == "alpaca_live":
+                            _adv_ms(
+                                supabase, sid, "broker_submitted",
+                                ids={
+                                    "client_order_id": _ord_row.get("client_order_id"),
+                                    "alpaca_order_id": _ord_row.get("alpaca_order_id"),
+                                },
+                                extra={"cohort": cohort_name},
+                                counters=_milestone_counts,
+                            )
+                        if _ord_row.get("status") == "filled":
+                            _adv_ms(
+                                supabase, sid, "filled",
+                                ids={"order_id": order_id},
+                                extra={
+                                    "cohort": cohort_name,
+                                    "routing": _ord_row.get("execution_mode"),
+                                    "fill_source": "executor_internal",
+                                },
+                                counters=_milestone_counts,
+                            )
+                    except Exception as _ms_err:
+                        logger.debug(
+                            "[CANDIDATE_DISPOSITION] executor milestone advance "
+                            "skipped (non-fatal): %s", _ms_err,
+                        )
                 except rc.SymbolCooldownActive as _ca:
                     # Benched by an active re-entry cooldown (or a fail-closed
                     # query error) — an expected, ENFORCED skip, already logged
@@ -1280,6 +1342,12 @@ class PaperAutopilotService:
                 "total_processed": total_processed + sweep_processed,
                 "sweep_processed": sweep_processed,
             },
+            # A3-LIFECYCLE (v1.6): observe-only lifecycle-milestone tallies
+            # (milestone_advanced / already_at_or_past / not_advanceable /
+            # orphan_no_row / table_missing_noops / write_failures). A
+            # milestone write failure is COUNTED + surfaced here (visible in
+            # job_runs.result), never silent and never a behavior change.
+            "candidate_milestones": _milestone_counts or None,
         }
 
     def get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:

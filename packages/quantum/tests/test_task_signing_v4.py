@@ -10,6 +10,9 @@ Tests the signing and verification logic including:
 - Nonce replay protection (mocked)
 """
 
+import importlib
+import sys
+import types
 import pytest
 import time
 import hmac
@@ -30,12 +33,55 @@ from packages.quantum.security.task_signing_v4 import (
     TASK_V4_TTL_SECONDS,
 )
 
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster A] reload() on mocked module
-# Tracked in #768 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster A] reload() on mocked module; tracked in #768',
+
+def _pin_real_module(monkeypatch, name):
+    """Return the GENUINE module for ``name`` and pin it into ``sys.modules``
+    for the test's duration (self-contained mirror of
+    test_job_origin_provenance._pin_real_module).
+
+    Sibling suites can replace ``packages.quantum.security`` (or a submodule)
+    with a MagicMock in ``sys.modules`` at collection time; a later
+    ``importlib.reload`` on the leaked mock raises, and a ``from ... import``
+    then binds mock children. Pinning the real module makes every import form
+    resolve to the same object, so the route's ``verify_task_signature``
+    closure reads the real globals this test sets.
+    """
+    def _is_real(mod):
+        return isinstance(mod, types.ModuleType) and getattr(
+            mod, "__spec__", None
+        ) is not None
+
+    mod = sys.modules.get(name)
+    if not _is_real(mod):
+        parent_name, _, attr = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        cand = getattr(parent, attr, None) if parent is not None else None
+        if _is_real(cand):
+            mod = cand
+        else:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+            mod = importlib.import_module(name)
+    monkeypatch.setitem(sys.modules, name, mod)
+    return mod
+
+
+# Canonical production-marker env keys read by security.config.is_production()
+# (H13). ENV is deliberately EXCLUDED — the F-A9-1 fix drops the divergent
+# ENV/ENABLE_DEV_AUTH_BYPASS heuristic; a stray ENV=production must NOT
+# classify as production.
+_ENV_KEYS = (
+    "APP_ENV",
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_ENVIRONMENT_NAME",
+    "ENV",
+    "ENABLE_DEV_AUTH_BYPASS",
+    "TASK_NONCE_FAIL_CLOSED_IN_PROD",
 )
+
+
+def _clear_env(monkeypatch):
+    for k in _ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
 
 
 # =============================================================================
@@ -599,125 +645,442 @@ class TestNonceReplayProtection:
                 assert result2 is False
 
 
+class TestProductionModeDetection:
+    """`_is_production_mode` must be the CANONICAL detector — a thin delegate to
+    security.config.is_production() (H13), NOT a second heuristic (F-A9-1)."""
+
+    @pytest.fixture
+    def signing(self, monkeypatch):
+        _clear_env(monkeypatch)
+        return _pin_real_module(
+            monkeypatch, "packages.quantum.security.task_signing_v4"
+        )
+
+    def test_app_env_production_is_production(self, signing, monkeypatch):
+        monkeypatch.setenv("APP_ENV", "production")
+        assert signing._is_production_mode() is True
+
+    def test_railway_environment_name_is_production(self, signing, monkeypatch):
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+        assert signing._is_production_mode() is True
+
+    def test_railway_environment_is_production(self, signing, monkeypatch):
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+        assert signing._is_production_mode() is True
+
+    def test_env_production_alone_is_NOT_production(self, signing, monkeypatch):
+        """F-A9-1 regression: the pre-fix detector keyed off ENV=production.
+        The canonical detector ignores ENV — a stray ENV must never classify
+        as production (nor de-classify a real one)."""
+        monkeypatch.setenv("ENV", "production")
+        assert signing._is_production_mode() is False
+
+    def test_dev_bypass_zero_alone_is_NOT_production(self, signing, monkeypatch):
+        """F-A9-1 regression: the pre-fix detector treated
+        ENABLE_DEV_AUTH_BYPASS=0 as production. The canonical detector does
+        not — production is APP_ENV / the Railway platform signal only."""
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "0")
+        assert signing._is_production_mode() is False
+
+    def test_all_unset_is_not_production(self, signing):
+        assert signing._is_production_mode() is False
+
+    def test_dev_bypass_enabled_is_not_production(self, signing, monkeypatch):
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "1")
+        assert signing._is_production_mode() is False
+
+    def test_delegates_to_config_is_production(self, signing, monkeypatch):
+        """No second detector: the result IS security.config.is_production()."""
+        from packages.quantum.security import config as sec_config
+
+        for env in ({}, {"APP_ENV": "production"},
+                    {"RAILWAY_ENVIRONMENT": "production"},
+                    {"ENV": "production"},
+                    {"ENABLE_DEV_AUTH_BYPASS": "0"}):
+            _clear_env(monkeypatch)
+            for k, v in env.items():
+                monkeypatch.setenv(k, v)
+            assert signing._is_production_mode() == sec_config.is_production()
+
+
+# Every production-marker combination the fail-closed contract must cover.
+# (label, env-dict, is_production_expected)
+_PRODUCTION_MARKERS = [
+    ("app_env_production", {"APP_ENV": "production"}, True),
+    ("railway_environment", {"RAILWAY_ENVIRONMENT": "production"}, True),
+    ("railway_environment_name", {"RAILWAY_ENVIRONMENT_NAME": "production"}, True),
+    ("env_production_alone", {"ENV": "production"}, False),
+    ("all_unset", {}, False),
+    ("dev_app_env", {"APP_ENV": "development"}, False),
+]
+
+
 class TestNonceFailClosedBehavior:
-    """Test fail-closed vs fail-open behavior for nonce protection."""
+    """Fail-closed vs the narrow, explicit dev fail-open — driven at the
+    deepest callee (`check_and_store_nonce`) with the store injected DOWN.
 
-    def test_fail_closed_rejects_when_store_unavailable_in_prod(self):
-        """In production with fail-closed, unavailable nonce store should reject."""
-        with patch.dict("os.environ", {
-            "TASK_NONCE_PROTECTION": "1",
-            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
-            "ENV": "production",
-        }):
-            from packages.quantum.security import task_signing_v4
-            import importlib
-            importlib.reload(task_signing_v4)
+    Reload-free: `_is_production_mode` / `_nonce_outage_fails_closed` read env
+    at call time via the canonical config; only the module-level
+    TASK_NONCE_PROTECTION constant is set via setattr. No production marker can
+    reach the fail-open branch."""
 
-            task_signing_v4.TASK_NONCE_PROTECTION = True
-            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+    @pytest.fixture
+    def signing(self, monkeypatch):
+        _clear_env(monkeypatch)
+        mod = _pin_real_module(
+            monkeypatch, "packages.quantum.security.task_signing_v4"
+        )
+        monkeypatch.setattr(mod, "TASK_NONCE_PROTECTION", True)
+        monkeypatch.setattr(mod, "_emit_nonce_audit_event",
+                            lambda *a, **k: None)
+        return mod
 
-            # Mock store as unavailable
-            with patch.object(task_signing_v4, "_get_nonce_client", return_value=None):
-                with patch.object(task_signing_v4, "_is_production_mode", return_value=True):
-                    with patch.object(task_signing_v4, "_emit_nonce_audit_event"):
-                        result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
-                        assert result is False  # Rejected in fail-closed mode
+    @pytest.mark.parametrize("label,env,is_prod", _PRODUCTION_MARKERS)
+    def test_store_unavailable_fails_closed(
+            self, signing, monkeypatch, label, env, is_prod):
+        """Store DOWN → fail CLOSED (typed error) under EVERY production marker
+        AND under every non-production state lacking the explicit dev escape.
 
-    def test_fail_open_allows_when_store_unavailable_in_dev(self):
-        """In dev mode, unavailable nonce store should allow request."""
-        with patch.dict("os.environ", {
-            "TASK_NONCE_PROTECTION": "1",
-            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
-            "ENV": "development",
-            "ENABLE_DEV_AUTH_BYPASS": "1",
-        }):
-            from packages.quantum.security import task_signing_v4
-            import importlib
-            importlib.reload(task_signing_v4)
+        `env_production_alone` / `all_unset` are non-production yet still fail
+        closed: fail-open needs the explicit dev markers, never mere
+        non-production."""
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        assert signing._is_production_mode() is is_prod
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        with pytest.raises(signing.NonceStoreUnavailableError):
+            signing.check_and_store_nonce("nonce-x", "tasks:test", 12345)
 
-            task_signing_v4.TASK_NONCE_PROTECTION = True
-            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+    @pytest.mark.parametrize("label,env,is_prod", _PRODUCTION_MARKERS)
+    def test_store_error_fails_closed(
+            self, signing, monkeypatch, label, env, is_prod):
+        """A non-duplicate store ERROR → fail CLOSED (typed error), same
+        matrix. A value that cannot be verified rejects, never fabricates."""
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        client = MagicMock()
+        client.table.return_value.insert.return_value.execute.side_effect = (
+            Exception("Connection timeout to nonce store")
+        )
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: client)
+        with pytest.raises(signing.NonceStoreUnavailableError):
+            signing.check_and_store_nonce("nonce-y", "tasks:test", 12345)
 
-            # Mock store as unavailable
-            with patch.object(task_signing_v4, "_get_nonce_client", return_value=None):
-                with patch.object(task_signing_v4, "_is_production_mode", return_value=False):
-                    result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
-                    assert result is True  # Allowed in dev mode (fail-open)
+    def test_production_cannot_be_forced_open(self, signing, monkeypatch):
+        """The hardening: even the explicit dev opt-out CANNOT open production.
+        APP_ENV=production + ENABLE_DEV_AUTH_BYPASS=1 + FAIL_CLOSED_IN_PROD=0
+        (a config-illegal combo that startup would hard-abort) STILL fails
+        closed — production is non-overridable."""
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "1")
+        monkeypatch.setenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "0")
+        assert signing._nonce_outage_fails_closed() is True
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        with pytest.raises(signing.NonceStoreUnavailableError):
+            signing.check_and_store_nonce("nonce-z", "tasks:test", 12345)
 
-    def test_fail_closed_rejects_on_store_error_in_prod(self):
-        """In production, non-duplicate store errors should reject."""
-        mock_client = MagicMock()
-        mock_table = MagicMock()
-        mock_client.table.return_value = mock_table
-        mock_table.insert.return_value.execute.side_effect = Exception("Connection timeout")
+    def test_dev_escape_fails_open_only_with_both_markers(
+            self, signing, monkeypatch):
+        """The ONLY fail-open path: non-production AND ENABLE_DEV_AUTH_BYPASS=1
+        AND TASK_NONCE_FAIL_CLOSED_IN_PROD=0. Store DOWN → allowed (True)."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "1")
+        monkeypatch.setenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "0")
+        assert signing._nonce_outage_fails_closed() is False
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        assert signing.check_and_store_nonce("nonce-d", "tasks:test", 12345) is True
 
-        with patch.dict("os.environ", {
-            "TASK_NONCE_PROTECTION": "1",
-            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
-            "ENV": "production",
-        }):
-            from packages.quantum.security import task_signing_v4
-            import importlib
-            importlib.reload(task_signing_v4)
+    def test_dev_bypass_without_optout_fails_closed(self, signing, monkeypatch):
+        """Dev bypass alone is NOT enough — without the explicit opt-out the
+        request still fails closed (the escape hatch is narrow)."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "1")
+        # TASK_NONCE_FAIL_CLOSED_IN_PROD unset → default fail-closed
+        assert signing._nonce_outage_fails_closed() is True
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        with pytest.raises(signing.NonceStoreUnavailableError):
+            signing.check_and_store_nonce("nonce-e", "tasks:test", 12345)
 
-            task_signing_v4.TASK_NONCE_PROTECTION = True
-            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+    def test_optout_without_dev_bypass_fails_closed(self, signing, monkeypatch):
+        """The opt-out alone is NOT enough — without dev bypass it fails
+        closed."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "0")
+        assert signing._nonce_outage_fails_closed() is True
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        with pytest.raises(signing.NonceStoreUnavailableError):
+            signing.check_and_store_nonce("nonce-f", "tasks:test", 12345)
 
-            with patch.object(task_signing_v4, "_get_nonce_client", return_value=mock_client):
-                with patch.object(task_signing_v4, "_is_production_mode", return_value=True):
-                    with patch.object(task_signing_v4, "_emit_nonce_audit_event"):
-                        result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
-                        assert result is False  # Rejected on error in fail-closed mode
+    def test_protection_disabled_short_circuits(self, signing, monkeypatch):
+        """TASK_NONCE_PROTECTION=0 → always allowed, store never consulted."""
+        monkeypatch.setattr(signing, "TASK_NONCE_PROTECTION", False)
 
-    def test_fail_open_allows_on_store_error_in_dev(self):
-        """In dev mode, non-duplicate store errors should allow request."""
-        mock_client = MagicMock()
-        mock_table = MagicMock()
-        mock_client.table.return_value = mock_table
-        mock_table.insert.return_value.execute.side_effect = Exception("Connection timeout")
+        def _boom():
+            raise AssertionError("store must not be consulted when disabled")
 
-        with patch.dict("os.environ", {
-            "TASK_NONCE_PROTECTION": "1",
-            "ENV": "development",
-            "ENABLE_DEV_AUTH_BYPASS": "1",
-        }):
-            from packages.quantum.security import task_signing_v4
-            import importlib
-            importlib.reload(task_signing_v4)
+        monkeypatch.setattr(signing, "_get_nonce_client", _boom)
+        assert signing.check_and_store_nonce("n", "tasks:test", 1) is True
 
-            task_signing_v4.TASK_NONCE_PROTECTION = True
 
-            with patch.object(task_signing_v4, "_get_nonce_client", return_value=mock_client):
-                with patch.object(task_signing_v4, "_is_production_mode", return_value=False):
-                    result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
-                    assert result is True  # Allowed in dev mode
+# =============================================================================
+# Route-driven verification — the REAL verifier on a REAL FastAPI route, with
+# failures injected at the DEEPEST callee (the nonce store) and truth asserted
+# at the TOP (the HTTP status). Pattern: test_shadow_fleet_activation_route.
+# =============================================================================
 
-    def test_is_production_mode_env_production(self):
-        """ENV=production should return True."""
-        from packages.quantum.security import task_signing_v4
-        import importlib
+ROUTE = "/tasks/test/verify"
+SCOPE = "tasks:test_verify"
+ROUTE_SECRET = "route-drive-signing-secret-abc123"
 
-        with patch.dict("os.environ", {"ENV": "production"}):
-            importlib.reload(task_signing_v4)
-            assert task_signing_v4._is_production_mode() is True
 
-    def test_is_production_mode_dev_bypass_disabled(self):
-        """ENABLE_DEV_AUTH_BYPASS=0 should return True (treated as prod)."""
-        from packages.quantum.security import task_signing_v4
-        import importlib
+class _FakeNonceStore:
+    """Minimal supabase-shaped nonce store: first insert of a nonce succeeds,
+    a repeat raises a unique-violation (the real replay signal)."""
 
-        with patch.dict("os.environ", {"ENV": "staging", "ENABLE_DEV_AUTH_BYPASS": "0"}):
-            importlib.reload(task_signing_v4)
-            assert task_signing_v4._is_production_mode() is True
+    def __init__(self):
+        self._seen = set()
+        self._pending = None
 
-    def test_is_production_mode_dev_bypass_enabled(self):
-        """ENABLE_DEV_AUTH_BYPASS=1 should return False (dev mode)."""
-        from packages.quantum.security import task_signing_v4
-        import importlib
+    def table(self, _name):
+        return self
 
-        with patch.dict("os.environ", {"ENV": "development", "ENABLE_DEV_AUTH_BYPASS": "1"}):
-            importlib.reload(task_signing_v4)
-            assert task_signing_v4._is_production_mode() is False
+    def insert(self, row):
+        self._pending = row
+        return self
+
+    def execute(self):
+        nonce = self._pending["nonce"]
+        if nonce in self._seen:
+            raise Exception("duplicate key value violates unique constraint")
+        self._seen.add(nonce)
+        return MagicMock()
+
+
+@pytest.fixture
+def signed_route(monkeypatch):
+    """A fresh FastAPI app whose single route is guarded by the REAL
+    verify_task_signature closure reading the pinned module's globals."""
+    from fastapi import FastAPI, Depends
+
+    _clear_env(monkeypatch)
+    signing = _pin_real_module(
+        monkeypatch, "packages.quantum.security.task_signing_v4"
+    )
+    monkeypatch.setattr(signing, "SIGNING_KEYS", {})
+    monkeypatch.setattr(signing, "TASK_SIGNING_SECRET", ROUTE_SECRET)
+    monkeypatch.setattr(signing, "ALLOW_LEGACY_CRON_SECRET", False)
+    monkeypatch.setattr(signing, "TASK_NONCE_PROTECTION", True)
+    monkeypatch.setattr(signing, "_emit_nonce_audit_event", lambda *a, **k: None)
+
+    app = FastAPI()
+
+    @app.post(ROUTE)
+    async def _endpoint(
+        auth: TaskSignatureResult = Depends(signing.verify_task_signature(SCOPE))
+    ):
+        return {"ok": True, "actor": auth.actor, "scope": auth.scope}
+
+    client = TestClient(app, raise_server_exceptions=False)
+    return signing, client
+
+
+def _sign(signing, body, *, method="POST", path=ROUTE, scope=SCOPE,
+          secret=ROUTE_SECRET):
+    headers = signing.sign_task_request(
+        method=method, path=path, body=body, scope=scope, secret=secret
+    )
+    headers["Content-Type"] = "application/json"
+    return headers
+
+
+class TestSignedRouteHappyAndReplay:
+    def test_valid_request_200(self, signed_route):
+        signing, client = signed_route
+        store = _FakeNonceStore()
+        with patch.object(signing, "_get_nonce_client", return_value=store):
+            body = b'{"hello":"world"}'
+            resp = client.post(ROUTE, content=body, headers=_sign(signing, body))
+        assert resp.status_code == 200
+        assert resp.json()["scope"] == SCOPE
+        assert resp.json()["actor"] == f"v4:{SCOPE}"
+
+    def test_replayed_nonce_401(self, signed_route):
+        signing, client = signed_route
+        store = _FakeNonceStore()
+        with patch.object(signing, "_get_nonce_client", return_value=store):
+            body = b'{"hello":"world"}'
+            headers = _sign(signing, body)  # SAME headers → SAME nonce
+            first = client.post(ROUTE, content=body, headers=headers)
+            replay = client.post(ROUTE, content=body, headers=headers)
+        assert first.status_code == 200
+        assert replay.status_code == 401
+        assert "replay" in replay.json()["detail"].lower()
+
+    def test_secret_never_appears_in_error_body(self, signed_route):
+        """No secret in the wire error (bad signature → 401)."""
+        signing, client = signed_route
+        store = _FakeNonceStore()
+        with patch.object(signing, "_get_nonce_client", return_value=store):
+            body = b'{"a":1}'
+            headers = _sign(signing, body)
+            headers["X-Task-Signature"] = "deadbeef" * 8  # wrong
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert ROUTE_SECRET not in resp.text
+
+
+class TestSignedRouteRejections:
+    def _store(self, signing):
+        return patch.object(signing, "_get_nonce_client",
+                            return_value=_FakeNonceStore())
+
+    def test_expired_timestamp_401(self, signed_route):
+        signing, client = signed_route
+        body = b'{}'
+        headers = signing.sign_task_request(
+            method="POST", path=ROUTE, body=body, scope=SCOPE, secret=ROUTE_SECRET
+        )
+        headers["Content-Type"] = "application/json"
+        old_ts = str(int(time.time()) - (TASK_V4_TTL_SECONDS + 120))
+        headers["X-Task-Ts"] = old_ts  # stale ts (sig no longer matches, but
+        # the expiry gate fires first — either way the request is rejected)
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert "expired" in resp.json()["detail"].lower()
+
+    def test_future_out_of_skew_timestamp_401(self, signed_route):
+        signing, client = signed_route
+        body = b'{}'
+        future_ts = int(time.time()) + (TASK_V4_TTL_SECONDS + 120)
+        nonce = secrets.token_hex(16)
+        body_hash = hashlib.sha256(body).hexdigest()
+        sig = compute_signature(
+            ROUTE_SECRET, future_ts, nonce, "POST", ROUTE, body_hash, SCOPE
+        )
+        headers = {
+            "X-Task-Ts": str(future_ts), "X-Task-Nonce": nonce,
+            "X-Task-Scope": SCOPE, "X-Task-Signature": sig,
+            "Content-Type": "application/json",
+        }
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert "expired" in resp.json()["detail"].lower()
+
+    def test_wrong_scope_403(self, signed_route):
+        signing, client = signed_route
+        body = b'{}'
+        headers = _sign(signing, body, scope="tasks:some_other_scope")
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 403
+        assert "scope" in resp.json()["detail"].lower()
+
+    def test_wrong_secret_401(self, signed_route):
+        signing, client = signed_route
+        body = b'{}'
+        headers = _sign(signing, body, secret="a-different-secret")
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert "signature" in resp.json()["detail"].lower()
+
+    def test_wrong_body_401(self, signed_route):
+        """Signature binds the body hash: signed for body A, sent body B."""
+        signing, client = signed_route
+        headers = _sign(signing, b'{"signed":"body"}')
+        with self._store(signing):
+            resp = client.post(ROUTE, content=b'{"tampered":"body"}',
+                               headers=headers)
+        assert resp.status_code == 401
+        assert "signature" in resp.json()["detail"].lower()
+
+    def test_wrong_method_401(self, signed_route):
+        """Signature binds the method: signed GET, dispatched POST."""
+        signing, client = signed_route
+        body = b'{}'
+        headers = _sign(signing, body, method="GET")
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert "signature" in resp.json()["detail"].lower()
+
+    def test_wrong_path_401(self, signed_route):
+        """Signature binds the path: signed a different path."""
+        signing, client = signed_route
+        body = b'{}'
+        headers = _sign(signing, body, path="/tasks/other/path")
+        with self._store(signing):
+            resp = client.post(ROUTE, content=body, headers=headers)
+        assert resp.status_code == 401
+        assert "signature" in resp.json()["detail"].lower()
+
+    def test_missing_headers_401(self, signed_route):
+        signing, client = signed_route
+        with self._store(signing):
+            resp = client.post(ROUTE, content=b'{}',
+                               headers={"Content-Type": "application/json"})
+        assert resp.status_code == 401
+        assert "missing" in resp.json()["detail"].lower()
+
+
+class TestSignedRouteNonceOutageFailClosed:
+    """The headline: a VALID, correctly-signed request is REJECTED at the route
+    when the nonce store is DOWN and the context fails closed — under every
+    production marker — and ALLOWED only in the narrow explicit dev escape."""
+
+    @pytest.mark.parametrize("label,env,is_prod", _PRODUCTION_MARKERS)
+    def test_store_down_fails_closed_503(
+            self, signed_route, monkeypatch, label, env, is_prod):
+        signing, client = signed_route
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        assert signing._is_production_mode() is is_prod
+        # store DOWN
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        body = b'{"valid":"signed"}'
+        resp = client.post(ROUTE, content=body, headers=_sign(signing, body))
+        # A perfectly valid signature is still rejected: replay protection is
+        # unavailable and must never fail open. Honest 503, not a fabricated
+        # 200 nor a misleading 401 replay.
+        assert resp.status_code == 503, (label, resp.status_code)
+        assert "replay protection unavailable" in resp.json()["detail"].lower()
+        assert ROUTE_SECRET not in resp.text
+
+    def test_store_down_dev_escape_allows_200(self, signed_route, monkeypatch):
+        signing, client = signed_route
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("ENABLE_DEV_AUTH_BYPASS", "1")
+        monkeypatch.setenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "0")
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        body = b'{"valid":"signed"}'
+        resp = client.post(ROUTE, content=body, headers=_sign(signing, body))
+        assert resp.status_code == 200
+
+    def test_store_error_fails_closed_503(self, signed_route, monkeypatch):
+        """A non-duplicate store ERROR on a production marker → 503."""
+        signing, client = signed_route
+        monkeypatch.setenv("APP_ENV", "production")
+        erroring = MagicMock()
+        erroring.table.return_value.insert.return_value.execute.side_effect = (
+            Exception("nonce store connection reset")
+        )
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: erroring)
+        body = b'{"valid":"signed"}'
+        resp = client.post(ROUTE, content=body, headers=_sign(signing, body))
+        assert resp.status_code == 503
+
+    def test_unsigned_request_still_401_not_503(self, signed_route, monkeypatch):
+        """An UNSIGNED request in production is a 401 (missing auth), decided
+        before the nonce path — the outage path never masks missing auth."""
+        signing, client = signed_route
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setattr(signing, "_get_nonce_client", lambda: None)
+        resp = client.post(ROUTE, content=b'{}',
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 401
 
 
 # =============================================================================

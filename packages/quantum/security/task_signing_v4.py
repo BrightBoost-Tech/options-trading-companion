@@ -51,32 +51,66 @@ CRON_SECRET = os.getenv("CRON_SECRET")
 # Nonce replay protection (requires Supabase)
 TASK_NONCE_PROTECTION = os.getenv("TASK_NONCE_PROTECTION", "1") == "1"
 
-# Fail-closed mode for production: reject requests if nonce store unavailable
-# Default "1" in production for safety
-TASK_NONCE_FAIL_CLOSED_IN_PROD = os.getenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "1") == "1"
+
+class NonceStoreUnavailableError(Exception):
+    """The nonce store could not be read/written and the request must fail
+    CLOSED.
+
+    Distinct from a REPLAY (``check_and_store_nonce`` returns ``False``): a
+    store outage is not the caller's fault, so the verifier maps this to a
+    503, never a 401. Raising a typed error — instead of fabricating a fresh
+    verdict — is the whole point of fail-closed replay protection (H9: a value
+    you cannot verify must reject, never fabricate).
+    """
 
 
 def _is_production_mode() -> bool:
-    """
-    Check if running in production mode.
+    """Canonical production detector.
 
-    Production if:
-    - ENV=production OR
-    - ENABLE_DEV_AUTH_BYPASS=0 (explicitly disabled)
+    Delegates to ``packages.quantum.security.config.is_production()`` — the H13
+    single source of truth (production is ``APP_ENV=production`` OR the Railway
+    platform signal ``RAILWAY_ENVIRONMENT_NAME`` / ``RAILWAY_ENVIRONMENT``).
 
-    Dev mode if:
-    - ENABLE_DEV_AUTH_BYPASS=1 (default in dev)
+    There is deliberately NO second detector here. The pre-fix heuristic keyed
+    production off ``ENV=production`` OR ``ENABLE_DEV_AUTH_BYPASS=0``, which
+    DIVERGED from ``is_production()`` and mis-classified the production worker
+    (which sets ``APP_ENV`` / ``RAILWAY_ENVIRONMENT`` but not ``ENV``) as
+    non-production — fail-opening the nonce replay guard within the TTL while
+    ``audit_production_security()`` reported healthy (F-A9-1).
     """
-    env = os.getenv("ENV", "").lower()
-    if env == "production":
+    from packages.quantum.security.config import is_production
+    return is_production()
+
+
+def _nonce_outage_fails_closed() -> bool:
+    """Whether a nonce-store read/write OUTAGE must REJECT the request.
+
+    Fail-closed is MANDATORY and NON-OVERRIDABLE under canonical production
+    (``is_production()``): no environment toggle can make a production worker
+    fail open on a nonce-store outage, so replay protection can never silently
+    degrade (F-A9-1 / F-A9-2).
+
+    The ONLY fail-open path is a narrow, explicit, dev-only escape hatch that
+    is impossible to reach under canonical production BY CONSTRUCTION. ALL of:
+      1. ``is_production()`` is False, AND
+      2. ``ENABLE_DEV_AUTH_BYPASS=1`` — the explicit dev marker, which
+         ``config.validate_security_config()`` HARD-ABORTS at startup in
+         production (so it can never co-occur with canonical production), AND
+      3. ``TASK_NONCE_FAIL_CLOSED_IN_PROD=0`` — the explicit opt-out.
+    must hold. Any weaker combination (production, no dev marker, or the
+    opt-out unset) fails CLOSED. This lets a local box run without a Supabase
+    nonce store, and nothing else.
+    """
+    if _is_production_mode():
         return True
 
-    # If dev auth bypass is explicitly disabled, treat as production
-    dev_bypass = os.getenv("ENABLE_DEV_AUTH_BYPASS", "1")
-    if dev_bypass == "0":
-        return True
+    from packages.quantum.security.config import is_dev_bypass_enabled
 
-    return False
+    dev_escape = (
+        is_dev_bypass_enabled()
+        and os.getenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "1") == "0"
+    )
+    return not dev_escape
 
 
 # =============================================================================
@@ -150,38 +184,44 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
     Check if nonce has been used; if not, store it.
 
     Returns:
-        True if nonce is fresh (not seen before)
-        False if nonce is a replay (already used) OR store unavailable in fail-closed mode
+        True  if nonce is fresh (not seen before), or protection is disabled,
+              or the store is down in the narrow dev fail-open mode.
+        False if nonce is a REPLAY (already used).
+
+    Raises:
+        NonceStoreUnavailableError if the store is unavailable/errored AND the
+        context fails CLOSED (``_nonce_outage_fails_closed()`` — always in
+        canonical production). The caller maps this to a 503; it NEVER
+        fabricates a fresh verdict.
 
     Behavior:
-        - If TASK_NONCE_PROTECTION=0: Always returns True (disabled)
-        - If store unavailable:
-            - Production (fail-closed): Returns False, logs error, writes audit event
-            - Dev mode (fail-open): Returns True with warning
-        - If store error (non-duplicate):
-            - Production (fail-closed): Returns False
-            - Dev mode (fail-open): Returns True with warning
+        - If TASK_NONCE_PROTECTION=0: always returns True (disabled).
+        - Store unavailable / non-duplicate error:
+            - fail-closed (production, or any non-dev context): raises
+              NonceStoreUnavailableError, logs, writes an audit event.
+            - dev fail-open (narrow, explicit — see _nonce_outage_fails_closed):
+              returns True with a warning.
+        - Duplicate/unique/conflict error: returns False (replay).
     """
     if not TASK_NONCE_PROTECTION:
         return True  # Nonce protection disabled
 
-    is_prod = _is_production_mode()
-    fail_closed = TASK_NONCE_FAIL_CLOSED_IN_PROD and is_prod
+    fail_closed = _nonce_outage_fails_closed()
 
     client = _get_nonce_client()
     if not client:
         if fail_closed:
-            print("🚨 FAIL-CLOSED: Nonce store unavailable in production - rejecting request")
+            print("🚨 FAIL-CLOSED: Nonce store unavailable - rejecting request")
             _emit_nonce_audit_event(
                 nonce=nonce,
                 scope=scope,
                 event_type="nonce_store_unavailable",
                 outcome="rejected",
-                reason="Supabase client unavailable in fail-closed production mode"
+                reason="Supabase nonce client unavailable in fail-closed mode"
             )
-            return False
+            raise NonceStoreUnavailableError("Nonce store unavailable")
         else:
-            print("⚠️ Nonce protection enabled but Supabase unavailable - allowing request (dev mode)")
+            print("⚠️ Nonce protection enabled but Supabase unavailable - allowing request (dev fail-open)")
             return True
 
     try:
@@ -206,7 +246,7 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
 
         # Other errors - behavior depends on mode
         if fail_closed:
-            print(f"🚨 FAIL-CLOSED: Nonce store error in production - rejecting request: {sanitize_exception(e)}")
+            print(f"🚨 FAIL-CLOSED: Nonce store error - rejecting request: {sanitize_exception(e)}")
             _emit_nonce_audit_event(
                 nonce=nonce,
                 scope=scope,
@@ -214,9 +254,9 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
                 outcome="rejected",
                 reason=str(e)[:200]
             )
-            return False
+            raise NonceStoreUnavailableError("Nonce store error") from e
         else:
-            print(f"⚠️ Nonce check error (allowing in dev mode): {sanitize_exception(e)}")
+            print(f"⚠️ Nonce check error (allowing in dev fail-open): {sanitize_exception(e)}")
             return True
 
 
@@ -340,7 +380,16 @@ async def _verify_v4_signature(
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     # 7. Nonce replay check
-    if not check_and_store_nonce(x_task_nonce, x_task_scope, timestamp):
+    try:
+        nonce_is_fresh = check_and_store_nonce(x_task_nonce, x_task_scope, timestamp)
+    except NonceStoreUnavailableError:
+        # Fail-closed: the replay-protection subsystem is down. Reject the
+        # request rather than fabricate a pass. An outage is not the caller's
+        # fault, so this is a 503 (subsystem unavailable), distinct from a 401
+        # replay. The detail carries NO secret and NO store internals.
+        print("🚨 FAIL-CLOSED: replay protection unavailable - rejecting request")
+        raise HTTPException(status_code=503, detail="Replay protection unavailable")
+    if not nonce_is_fresh:
         print(f"🚨 Nonce replay detected: {x_task_nonce}")
         raise HTTPException(status_code=401, detail="Request replay detected")
 

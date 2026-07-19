@@ -1,5 +1,8 @@
 
 import os
+import sys
+import types
+
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -20,6 +23,18 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-key")
 os.environ.setdefault("ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
 os.environ.setdefault("POLYGON_API_KEY", "test-polygon-key")
 os.environ.setdefault("TASK_SIGNING_SECRET", "test-task-secret")
+
+# Windows-local shim: rq's import raises ValueError (no 'fork' context) so
+# packages.quantum.api — which transitively imports rq at module level (via
+# internal_tasks -> jobs.rq_enqueue) — is unimportable locally (the known
+# fork class). CI (Linux) imports the real rq; the shim only engages where rq
+# itself cannot load. Same pattern as test_rebalance_endpoint_contract.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
 
 # Mock Supabase client creation to avoid connection errors
 # Note: patch() imports the module to resolve the target.

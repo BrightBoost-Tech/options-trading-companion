@@ -4,7 +4,33 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 import sys
 import os
+import types
 
+# Seed the security config env BEFORE importing packages.quantum.api, which
+# runs validate_security_config() at import time; without these vars the module
+# raises SecurityConfigError at COLLECTION. In the full suite an earlier sibling
+# happens to seed them first, so this file only errored when collected SOLO or
+# first — an ordering artifact, not a real failure. setdefault → the real CI env
+# always wins; this only fills the local gap. Pattern: test_drift_summary_endpoint.py.
+os.environ.setdefault("SUPABASE_JWT_SECRET", "test-secret")
+os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321")
+os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-key")
+os.environ.setdefault("ENCRYPTION_KEY", "ke2AXS883XK_QFY9uLNGUiQlce1MifOaZNmmn06eoC8=")
+os.environ.setdefault("TASK_SIGNING_SECRET", "test-task-secret")
+os.environ.setdefault("POLYGON_API_KEY", "test-polygon-key")
+
+# Windows-local shim: rq's import raises ValueError (no 'fork' context) so
+# packages.quantum.api — which transitively imports rq at module level (via
+# internal_tasks -> jobs.rq_enqueue) — is unimportable locally (the known fork
+# class). CI (Linux) imports the real rq; the shim only engages where rq itself
+# cannot load. Same pattern as test_rebalance_endpoint_contract.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
 
 from packages.quantum.api import app
 # Import the actual dependency function to use as key

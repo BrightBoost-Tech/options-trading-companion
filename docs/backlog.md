@@ -10,7 +10,48 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-18 SAT EVENING — THIRD RUN CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — OWNER-DECISIONS ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (closed at `cef4e600` + docs; all four services
+deploy-verified per merge). **MERGED+DEPLOYED (10):** #1278 `1d1951d8` (TCM v2 dual-run,
+observe-only; owner picks promotion N) · #1280 `79f4ba76` (F-BAN phantom REMOVED; no-op by
+construction; `settings.banned_strategies` drift column ledgered for a later drop) · #1282
+`3c3874e1` (greek-cap alert-only counterfactual; caps 0) · #1281 `4c12dafa` (H7 typed subreason;
+owner ratification of `h7_dropped`-for-gate-deaths OPEN) · #1279 `78c71a8e` (versioned policy
+registry + 3-anchor/47-variant design) · #1283 `ed5d6f48` (tier taper DARK; packet
+`docs/specs/tier_taper_activation_packet.md`) · #1284 `7d95f143` (E19-2B protocol v2 FROZEN, hash
+`50e7e237…`; BLOCKED on §7 minimum) · #1285 `e161714f` (exact-leg OI capture + floor
+counterfactuals; NO gate) · #1287 `9b63dcc1` (single-leg experiment DARK; R1/C1 wiring notes) ·
+#1286 `cef4e600` (event-driven model review; inert until natural trigger). **DB (migration
+procedure, receipts in risk_alerts, NEVER REAPPLY):** `policy_registrations` (receipt `eac6a4b9…`)
+· 50-row approved seed in one fingerprinted txn (receipt `14ca10ab…`; 50/50 distinct hashes/0
+mismatches/lineage 17-17-16) · `h7_subreason_check` NOT VALID+VALIDATEd (receipt `6c49ce87…`).
+**FLEET PROVISIONED INACTIVE:** `b8b1ea1f…` `pending_legacy_terminal`; 50 inactive `$2,000` slots
+/ 50 `shadow_only` portfolios / 0 bindings; idempotency PROVEN; **`ACTIVATE_FLEET=false` — NOT
+activated.** Ledger reconciliation Phase 1: 0 PRESERVE / 4 REJECT (local +281 pure lag); operator
+checkout fast-forwarded to main; **nightly wrapper now LIVE**. Full record:
+`docs/review/owner-decisions-implementation-2026-07-19.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **Runtime handoffs (not build slots):** Sunday nightly under the wrapper (first wrapper-flow
+   run) · Monday natural evidence — first `h7_subreason`-typed finals + exact-leg OI capture +
+   scan-time spot on staged rows.
+2. **Fleet ACTIVATION (owner):** the ONLY remaining fleet step — all prerequisites met except
+   owner authorization (+ attestation; the 50 slots bind at activation from the 50 approved
+   registry ids). Provisioned-inactive; `ACTIVATE_FLEET` stays false until authorized.
+3. **⑤ accumulation + event-review natural trigger:** accumulate natural scorable outcomes; the
+   #1286 event-driven review fires inert-until the first scorable close.
+4. **Remaining consumers / wiring:** single-leg wiring session (carries reviewer R1 —
+   `should_submit_to_broker` is the real submit seam, `execute_order` guard host dormant — + C1
+   VRP citation unwired) · TCM v2 realized-accrual consumer · SQL-mirror fixture gaps (Phase-3
+   volume).
+5. **Canonical cap decision:** the arm-the-caps owner call (greek caps counterfactual-only today;
+   consumes headroom/would-block evidence).
+6. **OI floor after evidence:** the 100/1000/250–500 floors stay counterfactual until Monday
+   natural OI rows are reviewed — then the floor decision.
+7. **E19-2B** after fleet activation (epoch) + the §7 `MINIMUM_DISTINCT_SOURCE_EVENTS` owner value.
+
+## 2026-07-18 SAT EVENING — THIRD RUN CLOSED (superseded by the 07-19 owner-decisions standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `02b2d8b0` + docs; all four
 services deploy-verified per merge). **MERGED+DEPLOYED:** #1274 `e2f91ac2`

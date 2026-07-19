@@ -339,6 +339,36 @@ def _persisted_iron_condor() -> dict:
     }
 
 
+def _persisted_broken_wing_call_fly() -> dict:
+    """A defined-risk broken-wing long call butterfly, persisted (full-count).
+
+    Buy 1×100C, sell 2×105C, buy 1×115C — a 1-2-1 ratio (unequal wings 5/10), so
+    the middle leg carries FULL-COUNT 2 while the wings carry 1. Debit → POSITIVE
+    persisted quantity. Bounded payoff both ends → defined-risk (max loss = the
+    net debit). Every leg's count is divisible by the structure quantity (1), so
+    the divisibility gate is a no-op — the exact byte-identity case for a
+    broken-wing structure. Complete greek blocks attached by the caller.
+    """
+    return {
+        "id": "spy-bw-call-fly",
+        "symbol": "SPY",
+        "strategy": "broken_wing_call_fly",
+        "quantity": 1,  # debit
+        "avg_entry_price": 1.00,
+        "legs": [
+            {"symbol": _occ("SPY", "C", 100.0), "action": "buy",
+             "type": "call", "strike": 100.0, "expiry": "2026-09-18",
+             "quantity": 1},
+            {"symbol": _occ("SPY", "C", 105.0), "action": "sell",
+             "type": "call", "strike": 105.0, "expiry": "2026-09-18",
+             "quantity": 2},
+            {"symbol": _occ("SPY", "C", 115.0), "action": "buy",
+             "type": "call", "strike": 115.0, "expiry": "2026-09-18",
+             "quantity": 1},
+        ],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — reproduce the current defects against LIVE risk_envelope code
 # ══════════════════════════════════════════════════════════════════════════
@@ -1223,6 +1253,212 @@ class TestD3LegRatioAwareGreeks(unittest.TestCase):
         # Ratio-BLIND would scale the short 2-lot by 1: net (-50 + 30) = -20 → +1.0.
         self.assertNotAlmostEqual(results["spy_down"] * self.EQUITY, 1.0, places=6)
         self.assertEqual(unavailable, {})
+
+
+class TestFullCountDivisibilityGate(unittest.TestCase):
+    """v1.6 A4 — the ONE shared full-count divisibility gate (LOW-INERT: caps 0).
+
+    The asymmetry this closes (verified at d6a3174e):
+      * ``normalize_leg`` (position_model.py) REJECTS a leg whose full count is
+        not divisible by the structure quantity (``FRACTIONAL_QUANTITY``).
+      * ``compute_stress_scenarios`` inherits that reject FOR FREE: it calls
+        ``_pos_risk`` → ``normalize_position`` for every structure BEFORE the
+        greek loop (risk_envelope.py:1137), so a non-divisible structure raises
+        ``PositionRiskUnavailable`` and never reaches the scaling.
+      * ``check_greeks`` NEVER normalizes — it read ``leg_full_contract_count``
+        directly (risk_envelope.py:392), and the helper had NO divisibility gate,
+        so a non-divisible leg (structure qty 2, leg qty 3) scaled its greek by
+        the raw count 3 → a MISLEADING partial sum counted as covered.
+
+    The fix extends the CANONICAL helper (``_full_count_ratio``, shared by
+    ``normalize_leg`` and ``leg_full_contract_count``) so the divisibility
+    predicate lives in ONE place and all three consumers align. A non-divisible
+    leg is now typed uncovered in ``check_greeks`` (contributes nothing, counts
+    against coverage) exactly as it is already rejected in the normalize/stress
+    lane — never a fabricated partial greek (H9). Valid 1:1 and ratio structures
+    are byte-identical; the four greek caps stay default 0 (no new block).
+    """
+
+    EQUITY = 100_000.0
+    _SIGN = {"sell": -1, "buy": +1}
+
+    # Small, DISTINCT per-leg greeks: distinct so asymmetric structures net to a
+    # nonzero total (never a trivial symmetric cancel); small so no stress
+    # scenario breaches its payoff floor (the clamp lane stays untouched here).
+    _DISTINCT = (
+        {"delta": 0.11, "gamma": 0.021, "vega": 0.031, "theta": -0.011},
+        {"delta": 0.22, "gamma": 0.012, "vega": 0.022, "theta": -0.022},
+        {"delta": 0.13, "gamma": 0.023, "vega": 0.013, "theta": -0.013},
+        {"delta": 0.24, "gamma": 0.014, "vega": 0.024, "theta": -0.024},
+    )
+
+    def _attach_distinct(self, pos: dict) -> dict:
+        for i, leg in enumerate(pos["legs"]):
+            leg["greeks"] = dict(self._DISTINCT[i % len(self._DISTINCT)])
+        return pos
+
+    def _greek_oracle(self, pos: dict) -> dict:
+        """Reconstruct the PRE-GATE check_greeks output: each leg scaled by its
+        OWN full count ``abs(int(leg.quantity))`` with NO divisibility gate. For
+        a divisible structure this equals BOTH the pre- and post-change output,
+        so equality proves byte-identity of the greeks consumer."""
+        out = {g: 0.0 for g in ("delta", "gamma", "vega", "theta")}
+        for leg in pos["legs"]:
+            cnt = abs(int(leg["quantity"]))
+            s = self._SIGN[leg["action"]]
+            for g in out:
+                out[g] += s * leg["greeks"][g] * cnt * 100
+        return out
+
+    def _stress_oracle(self, pos: dict, config: EnvelopeConfig) -> tuple:
+        """spy_down / vix_spike dollars from the same full-count formula (no clamp
+        — the greeks here stay well inside every fixture's payoff floor)."""
+        td = 0.0
+        tv = 0.0
+        for leg in pos["legs"]:
+            cnt = abs(int(leg["quantity"]))
+            s = self._SIGN[leg["action"]]
+            td += s * leg["greeks"]["delta"] * cnt * 100
+            tv += s * leg["greeks"]["vega"] * cnt * 100
+        return td * config.stress_spy_down_pct * -1, tv * config.stress_vix_spike_pct * 100
+
+    def _valid_cases(self) -> dict:
+        return {
+            "vertical_1to1": _persisted_short_put_vertical(),   # sq 2, legs 2,2
+            "ratio_1x2_sq1": _persisted_put_ratio_1x2(1),       # sq 1, legs 1,2
+            "ratio_1x2_sq2": _persisted_put_ratio_1x2(2),       # sq 2, legs 2,4
+            "broken_wing":   _persisted_broken_wing_call_fly(), # sq 1, legs 1,2,1
+            "iron_condor":   _persisted_iron_condor(),          # sq 1, legs 1×4
+        }
+
+    # ── the shared gate, at the helper (H9 typed) ─────────────────────────
+
+    def test_helper_non_divisible_full_count_is_typed_none(self):
+        # structure quantity 2, leg full count 3 → fractional per-structure ratio.
+        self.assertIsNone(leg_full_contract_count({"quantity": 3}, 2))
+        self.assertIsNone(leg_full_contract_count({"quantity": 3}, -2))  # sign-agnostic
+        self.assertIsNone(leg_full_contract_count({"quantity": 5}, 2))
+        # a non-positive structure quantity cannot establish a ratio → typed None.
+        self.assertIsNone(leg_full_contract_count({"quantity": 4}, 0))
+
+    def test_helper_divisible_full_count_returns_count(self):
+        # clean ratios still return the FULL count (byte-identical to pre-gate).
+        self.assertEqual(leg_full_contract_count({"quantity": 4}, 2), 4)
+        self.assertEqual(leg_full_contract_count({"quantity": 2}, 2), 2)
+        self.assertEqual(leg_full_contract_count({"quantity": 6}, 3), 6)
+        self.assertEqual(leg_full_contract_count({"quantity": -6}, 3), 6)
+
+    # ── byte-identity: valid structures unchanged through BOTH consumers ───
+
+    def test_valid_structures_byte_identical_both_consumers(self):
+        config = _permissive_config()
+        for name, pos in self._valid_cases().items():
+            with self.subTest(structure=name):
+                self._attach_distinct(pos)
+                # (a) the ONLY changed code path — the helper — is a no-op on
+                #     every valid leg: it returns the exact pre-gate full count.
+                for leg in pos["legs"]:
+                    self.assertEqual(
+                        leg_full_contract_count(leg, pos["quantity"]),
+                        abs(int(leg["quantity"])),
+                    )
+                # (b) greeks consumer output byte-identical to the pre-gate formula.
+                cov: dict = {}
+                _gv, greeks = check_greeks([pos], config, coverage_out=cov)
+                self.assertEqual(greeks, self._greek_oracle(pos))
+                self.assertTrue(cov["complete"])
+                self.assertEqual(cov["legs_with_greeks"], cov["legs_total"])
+                # every valid book nets to a genuinely nonzero delta (no trivial
+                # symmetric cancel masking the assertion).
+                self.assertNotAlmostEqual(greeks["delta"], 0.0, places=6)
+                # (c) stress consumer output byte-identical (no clamp on these).
+                _sv, results, unavailable = compute_stress_scenarios(
+                    [pos], equity=self.EQUITY, config=config
+                )
+                self.assertEqual(unavailable, {})
+                self.assertNotIn("spy_down_raw", results)
+                self.assertNotIn("vix_spike_raw", results)
+                exp_spy, exp_vix = self._stress_oracle(pos, config)
+                self.assertAlmostEqual(
+                    results["spy_down"] * self.EQUITY, exp_spy, places=6
+                )
+                self.assertAlmostEqual(
+                    results["vix_spike"] * self.EQUITY, exp_vix, places=6
+                )
+
+    # ── the fix: a non-divisible leg is typed unavailable in BOTH lanes ───
+
+    def _non_divisible_pos(self) -> dict:
+        # structure quantity 2, but the short leg carries full count 3 (3 % 2 != 0).
+        pos = _persisted_put_ratio_1x2(structure_quantity=2)
+        pos["legs"][0]["greeks"] = {"delta": 0.50, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["greeks"] = {"delta": 0.50, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["quantity"] = 3  # non-divisible full count
+        return pos
+
+    def test_non_divisible_leg_check_greeks_typed_uncovered(self):
+        pos = self._non_divisible_pos()
+        cov: dict = {}
+        violations, greeks = check_greeks([pos], EnvelopeConfig(), coverage_out=cov)
+        # Only the divisible long leg (full count 2) contributes: +1*0.50*2*100.
+        self.assertAlmostEqual(greeks["delta"], 100.0, places=6)
+        # The pre-gate BUG would have counted the qty-3 short leg
+        # (-1*0.50*3*100 = -150) → a misleading partial net of -50.
+        self.assertNotAlmostEqual(greeks["delta"], -50.0, places=6)
+        self.assertEqual(cov["legs_total"], 2)
+        self.assertEqual(cov["legs_with_greeks"], 1)
+        self.assertFalse(cov["complete"])
+        # caps default 0 → typed-uncovered NEVER becomes a block.
+        self.assertEqual(violations, [])
+
+    def test_non_divisible_leg_stress_fails_closed(self):
+        # The stress lane rejects the whole structure upstream via _pos_risk →
+        # normalize_position (FRACTIONAL_QUANTITY) — a typed unavailable, never a
+        # partial scaled scenario.
+        pos = self._non_divisible_pos()
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios([pos], equity=self.EQUITY, config=EnvelopeConfig())
+
+    def test_zero_quantity_leg_both_consumers(self):
+        pos = _persisted_put_ratio_1x2(structure_quantity=2)
+        pos["legs"][0]["greeks"] = {"delta": 0.40, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["greeks"] = {"delta": 0.40, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["quantity"] = 0  # degenerate
+        cov: dict = {}
+        _v, greeks = check_greeks([pos], EnvelopeConfig(), coverage_out=cov)
+        self.assertAlmostEqual(greeks["delta"], 80.0, places=6)  # long leg only
+        self.assertFalse(cov["complete"])
+        self.assertEqual(cov["legs_with_greeks"], 1)
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios([pos], equity=self.EQUITY, config=EnvelopeConfig())
+
+    def test_non_integral_ratio_both_consumers(self):
+        # A 2.5-contract leg is a malformed ratio: _exact_int rejects it.
+        pos = _persisted_put_ratio_1x2(structure_quantity=2)
+        pos["legs"][0]["greeks"] = {"delta": 0.30, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["greeks"] = {"delta": 0.30, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+        pos["legs"][1]["quantity"] = 2.5
+        cov: dict = {}
+        _v, greeks = check_greeks([pos], EnvelopeConfig(), coverage_out=cov)
+        self.assertAlmostEqual(greeks["delta"], 60.0, places=6)  # long leg only
+        self.assertFalse(cov["complete"])
+        with self.assertRaises(PositionRiskUnavailable):
+            compute_stress_scenarios([pos], equity=self.EQUITY, config=EnvelopeConfig())
+
+    # ── caps stay dormant: no gate output is ever a block ─────────────────
+
+    def test_caps_dormant_no_block_on_valid_ratio(self):
+        pos = self._attach_distinct(_persisted_put_ratio_1x2(structure_quantity=1))
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        self.assertEqual(
+            [v for v in result.violations if v.envelope.startswith("greeks_")], []
+        )
+        self.assertEqual(
+            [v for v in result.violations if v.envelope == "stress_scenario"], []
+        )
+        self.assertTrue(result.passed)
 
 
 # ══════════════════════════════════════════════════════════════════════════

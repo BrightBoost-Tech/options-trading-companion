@@ -946,6 +946,31 @@ def leg_greeks_from_persisted(raw: Mapping[str, Any]) -> Optional[LegGreeks]:
     )
 
 
+def _full_count_ratio(leg_contracts: int, structure_quantity: int) -> Optional[int]:
+    """The ONE canonical full-count divisibility gate.
+
+    The persisted convention (legs_convention.py) stores ``leg.quantity ==
+    ratio × structure_quantity`` (FULL-COUNT). The per-structure ratio is
+    recovered by dividing the structure quantity out of the leg's full count —
+    but ONLY when it divides EXACTLY: a non-multiple is a fractional
+    per-structure ratio, which is not representable. Rather than round (which
+    silently invents a ratio), the gate returns ``None`` and the caller maps
+    that to its OWN typed outcome — ``normalize_leg`` RAISES
+    ``FRACTIONAL_QUANTITY`` (rejecting the whole structure), while the
+    greek/stress consumers (via ``leg_full_contract_count``) count the leg
+    UNCOVERED. Both share this single predicate so the three consumers cannot
+    drift (the v1.6 A4 asymmetry: ``check_greeks`` read the count with no
+    divisibility gate while ``compute_stress`` got one for free through
+    ``_pos_risk``'s upstream normalization).
+
+    Returns a POSITIVE ratio, or ``None`` when ``structure_quantity`` is
+    non-positive or the count is not an integer multiple of it.
+    """
+    if structure_quantity <= 0 or leg_contracts % structure_quantity != 0:
+        return None
+    return leg_contracts // structure_quantity
+
+
 def leg_full_contract_count(
     raw_leg: Mapping[str, Any], position_quantity: Any
 ) -> Optional[int]:
@@ -969,14 +994,35 @@ def leg_full_contract_count(
     quantity falls back to ``abs(position_quantity)`` — the full-count identity
     (leg.quantity == abs(pos.quantity)) — so a 1:1 book is byte-identical to the
     pre-ratio ``abs(qty)`` scaling and a sideless minimal dict still scales.
+
+    **v1.6 A4 (full-count divisibility gate):** the full count must be an
+    integer multiple of the structure quantity (``abs(position_quantity)``) —
+    the SAME predicate ``normalize_leg`` enforces, shared via
+    ``_full_count_ratio``. A non-divisible leg (e.g. structure quantity 2, leg
+    quantity 3) is a fractional per-structure ratio and returns ``None`` (typed
+    uncovered), NEVER a misleading partial greek/stress sum built from a
+    fractional ratio. This closes the ``check_greeks`` gap: it read the raw count
+    with no divisibility gate, while ``compute_stress`` already rejected such a
+    structure upstream through ``_pos_risk``'s ``normalize_position`` — so the
+    gate is a genuine fix for the greeks lane and a byte-identical no-op for the
+    stress lane (its structures are pre-normalized). Byte-identical for every
+    VALID structure (1:1 and clean ratio counts divide exactly).
     """
     raw = raw_leg.get("quantity") if isinstance(raw_leg, Mapping) else None
     source = raw if raw is not None else position_quantity
     try:
         count = abs(_exact_int(source, "leg contract count"))
+        structure_quantity = abs(_exact_int(position_quantity, "structure quantity"))
     except PositionNormalizationError:
         return None
-    return count or None
+    if not count:
+        return None
+    # Single canonical divisibility gate (shared with normalize_leg): a leg
+    # whose full count is not an integer multiple of the structure quantity is a
+    # fractional per-structure ratio → typed unavailable, never a partial sum.
+    if _full_count_ratio(count, structure_quantity) is None:
+        return None
+    return count
 
 
 def normalize_leg(
@@ -1049,16 +1095,18 @@ def normalize_leg(
     leg_contracts = abs(leg_contracts)
 
     # The persisted convention is FULL-COUNT: leg.quantity == abs(pos.quantity)
-    # (legs_convention.py:4-8). Recover the per-structure ratio by dividing out
-    # the structure quantity — and reject rather than round if it does not
-    # divide, because a fractional ratio is not representable.
-    if leg_contracts % structure_quantity != 0:
+    # (legs_convention.py:4-8). Recover the per-structure ratio via the single
+    # canonical divisibility gate (shared with leg_full_contract_count) — and
+    # reject rather than round if it does not divide, because a fractional ratio
+    # is not representable. structure_quantity is guaranteed > 0 here (normalize_
+    # position: abs of a non-zero signed quantity), so None means non-divisible.
+    ratio = _full_count_ratio(leg_contracts, structure_quantity)
+    if ratio is None:
         raise PositionNormalizationError(
             RejectReason.FRACTIONAL_QUANTITY,
             f"{occ}: leg contracts {leg_contracts} not divisible by "
             f"structure_quantity {structure_quantity}",
         )
-    ratio = leg_contracts // structure_quantity
 
     incomplete: List[IncompletenessReason] = []
     raw_multiplier = raw.get("multiplier")

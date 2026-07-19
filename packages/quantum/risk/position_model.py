@@ -946,6 +946,39 @@ def leg_greeks_from_persisted(raw: Mapping[str, Any]) -> Optional[LegGreeks]:
     )
 
 
+def leg_full_contract_count(
+    raw_leg: Mapping[str, Any], position_quantity: Any
+) -> Optional[int]:
+    """Honest FULL-COUNT contracts for ONE raw persisted leg — the single place
+    a raw-dict greek/stress consumer reads a leg's own contract count so leg
+    RATIOS are honored identically to ``aggregate_greeks`` (D3's owner-side fix).
+
+    In the persisted FULL-COUNT convention (legs_convention.py, normalize_leg) a
+    leg's ``quantity`` IS its total contract count: ``abs(pos.quantity)`` for a
+    1:1 structure, and ``ratio × structure_quantity`` for a ratio spread. That
+    count equals ``signed_ratio × structure_quantity`` — the exact magnitude
+    ``aggregate_greeks`` scales each per-contract greek by — so a consumer that
+    multiplies its per-contract greek by THIS count composes byte-identically to
+    the canonical owner (the per-leg multiplier, D4, stays the consumer's own
+    lane). A 1×2 ratio's short 2-lot is therefore counted twice, not once.
+
+    Reuses ``_exact_int`` (no second parser). Returns a POSITIVE int, or ``None``
+    when the count cannot be honestly determined — a malformed / non-integral /
+    zero leg quantity is typed unavailable (H9: the caller contributes NOTHING
+    and flags the leg uncovered, never a fabricated count). An ABSENT leg
+    quantity falls back to ``abs(position_quantity)`` — the full-count identity
+    (leg.quantity == abs(pos.quantity)) — so a 1:1 book is byte-identical to the
+    pre-ratio ``abs(qty)`` scaling and a sideless minimal dict still scales.
+    """
+    raw = raw_leg.get("quantity") if isinstance(raw_leg, Mapping) else None
+    source = raw if raw is not None else position_quantity
+    try:
+        count = abs(_exact_int(source, "leg contract count"))
+    except PositionNormalizationError:
+        return None
+    return count or None
+
+
 def normalize_leg(
     raw: Mapping[str, Any],
     structure_quantity: int,

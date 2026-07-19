@@ -10,7 +10,38 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — EXTERNAL AUDIT v1.6 ADJUDICATED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — v1.6 REMEDIATION RUN CLOSED (authoritative standing; supersedes older queue text)
+
+Full record: `docs/review/v1.6-remediation-results-2026-07-19.md`; ledger 07-19 remediation entry
+= exclusion memory. **MERGED+DEPLOYED:** #1303 `d6a3174e` (v1.6 audit docs + the F-A4 arm-evidence
+rewording) · #1305 `8588754d` (**the v1.6 HIGH** — disposable-worktree-only nightly runner,
+per-run-tagged durable markers, fail-closed completion contract; adversarial FAIL→repair→PASS;
+55 tests). **LOCAL LANDING `BLOCKED_LOCAL_RUNNER_PULL`** — the operator checkout carries the
+nightly's own tracked 43-line ledger edit (archived + reproduced into main by this PR, with the
+swept `audit/reports/2026-07-19.md`); scheduled task verified (Ready, documented wrapper, next run
+07-20 00:00 — STILL OLD CODE until the pull). **Six lane PRs BUILT + review-complete,
+merge-blocked by the landing hard gate:** A #1306 arm evidence · B #1307 HMAC+unskips · C #1304
+holiday sessions · D #1310 lifecycle milestones · E #1309 OI known-at · F #1308 divisibility.
+Zero migration/DB/broker/env/fleet/control actions.
+
+Queue (verified outcomes only):
+1. **OPERATOR, BEFORE 00:00 CT TONIGHT:** reconcile the local `audit/ledger.md` edit (content now
+   in main) → `git checkout main && git fetch origin && git pull --ff-only` in the operator
+   checkout — this lands the FIXED runner for tonight's 00:00 run and clears the merge gate.
+2. **Then merge the six lanes in order** #1306→#1307→#1304→#1310→#1309→#1308 (update-branch +
+   current-head CI + all-services deploy SUCCESS + broker/alert check, each).
+3. **Monday ≥ 17:45Z:** `monday_evidence_reader` → review → fleet activation decision
+   (READY_FOR_SEPARATE_AUTHORIZATION; packet 1 + ratification 1 + separate token).
+4. **F-REDATE-0718 (nightly MEDIUM, reported):** adjudicate the 20 re-dated shadow `closed_at`
+   rows (paper-window contamination; live calibration excluded by `is_paper=false`).
+5. **Post-merge natural falsifiers:** first `risk_basis_arm_evidence` payload (Lane A) · first
+   fixed-runner nightly (per-run markers, fresh worktree, checkout untouched) · first lifecycle
+   milestone chain (Lane D) · holiday falsifier 2026-09-07 (Lane C).
+6. **Carried (unchanged):** ⑤/event-review natural accrual · taper band reconciliation · E19 v3
+   re-freeze · single-leg draft rows · TCM N=15 · UI after Palette · security P2 pair and
+   calendar P2 now SHIPPED-in-draft (Lanes B/C) — close their backlog lines when merged.
+
+## 2026-07-19 — EXTERNAL AUDIT v1.6 ADJUDICATED (superseded by the remediation standing above)
 
 Read-only ten-area current-state audit at pin `20ca312e` (five two-area opus agents, Fable-central
 adjudication; results: `docs/review/external-full-audit-v1.6-results-2026-07-19.md`, landed via a

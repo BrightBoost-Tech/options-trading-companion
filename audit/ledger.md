@@ -4,6 +4,29 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — v1.6 REMEDIATION MERGE COMPLETION (fable + opus; serialized) · status:shipped
+
+Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md`. Resolves the
+prior entry's two open items. **LOCAL RUNNER LANDED** (was BLOCKED_LOCAL_RUNNER_PULL): archived
++ three-way compare proved `LOCAL_UNIQUE_CONTENT=0` (report byte-identical `fdea8e8e…`; all 43
+nightly ledger lines verbatim in main) → duplicates cleaned (report MOVED to archive) →
+`git switch main && git pull --ff-only` → checkout at main; scheduled task Ready (documented
+wrapper, pinned workdir) ⇒ **tonight 00:00 CT runs the FIXED runner**; 55/55 self-tests in the
+checkout; inventory unchanged. **SIX LANES MERGED+DEPLOYED** (each: opus adversarial review
+PASS → update-branch → fresh current-head CI → squash → 4/4 services SUCCESS → broker-flat +
+0 crit/high + entries_paused/fleet unchanged): A #1306 `362bd3da` arm evidence (one repair
+cycle — CI's strict H9 gate caught a `persist_arm_evidence` silent_swallow; fixed loud-partial:
+logger.error + durable `risk_basis_arm_evidence_persist_failed` warning alert + preserved
+counts.errors→partial fold) · B #1307 `aced5eaf` HMAC canonical-prod + fail-closed 503 + 8
+suites unskipped · C #1304 `54fd978a` holiday sessions · D #1310 `0feb6cec` lifecycle
+milestones · E #1309 `0be131f6` OI known-at · F #1308 `d4c083ea` divisibility (195-combo
+byte-identity sweep). Non-blocking follow-ups + pending natural falsifiers enumerated in the
+completion doc (do not re-find): second weekday-only `is_market_day` in run_signed_task.py ·
+OI age-knob OverflowError guard · stale config.py audit warning text · Lane-A polish ·
+runner sidecar rotation · jules case-collision. **Fleet activation still gated** on tonight's
+natural runner PASS + Monday evidence + separate token. Zero migration/DB-write/broker/env/
+fleet/control actions.
+
 ## 2026-07-19 — v1.6 REMEDIATION ORCHESTRATOR (fable + opus; serialized) · status:partial-shipped
 
 Full record: `docs/review/v1.6-remediation-results-2026-07-19.md`. Authorization: code/test/docs

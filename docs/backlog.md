@@ -10,7 +10,38 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — v1.6 REMEDIATION RUN CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — v1.6 REMEDIATION COMPLETE (authoritative standing; supersedes older queue text)
+
+Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md` (+ the run doc and
+ledger entries). **LOCAL RUNNER LANDED** — three-way compare `LOCAL_UNIQUE_CONTENT=0`, ff-pull
+clean, 55/55 self-tests, task Ready ⇒ tonight 00:00 CT runs the FIXED runner. **ALL SIX v1.6
+LANES MERGED+DEPLOYED** (serialized, opus-review-PASS each, per-merge 4/4 deploy SUCCESS +
+safety): A #1306 `362bd3da` (arm evidence, dark; +1 H9 loud-partial repair) · B #1307 `aced5eaf`
+(HMAC canonical prod, unconditional fail-closed 503, 8 suites unskipped) · C #1304 `54fd978a`
+(holiday sessions; entries fail closed, exits immune) · D #1310 `0feb6cec` (lifecycle
+milestones, observe-only) · E #1309 `0be131f6` (OI known-at; no fabrication) · F #1308
+`d4c083ea` (divisibility; byte-identity proven). Zero migration/DB/broker/env/fleet/control
+actions. The v1.6 retained list is now fully dispositioned: HIGH+4 MED+3 LOW shipped · A1-G1 +
+A2-ASSIGNMENT sample-gated (not code failures) · notes N1/N2/CLAUDE-size open.
+
+Queue (verified outcomes only):
+1. **Tonight 00:00 CT (natural, no action):** first fixed-runner nightly — falsifier: per-run
+   tagged markers in `audit/runner-markers.log`, fresh `%LOCALAPPDATA%` worktree, operator
+   checkout untouched, honest ping. Morning: read the markers + manifest.
+2. **Monday ≥ 17:45Z:** `monday_evidence_reader` (operator prompt) → review → **fleet
+   activation decision** (needs tonight's PASS + Monday evidence + separate token per
+   ratification 1). Adjudicate **F-REDATE-0718** (nightly MEDIUM, reported).
+3. **New natural falsifiers accruing:** first `risk_basis_arm_evidence` payload (starts the
+   ~1-week P0-B arm review) · first staged→broker_submitted→filled chain · Labor Day 2026-09-07
+   holiday falsifier · first genuine provider OI date.
+4. **Non-blocking follow-ups** (completion doc; small, batchable): run_signed_task weekday-only
+   `is_market_day` docstring/delegation · OI age-knob OverflowError guard + parser test ·
+   config.py stale nonce-warning text · Lane-A polish (dedupe candidate_bases; drain-asymmetry
+   comment) · runner `assert run_tag` + sidecar rotation · `.Jules/`-vs-`.jules/` de-dup.
+5. **Carried (unchanged):** ⑤/event-review natural accrual · taper band reconciliation · E19 v3
+   re-freeze · single-leg draft rows · TCM N=15 · UI after Palette clears.
+
+## 2026-07-19 — v1.6 REMEDIATION RUN CLOSED (superseded by the completion standing above)
 
 Full record: `docs/review/v1.6-remediation-results-2026-07-19.md`; ledger 07-19 remediation entry
 = exclusion memory. **MERGED+DEPLOYED:** #1303 `d6a3174e` (v1.6 audit docs + the F-A4 arm-evidence

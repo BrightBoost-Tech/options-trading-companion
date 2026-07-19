@@ -46,7 +46,15 @@ from typing import (
 CONTRACT_VERSION = "1.0.0"
 
 Basis = Literal["raw", "calibrated"]
-StrategyName = Literal["credit_vertical", "debit_vertical", "iron_condor"]
+# "long_call"/"long_put" are the single-leg (one-contract shadow-only
+# experiment) additions — a long option is a piecewise-linear payoff the same
+# integrator family prices. Additive members only; no existing branch keys on
+# them (verified: the baseline adapters + payoff integrator dispatch on the
+# prior three names explicitly and fall through to a typed Unavailable for any
+# other, so a new member cannot silently reach the wrong adapter).
+StrategyName = Literal[
+    "credit_vertical", "debit_vertical", "iron_condor", "long_call", "long_put"
+]
 OptionType = Literal["call", "put"]
 Action = Literal["buy", "sell"]
 
@@ -191,6 +199,15 @@ class VerticalGeometry:
 
 
 @dataclass(frozen=True)
+class SingleLegGeometry:
+    """Validated single long option leg (long_call / long_put)."""
+
+    leg: LegSpec
+    strike: float
+    option_type: OptionType
+
+
+@dataclass(frozen=True)
 class CondorGeometry:
     """Validated iron condor: two shorts inside two longs, per-side widths."""
 
@@ -236,6 +253,50 @@ def validate_vertical(structure: StructureSpec, source: str) -> Union[VerticalGe
     if structure.contracts < 1:
         return Unavailable("invalid_contracts", f"contracts must be >= 1, got {structure.contracts}", source)
     return VerticalGeometry(long_leg=long_leg, short_leg=short_leg, width=width, option_type=long_leg.option_type)
+
+
+def validate_single_leg(structure: StructureSpec, source: str) -> Union[SingleLegGeometry, Unavailable]:
+    """Validate a single LONG option leg for the long_call / long_put experiment.
+
+    Long-only by construction (the one-contract shadow experiment buys premium):
+    exactly one ``buy`` leg whose option_type matches the strategy, a finite
+    positive strike, a finite positive debit (net_premium), and — for a put —
+    a debit strictly below the strike (a put's payoff is capped at the strike,
+    so premium >= strike is impossible geometry). Every failure is a typed
+    ``Unavailable`` — never an exception, never a defaulted value (H9)."""
+    legs = structure.legs
+    if len(legs) != 1:
+        return Unavailable("wrong_leg_count", f"expected 1 leg, got {len(legs)}", source)
+    leg = legs[0]
+    if leg.action != "buy":
+        return Unavailable("not_long", "single-leg experiment is long-only (buy)", source)
+    expected_type: Optional[OptionType]
+    if structure.strategy == "long_call":
+        expected_type = "call"
+    elif structure.strategy == "long_put":
+        expected_type = "put"
+    else:
+        return Unavailable("wrong_strategy", f"expected long_call/long_put, got {structure.strategy!r}", source)
+    if leg.option_type != expected_type:
+        return Unavailable(
+            "option_type_mismatch",
+            f"{structure.strategy} needs a {expected_type} leg, got {leg.option_type}",
+            source,
+        )
+    if not _finite_pos(leg.strike):
+        return Unavailable("missing_strike", "single leg needs a finite positive strike", source)
+    debit = structure.net_premium
+    if not _finite_pos(debit):
+        return Unavailable("invalid_premium", f"net_premium (debit) must be finite and > 0, got {debit!r}", source)
+    if expected_type == "put" and debit >= leg.strike:
+        return Unavailable(
+            "premium_exceeds_max",
+            f"put debit {debit} >= strike {leg.strike} — impossible (a put is capped at the strike)",
+            source,
+        )
+    if structure.contracts < 1:
+        return Unavailable("invalid_contracts", f"contracts must be >= 1, got {structure.contracts}", source)
+    return SingleLegGeometry(leg=leg, strike=leg.strike, option_type=expected_type)
 
 
 def validate_condor(structure: StructureSpec, source: str) -> Union[CondorGeometry, Unavailable]:

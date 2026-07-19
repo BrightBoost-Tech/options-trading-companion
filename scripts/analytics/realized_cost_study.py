@@ -85,6 +85,19 @@ OPERATION (mirrors scripts/analytics/challenger_study.py):
     the exact READ-ONLY query an operator runs (Supabase MCP / psql);
     ``--rows-json`` consumes the JSON that query returns; ``--out`` writes a dated
     markdown report. There is no live-DB code path to rot.
+
+TCM v2 REALIZED-ACCRUAL EXTENSION (Lane B, observe-only — see the delimited
+section below ``build_study``): this module also ACCRUES realized-vs-model
+COMMISSION examples from the #1278 stage-stamped ``tcm.tcm_v2_proposal``. For
+every eligible entry AND close side of a closed round-trip it emits one typed
+example — current-model commission vs proposed-v2 commission vs realized broker
+commission, plus the two owner-facing deltas (``current_minus_realized`` /
+``v2_minus_realized``) — version-segregated by the stamp's own ``model_version``.
+It is a PURE function of the DB payload (idempotent; re-run = same output);
+"accrual over time" is the CLI's dated snapshots (``--accrual-json`` + the dated
+markdown), NOT a new table. It imports NOTHING from ``tcm_v2_proposal`` — it
+reads the already-persisted stamp dict — and feeds no decision. PROMOTE_TCM_V2
+stays false: nothing here promotes the model.
 """
 
 from __future__ import annotations
@@ -92,7 +105,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from packages.quantum.analytics.cost_basis import (
@@ -139,7 +152,7 @@ open_o AS (
 close_o AS (
   SELECT DISTINCT ON (po.position_id)
     po.position_id, po.side, po.avg_fill_price, po.requested_price,
-    po.filled_qty, po.fees_usd, po.order_json, po.filled_at,
+    po.filled_qty, po.fees_usd, po.order_json, po.tcm, po.filled_at,
     po.execution_mode, (po.alpaca_order_id IS NOT NULL) AS has_alpaca_oid,
     po.broker_status
   FROM paper_orders po
@@ -190,6 +203,10 @@ FROM (
     co.has_alpaca_oid                                      AS close_has_alpaca_oid,
     co.broker_status                                       AS close_broker_status,
     co.order_json                                          AS close_order_json,
+    -- CLOSE-order TCM stamp: carries `tcm_v2_proposal` on post-#1278 close
+    -- rows (the close-side dual-run record). Absent on pre-#1278 closes ->
+    -- the accrual types the v2 side UNAVAILABLE, never zero.
+    co.tcm                                                 AS close_tcm,
     -- PERSISTED ranker fee estimate (present only on ranked suggestions)
     ts.ranking_costs                                       AS ranking_costs
   FROM cp
@@ -666,6 +683,11 @@ class StudyReport:
     model_version: str
     total_rows: int
     cohorts: Tuple[CohortReport, ...]
+    # TCM v2 realized-accrual (Lane B, observe-only) — built from the same
+    # payload; version-segregated. Defaulted so older callers/tests that
+    # construct StudyReport positionally still work.
+    tcm_v2_accrual: TcmV2AccrualReport = field(
+        default_factory=lambda: TcmV2AccrualReport(total_examples=0, buckets=()))
 
 
 def _build_cohort(cohort: str, rows: List[RowComparison]) -> CohortReport:
@@ -721,7 +743,472 @@ def build_study(payload: Mapping[str, Any]) -> StudyReport:
         model_version=str(payload.get("model_version", MODEL_VERSION)),
         total_rows=len(rows),
         cohorts=cohorts,
+        tcm_v2_accrual=build_tcm_v2_accrual(payload),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TCM v2 REALIZED-ACCRUAL (Lane B, observe-only) — consumer of the #1278
+# stage-stamped ``tcm.tcm_v2_proposal``.
+#
+# WHAT THIS ACCRUES: for every eligible entry AND close side of a closed
+# round-trip, one typed COMMISSION example — the ONLY component TCM v2 changes
+# (#1273 evidence pin; slippage/spread are carried UNCHANGED and surfaced as
+# realized context, never differenced). Each example carries the three
+# commission bases side by side:
+#   * current_model_cost — the FROZEN TCM commission (paper_orders.tcm.fees_usd).
+#   * tcm_v2_cost        — the PROPOSED routing-aware commission, read from the
+#                          stamped ``tcm.tcm_v2_proposal`` (post-#1278 rows ONLY;
+#                          absent → typed UNAVAILABLE, NEVER a fabricated zero).
+#   * realized_commission — the broker-true commission PER ROUTING (#1273): a
+#                          real Alpaca fill's ``fees_usd`` ($0 options today) is
+#                          KNOWN; an internal/shadow fill is typed UNAVAILABLE.
+# and the two typed deltas the owner's promotion packet needs:
+#   * current_minus_realized = current model commission − realized commission.
+#   * v2_minus_realized      = proposed v2 commission     − realized commission.
+# On a broker fill these read (frozen 0.65×qty − 0)=+ and (0 − 0)=0 — the
+# accrued evidence that v2 tracks realized where the frozen model over-charges.
+#
+# IDENTITY / IDEMPOTENCE: entry↔close are two sides of ONE round-trip, joined
+# ONLY on the durable spine identity (``paper_positions.id`` = record_id, plus
+# suggestion_id) the STUDY_SQL already enforces (open = earliest fill, close =
+# latest fill joined only when strictly later). The report is a PURE function of
+# the DB payload: a re-run yields byte-identical output, and "accrual over time"
+# is the CLI's dated snapshots (``--accrual-json`` / the dated markdown), NOT a
+# new table. Examples are deduped by ``{record_id}:{side}`` so a duplicated
+# payload row can never double-count.
+#
+# VERSION SEGREGATION: buckets are keyed on (cohort, v2 model_version). A v2
+# version bump changes ``tcm_v2_proposal.model_version``, so post-bump examples
+# land in a DIFFERENT bucket and never pool with pre-bump ones.
+# ═══════════════════════════════════════════════════════════════════════════
+
+TCM_V2_STAMP_KEY = "tcm_v2_proposal"
+_V2_VERSION_UNAVAILABLE = "unavailable_no_v2_stamp"
+
+_CURRENT_MODEL_COMMISSION_PROV = Provenance(
+    model_version="paper_orders.tcm.fees_usd@frozen",
+    source_detail="frozen TransactionCostModel commission (one-way, leg-blind, qty×0.65)",
+)
+
+
+def _side_enum(side: str) -> CostSide:
+    return CostSide.ENTRY if side == "entry" else CostSide.EXIT
+
+
+def _v2_stamp(tcm: Any) -> Optional[Mapping[str, Any]]:
+    """The stamped ``tcm_v2_proposal`` dict, or None (pre-#1278 rows / no tcm)."""
+    if isinstance(tcm, Mapping):
+        stamp = tcm.get(TCM_V2_STAMP_KEY)
+        if isinstance(stamp, Mapping):
+            return stamp
+    return None
+
+
+def _current_model_commission_component(tcm: Any, side: str) -> CostComponent:
+    """The FROZEN TCM commission (``tcm.fees_usd``) as a typed component
+    (TOTAL USD). Typed UNAVAILABLE when tcm carries no fees_usd — never zero."""
+    fee = _tcm_fees_usd(tcm)
+    cost_side = _side_enum(side)
+    if fee is None:
+        return CostComponent.make_unavailable(
+            "current_model_cost", CostSource.TCM, cost_side,
+            CostBasisKind.ESTIMATED, CostUnit.TOTAL,
+            "tcm_fees_not_persisted",
+            provenance=_CURRENT_MODEL_COMMISSION_PROV,
+        )
+    return CostComponent(
+        name="current_model_cost", source=CostSource.TCM, side=cost_side,
+        basis=CostBasisKind.ESTIMATED, unit=CostUnit.TOTAL,
+        amount_usd=abs(fee), provenance=_CURRENT_MODEL_COMMISSION_PROV,
+    )
+
+
+def _v2_proposed_commission_component(
+    stamp: Optional[Mapping[str, Any]], side: str
+) -> CostComponent:
+    """The PROPOSED v2 routing-aware commission, read from the stamped
+    ``tcm_v2_proposal.proposed_model.commission_usd`` (TOTAL USD). Post-#1278
+    rows ONLY — an absent stamp types UNAVAILABLE (``no_v2_stamp_pre_1278``),
+    never a fabricated zero. Broker-routed proposes $0 (available, amount 0.0);
+    internal/shadow proposes the labeled synthetic estimate. The stamp's OWN
+    ``model_version`` rides provenance so version drift is auditable per row."""
+    cost_side = _side_enum(side)
+    if stamp is None:
+        return CostComponent.make_unavailable(
+            "tcm_v2_cost", CostSource.TCM, cost_side,
+            CostBasisKind.ESTIMATED, CostUnit.TOTAL,
+            "no_v2_stamp_pre_1278",
+            provenance=Provenance(model_version=_V2_VERSION_UNAVAILABLE),
+        )
+    prov = Provenance(
+        model_version=str(stamp.get("model_version") or "tcm_v2_proposal/unknown"),
+        source_detail=str(stamp.get("source") or "unknown_source"),
+    )
+    pm = stamp.get("proposed_model")
+    comm = pm.get("commission_usd") if isinstance(pm, Mapping) else None
+    if not isinstance(comm, Mapping) or not comm.get("available"):
+        reason = (
+            (comm.get("reason") if isinstance(comm, Mapping) else None)
+            or "v2_commission_unavailable"
+        )
+        return CostComponent.make_unavailable(
+            "tcm_v2_cost", CostSource.TCM, cost_side,
+            CostBasisKind.ESTIMATED, CostUnit.TOTAL, str(reason),
+            provenance=prov,
+        )
+    usd = _coerce_float(comm.get("usd"))
+    if usd is None:
+        return CostComponent.make_unavailable(
+            "tcm_v2_cost", CostSource.TCM, cost_side,
+            CostBasisKind.ESTIMATED, CostUnit.TOTAL,
+            "v2_commission_usd_missing", provenance=prov,
+        )
+    return CostComponent(
+        name="tcm_v2_cost", source=CostSource.TCM, side=cost_side,
+        basis=CostBasisKind.ESTIMATED, unit=CostUnit.TOTAL,
+        amount_usd=abs(usd), provenance=prov,
+    )
+
+
+def _v2_model_version(stamp: Optional[Mapping[str, Any]]) -> str:
+    """The stamp's own ``model_version`` (the version-segregation key), or the
+    sentinel when no stamp is present (pre-#1278)."""
+    if stamp is None:
+        return _V2_VERSION_UNAVAILABLE
+    return str(stamp.get("model_version") or "tcm_v2_proposal/unknown")
+
+
+def _accrual_routing(
+    stamp: Optional[Mapping[str, Any]], broker_routed: bool, cohort: str
+) -> Tuple[str, str]:
+    """(routing_label, routing_source). Prefer the stage-stamped routing (the
+    v2 proposal's own stage-time prediction). When no stamp exists, DERIVE a
+    coarse routing from the REALIZED venue signals — never fabricate a broker
+    route for an unrecognized one."""
+    if stamp is not None and stamp.get("routing"):
+        return str(stamp["routing"]), "stage_stamp"
+    if broker_routed:
+        return "broker_alpaca_options", "derived_from_realized"
+    if cohort == "shadow":
+        return "shadow", "derived_from_realized"
+    return "internal", "derived_from_realized"
+
+
+def _realized_fill_gap_component(
+    side: str,
+    close_order_json: Optional[Mapping[str, Any]],
+    close_fill: Any,
+    quantity: Optional[float],
+) -> Tuple[CostComponent, Optional[float]]:
+    """The realized spread/fill-gap carried context (close_fill_gap when
+    stamped): the frozen ``extract_realized_close_costs.realized_slippage_vs_mid``
+    (TOTAL USD) + gap_fraction. ENTRY side has no close_fill_gap → UNAVAILABLE.
+    An unstamped close (no cross/mid) → UNAVAILABLE. Neither model's commission
+    is differenced against this — it is the component v2 carries UNCHANGED."""
+    if side != "close":
+        return (
+            CostComponent.make_unavailable(
+                "realized_spread_or_fill_gap", CostSource.REALIZED,
+                CostSide.ENTRY, CostBasisKind.REALIZED, CostUnit.TOTAL,
+                "entry_side_no_close_fill_gap",
+            ),
+            None,
+        )
+    if close_fill is None:
+        return (
+            CostComponent.make_unavailable(
+                "realized_spread_or_fill_gap", CostSource.REALIZED,
+                CostSide.EXIT, CostBasisKind.REALIZED, CostUnit.TOTAL,
+                "no_close_fill_order",
+            ),
+            None,
+        )
+    realized = extract_realized_close_costs(
+        order_json=close_order_json, broker_fill=close_fill, quantity=quantity,
+    )
+    slip = realized.breakdown.component("realized_slippage_vs_mid")
+    if slip is None:  # pragma: no cover - the extractor always includes it
+        slip = CostComponent.make_unavailable(
+            "realized_spread_or_fill_gap", CostSource.REALIZED, CostSide.EXIT,
+            CostBasisKind.REALIZED, CostUnit.TOTAL, "extractor_missing_slip",
+        )
+    return slip, realized.gap_fraction
+
+
+# --- one typed accrual example ----------------------------------------------
+@dataclass(frozen=True)
+class TcmV2AccrualExample:
+    """One eligible entry/close side of a closed round-trip, comparing the
+    current-model commission and the proposed v2 commission against the
+    realized broker commission. Every money field is a typed CostComponent /
+    CostDelta — a missing input is UNAVAILABLE and COUNTED, never scored zero."""
+    example_id: str            # f"{record_id}:{side}" — the dedup key
+    record_id: str             # paper_positions.id — the round-trip spine
+    suggestion_id: str         # durable identity (entry↔close share it)
+    cohort: str                # live | shadow | unattributed
+    fill_realism: str          # broker | internal
+    side: str                  # entry | close
+    routing: str               # broker_alpaca_options | shadow | internal | ...
+    routing_source: str        # stage_stamp | derived_from_realized
+    strategy: str
+    leg_count: Optional[int]
+    quantity: Optional[float]
+    model_version: str         # the v2 stamp version (segregation key) or sentinel
+    v2_stamp_present: bool
+    known_at: str              # closed_at (round-trip realization time)
+    source: str                # tcm_v2_proposal@stage | no_v2_stamp
+    current_model_cost: CostComponent          # frozen TCM commission (TOTAL USD)
+    tcm_v2_cost: CostComponent                 # proposed v2 commission (TOTAL USD)
+    realized_commission: CostComponent         # broker-true, per routing (TOTAL USD)
+    realized_spread_or_fill_gap: CostComponent  # carried context (close side)
+    close_gap_fraction: Optional[float]
+    current_minus_realized: CostDelta          # current − realized commission
+    v2_minus_realized: CostDelta               # proposed v2 − realized commission
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "example_id": self.example_id,
+            "record_id": self.record_id,
+            "suggestion_id": self.suggestion_id,
+            "cohort": self.cohort,
+            "fill_realism": self.fill_realism,
+            "side": self.side,
+            "routing": self.routing,
+            "routing_source": self.routing_source,
+            "strategy": self.strategy,
+            "leg_count": self.leg_count,
+            "quantity": self.quantity,
+            "model_version": self.model_version,
+            "v2_stamp_present": self.v2_stamp_present,
+            "known_at": self.known_at,
+            "source": self.source,
+            "current_model_cost": self.current_model_cost.as_dict(),
+            "tcm_v2_cost": self.tcm_v2_cost.as_dict(),
+            "realized_commission": self.realized_commission.as_dict(),
+            "realized_spread_or_fill_gap": self.realized_spread_or_fill_gap.as_dict(),
+            "close_gap_fraction": self.close_gap_fraction,
+            "current_minus_realized": self.current_minus_realized.as_dict(),
+            "v2_minus_realized": self.v2_minus_realized.as_dict(),
+        }
+
+
+def _accrual_example_for_side(
+    row: Mapping[str, Any], *, side: str, cohort: str, realism: str,
+    qty: Optional[float], tcm: Any, exec_mode: Any, has_oid: Any,
+    broker_status: Any, fees_usd: Any,
+    close_order_json: Optional[Mapping[str, Any]] = None,
+    close_fill: Any = None,
+) -> TcmV2AccrualExample:
+    stamp = _v2_stamp(tcm)
+    broker_routed = _broker_routed(exec_mode, has_oid, broker_status)
+    routing, routing_source = _accrual_routing(stamp, broker_routed, cohort)
+
+    current_cost = _current_model_commission_component(tcm, side)
+    v2_cost = _v2_proposed_commission_component(stamp, side)
+    realized_commission = _realized_commission_component(
+        "realized_commission", _side_enum(side), exec_mode, has_oid,
+        broker_status, fees_usd,
+    )
+    spread_gap, gap_fraction = _realized_fill_gap_component(
+        side, close_order_json, close_fill, qty,
+    )
+
+    current_minus_realized = _delta(
+        "current_minus_realized", current_cost, realized_commission,
+        note=("TOTAL USD commission; current frozen TCM − realized broker "
+              "commission; positive = the frozen model over-charges vs realized"),
+    )
+    v2_minus_realized = _delta(
+        "v2_minus_realized", v2_cost, realized_commission,
+        note=("TOTAL USD commission; proposed v2 − realized broker commission; "
+              "0 on a broker fill = the proposal tracks realized ($0 options)"),
+    )
+
+    # leg_count: prefer the stamp's own count, else the ranker estimate.
+    leg_count: Optional[int] = None
+    if stamp is not None and stamp.get("leg_count") is not None:
+        try:
+            leg_count = int(stamp["leg_count"])
+        except (TypeError, ValueError):
+            leg_count = None
+    if leg_count is None:
+        rc = row.get("ranking_costs")
+        if isinstance(rc, Mapping) and rc.get("leg_count") is not None:
+            try:
+                leg_count = int(rc["leg_count"])
+            except (TypeError, ValueError):
+                leg_count = None
+
+    record_id = str(row.get("record_id"))
+    return TcmV2AccrualExample(
+        example_id=f"{record_id}:{side}",
+        record_id=record_id,
+        suggestion_id=str(row.get("suggestion_id") or ""),
+        cohort=cohort,
+        fill_realism=realism,
+        side=side,
+        routing=routing,
+        routing_source=routing_source,
+        strategy=str(row.get("strategy") or "unknown"),
+        leg_count=leg_count,
+        quantity=qty,
+        model_version=_v2_model_version(stamp),
+        v2_stamp_present=stamp is not None,
+        known_at=str(row.get("closed_at") or ""),
+        source=("tcm_v2_proposal@stage" if stamp is not None else "no_v2_stamp"),
+        current_model_cost=current_cost,
+        tcm_v2_cost=v2_cost,
+        realized_commission=realized_commission,
+        realized_spread_or_fill_gap=spread_gap,
+        close_gap_fraction=gap_fraction,
+        current_minus_realized=current_minus_realized,
+        v2_minus_realized=v2_minus_realized,
+    )
+
+
+def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
+    """Map ONE db row to its entry + close TCM v2 accrual examples. The close
+    example exists ONLY when a distinct close order filled (single-fill
+    positions yield an entry example only). Pure; never raises on a partial
+    row (missing pieces type UNAVAILABLE)."""
+    cohort = classify_cohort(row.get("cohort_name"))
+    realism = fill_realism(row.get("fill_source"))
+    qty = _coerce_float(row.get("quantity"))
+
+    examples: List[TcmV2AccrualExample] = [
+        _accrual_example_for_side(
+            row, side="entry", cohort=cohort, realism=realism, qty=qty,
+            tcm=row.get("entry_tcm"),
+            exec_mode=row.get("entry_execution_mode"),
+            has_oid=row.get("entry_has_alpaca_oid"),
+            broker_status=row.get("entry_broker_status"),
+            fees_usd=row.get("entry_fees_usd"),
+        )
+    ]
+    if row.get("close_fill_price") is not None:
+        close_oj = (
+            row.get("close_order_json")
+            if isinstance(row.get("close_order_json"), Mapping) else None
+        )
+        examples.append(_accrual_example_for_side(
+            row, side="close", cohort=cohort, realism=realism, qty=qty,
+            tcm=row.get("close_tcm"),
+            exec_mode=row.get("close_execution_mode"),
+            has_oid=row.get("close_has_alpaca_oid"),
+            broker_status=row.get("close_broker_status"),
+            fees_usd=row.get("close_fees_usd"),
+            close_order_json=close_oj,
+            close_fill=row.get("close_fill_price"),
+        ))
+    return examples
+
+
+def _dedup_examples(
+    examples: List[TcmV2AccrualExample],
+) -> List[TcmV2AccrualExample]:
+    """Idempotence guard: one example per (record_id, side). A duplicated
+    payload row (same position seen twice) can never double-count; first
+    occurrence wins (the payload is deterministically ordered upstream)."""
+    seen: Dict[str, TcmV2AccrualExample] = {}
+    for ex in examples:
+        if ex.example_id not in seen:
+            seen[ex.example_id] = ex
+    return list(seen.values())
+
+
+# --- version-segregated aggregation -----------------------------------------
+@dataclass(frozen=True)
+class TcmV2VersionBucket:
+    """Accrual tally for ONE (cohort, v2 model_version). A version bump lands
+    post-bump examples in a NEW bucket — versions never pool."""
+    cohort: str
+    model_version: str
+    n_examples: int
+    n_entry: int
+    n_close: int
+    v2_stamp_present: int
+    v2_stamp_absent: int
+    realized_commission_known: int
+    realized_commission_unavailable: int
+    current_minus_realized: DeltaStat
+    v2_minus_realized: DeltaStat
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "cohort": self.cohort,
+            "model_version": self.model_version,
+            "n_examples": self.n_examples,
+            "n_entry": self.n_entry,
+            "n_close": self.n_close,
+            "v2_stamp_present": self.v2_stamp_present,
+            "v2_stamp_absent": self.v2_stamp_absent,
+            "realized_commission_known": self.realized_commission_known,
+            "realized_commission_unavailable": self.realized_commission_unavailable,
+            "current_minus_realized": self.current_minus_realized.as_dict(),
+            "v2_minus_realized": self.v2_minus_realized.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class TcmV2AccrualReport:
+    total_examples: int
+    buckets: Tuple[TcmV2VersionBucket, ...]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "total_examples": self.total_examples,
+            "buckets": [b.as_dict() for b in self.buckets],
+        }
+
+
+def _build_v2_bucket(
+    cohort: str, model_version: str, examples: List[TcmV2AccrualExample]
+) -> TcmV2VersionBucket:
+    return TcmV2VersionBucket(
+        cohort=cohort,
+        model_version=model_version,
+        n_examples=len(examples),
+        n_entry=sum(1 for e in examples if e.side == "entry"),
+        n_close=sum(1 for e in examples if e.side == "close"),
+        v2_stamp_present=sum(1 for e in examples if e.v2_stamp_present),
+        v2_stamp_absent=sum(1 for e in examples if not e.v2_stamp_present),
+        realized_commission_known=sum(
+            1 for e in examples if e.realized_commission.available),
+        realized_commission_unavailable=sum(
+            1 for e in examples if not e.realized_commission.available),
+        current_minus_realized=_stat(
+            "current_minus_realized",
+            [e.current_minus_realized for e in examples]),
+        v2_minus_realized=_stat(
+            "v2_minus_realized", [e.v2_minus_realized for e in examples]),
+    )
+
+
+def build_tcm_v2_accrual(payload: Mapping[str, Any]) -> TcmV2AccrualReport:
+    """Pure function of the DB payload → the version-segregated TCM v2
+    realized-accrual report. Deduped by (record_id, side); buckets keyed on
+    (cohort, v2 model_version) in deterministic order."""
+    examples: List[TcmV2AccrualExample] = []
+    for r in (payload.get("rows") or []):
+        examples.extend(build_accrual_examples(r))
+    examples = _dedup_examples(examples)
+
+    by_key: Dict[Tuple[str, str], List[TcmV2AccrualExample]] = {}
+    for ex in examples:
+        by_key.setdefault((ex.cohort, ex.model_version), []).append(ex)
+
+    # Deterministic order: cohort precedence, then model_version ascending.
+    cohort_rank = {c: i for i, c in enumerate(_COHORT_ORDER)}
+    ordered_keys = sorted(
+        by_key.keys(),
+        key=lambda k: (cohort_rank.get(k[0], len(_COHORT_ORDER)), k[0], k[1]),
+    )
+    buckets = tuple(
+        _build_v2_bucket(cohort, mv, by_key[(cohort, mv)])
+        for (cohort, mv) in ordered_keys
+    )
+    return TcmV2AccrualReport(total_examples=len(examples), buckets=buckets)
 
 
 # --- rendering ---------------------------------------------------------------
@@ -801,7 +1288,54 @@ def render_markdown(study: StudyReport) -> str:
     if not study.cohorts:
         L.append("_No closed round-trips in the payload._")
         L.append("")
+    L.extend(_render_tcm_v2_accrual(study.tcm_v2_accrual))
     return "\n".join(L) + "\n"
+
+
+def _render_tcm_v2_accrual(report: TcmV2AccrualReport) -> List[str]:
+    """The TCM v2 realized-accrual section (Lane B, observe-only). One block
+    per (cohort, v2 model_version) so versions never pool."""
+    L: List[str] = []
+    L.append("## TCM v2 Realized-Accrual (observe-only, Lane B)")
+    L.append("")
+    L.append(f"- Total eligible entry/close examples: **{report.total_examples}**")
+    L.append("- Accrues the ONLY component TCM v2 changes — **commission** "
+             "(#1273 evidence). `current_model_cost` = the frozen TCM commission; "
+             "`tcm_v2_cost` = the stamped `tcm.tcm_v2_proposal` commission "
+             "(post-#1278 rows ONLY; absent → typed UNAVAILABLE, never zero); "
+             "`realized_commission` = the broker-true `fees_usd` PER ROUTING "
+             "($0 options today on a real fill; internal fills UNAVAILABLE).")
+    L.append("- `current_minus_realized` / `v2_minus_realized` are TOTAL-USD "
+             "commission deltas vs the SAME realized value; on a broker fill "
+             "they read (frozen 0.65×qty − 0)=+ and (0 − 0)=0 — the accrued "
+             "evidence that v2 tracks realized. Slippage/spread are carried "
+             "UNCHANGED (surfaced as realized context), never differenced here.")
+    L.append("- Buckets are keyed on (cohort, v2 `model_version`): a version "
+             "bump lands post-bump examples in a NEW bucket — versions never "
+             "pool. IDEMPOTENT: pure function of the DB; re-run = same output.")
+    L.append("")
+    if not report.buckets:
+        L.append("_No eligible TCM v2 accrual examples in the payload._")
+        L.append("")
+        return L
+    for b in report.buckets:
+        L.append(f"### {b.cohort.upper()} · v2 `{b.model_version}`")
+        L.append("")
+        L.append(f"- Examples: **{b.n_examples}** "
+                 f"(entry {b.n_entry} / close {b.n_close}) · "
+                 f"v2 stamp present {b.v2_stamp_present} / "
+                 f"absent {b.v2_stamp_absent}")
+        L.append(f"- Realized commission: {b.realized_commission_known} KNOWN "
+                 f"(broker) / {b.realized_commission_unavailable} UNAVAILABLE "
+                 "(internal)")
+        L.append("")
+        L.append("| typed delta (a − b) | n avail | n unavail | mean USD | "
+                 "median USD | abstain reasons |")
+        L.append("|---|---|---|---|---|---|")
+        L.append(_delta_row("current − realized commission", b.current_minus_realized))
+        L.append(_delta_row("v2 − realized commission", b.v2_minus_realized))
+        L.append("")
+    return L
 
 
 # --- CLI --------------------------------------------------------------------
@@ -813,6 +1347,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--emit-sql", action="store_true",
                     help="print the read-only SQL to regenerate the payload, then exit")
     ap.add_argument("--out", help="write the markdown report to this path (default: stdout)")
+    ap.add_argument("--accrual-json",
+                    help="also write the per-example TCM v2 realized-accrual "
+                         "examples (the machine-diffable dated snapshot) to this "
+                         "path; deterministic, one object per eligible entry/close")
     args = ap.parse_args(argv)
 
     if args.emit_sql:
@@ -831,6 +1369,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"wrote {args.out}")
     else:
         print(md)
+    if args.accrual_json:
+        # Per-example dated snapshot: a PURE re-derivation of the DB payload
+        # (deterministic order), so diffing two dated files IS the accrual.
+        examples = _dedup_examples([
+            ex for r in (payload.get("rows") or [])
+            for ex in build_accrual_examples(r)
+        ])
+        examples.sort(key=lambda e: (e.cohort, e.model_version, e.record_id, e.side))
+        snapshot = {
+            "generated_at": str(payload.get("generated_at", "")),
+            "source": str(payload.get("source", "")),
+            "accrual_summary": study.tcm_v2_accrual.as_dict(),
+            "examples": [e.as_dict() for e in examples],
+        }
+        with open(args.accrual_json, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh, indent=2, sort_keys=True)
+        print(f"wrote {args.accrual_json}")
     return 0
 
 

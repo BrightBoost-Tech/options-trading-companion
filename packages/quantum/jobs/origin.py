@@ -22,6 +22,16 @@ Taxonomy (closed set):
                                (services/replay) never enqueues job_runs; the
                                replay_integrity_check JOB is operator-triggered
                                and carries the trigger's origin, not 'replay'.
+    event                    — an in-process DATA EVENT fired the enqueue from
+                               inside another job handler (not the scheduler,
+                               not a human, not a retry). The specific event is
+                               carried in ``trigger_actor_class`` (e.g.
+                               'new_scorable_close'), so the queryable pair is
+                               ``origin='event'`` + ``trigger_actor_class=…``
+                               (the owner's 'event:new_scorable_close' shorthand).
+                               First call site: Lane J's event-driven model
+                               review, enqueued from the learning-ingest tail
+                               when a new scorable close is persisted.
     unknown_legacy           — the create_or_get seam default for any caller
                                not yet threaded (and the coercion fallback)
 
@@ -55,6 +65,7 @@ ORIGIN_OPERATOR_SIGNED_ENDPOINT = "operator_signed_endpoint"
 ORIGIN_INTERNAL_RETRY = "internal_retry"
 ORIGIN_MANUAL_CLI = "manual_cli"
 ORIGIN_REPLAY = "replay"
+ORIGIN_EVENT = "event"
 ORIGIN_UNKNOWN_LEGACY = "unknown_legacy"
 
 VALID_ORIGINS = frozenset({
@@ -63,6 +74,7 @@ VALID_ORIGINS = frozenset({
     ORIGIN_INTERNAL_RETRY,
     ORIGIN_MANUAL_CLI,
     ORIGIN_REPLAY,
+    ORIGIN_EVENT,
     ORIGIN_UNKNOWN_LEGACY,
 })
 
@@ -133,6 +145,19 @@ def build_origin(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "v": PROVENANCE_VERSION,
     }
+
+
+def build_event_origin(event: str, **kwargs: Any) -> Dict[str, Any]:
+    """Provenance for an in-process DATA-EVENT enqueue (origin='event').
+
+    ``event`` names the specific trigger and is carried in
+    ``trigger_actor_class`` (e.g. 'new_scorable_close'). Thin wrapper over
+    :func:`build_origin` so the single ``ORIGIN_EVENT`` taxonomy member serves
+    every event kind without polluting the closed set with per-event values —
+    the specific event lives in the actor-class field, mirroring how
+    ``scheduler`` carries its slot in ``schedule_slot``.
+    """
+    return build_origin(ORIGIN_EVENT, trigger_actor_class=event, **kwargs)
 
 
 def coerce_origin(origin: Optional[Dict[str, Any]]) -> Dict[str, Any]:

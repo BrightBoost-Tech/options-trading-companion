@@ -472,6 +472,39 @@ def test_fill_quality_provenance_round_trips_both_sinks(conn):
     assert meta["fill_quality"] == "mid_fallback" and float(meta["fill_mid_reference"]) == 1.87
 
 
+# ─────────────── FIX 3: submitted_at populated alongside filled_at ────────────
+def test_fresh_internal_close_sets_submitted_at_equal_to_filled_at(conn):
+    """FIX 3 (2026-05-18), relocated into the atomic RPC: a fresh internal-close
+    order (submitted_at NULL at stage) gets submitted_at = COALESCE(submitted_at,
+    v_now) = v_now = filled_at, so the filled row has BOTH timing columns
+    non-NULL and — honestly — submitted_at == filled_at (submission and fill
+    happen in the same commit). Pre-fix, 11 of 11 target_profit_hit closes in 60d
+    had NULL submitted_at, breaking exit-side latency analysis."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u); pos = _mk_position(cur, u, pf, qty=2); od = _mk_order(cur, u, pf, pos)
+    assert _row_json(cur, "paper_orders", od)["submitted_at"] is None  # NULL at stage
+    _commit(cur, _args(u, pf, pos, od, mag=2.00, realized=100.0))
+    o = _row_json(cur, "paper_orders", od)
+    assert o["status"] == "filled"
+    assert o["submitted_at"] is not None
+    assert o["filled_at"] is not None
+    assert o["submitted_at"] == o["filled_at"]  # honesty for a fresh internal fill
+
+
+def test_preexisting_submitted_at_preserved_by_coalesce(conn):
+    """If the close order already carried a submitted_at (e.g. a real submission
+    timestamp on a fallback path), COALESCE(submitted_at, v_now) PRESERVES it;
+    only filled_at advances to the commit time. Both non-NULL, and distinct —
+    proving the RPC does NOT clobber an existing submitted_at with v_now."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u); pos = _mk_position(cur, u, pf, qty=2); od = _mk_order(cur, u, pf, pos)
+    cur.execute("update paper_orders set submitted_at='2026-07-19T10:00:00+00' where id=%s", (od,))
+    _commit(cur, _args(u, pf, pos, od, mag=2.00, realized=100.0))
+    o = _row_json(cur, "paper_orders", od)
+    assert o["submitted_at"] is not None and o["filled_at"] is not None
+    assert o["submitted_at"] != o["filled_at"]  # existing submitted_at preserved, not overwritten
+
+
 def test_happy_close_without_provenance_leaves_order_json_untouched(conn):
     """The economic core is byte-unchanged: with no provenance supplied the
     filled order's order_json stays '{}' and the ledger provenance keys are

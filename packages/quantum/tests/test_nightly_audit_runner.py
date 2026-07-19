@@ -579,15 +579,88 @@ def test_locked_marker_sink_no_false_up_ping(tmp_path):
     assert nr.ARTIFACT_END_MARKER in art
 
 
+def test_two_runs_shared_sink_second_run_appends_fail_not_met(tmp_path):
+    """Reviewer finding 1 (BLOCKER) falsifier: the marker sink is append-only and
+    shared across nights. Run 1 writes valid start/end markers. Run 2's appends
+    ALL fail (the sink is read-only) while run 1's markers remain READABLE — run
+    2's contract MUST be NOT met and its UP ping suppressed. A bare substring
+    check over the accumulated file would (wrongly) see run 1's markers and fire
+    a false UP ping for run 2."""
+    import stat
+
+    shared = tmp_path / "operator" / "audit" / "runner-markers.log"
+
+    # RUN 1 — normal success into the shared sink
+    wt1 = tmp_path / "worktree" / "audit" / "reports" / "2026-07-18.md"
+    ping1 = PingRecorder()
+    cfg1 = _make_config(
+        tmp_path, _child_writes_report(wt1), report_date="2026-07-18", ping=ping1, marker_log=shared
+    )
+    assert nr.NightlyRunner(cfg1).run() == 0
+    assert ping1.up_calls(_PING_URL) == [(_PING_URL, None)]  # run 1 legitimately UP-pinged
+    run1_text = shared.read_text()
+    assert nr.MARK_START in run1_text and nr.MARK_END in run1_text
+
+    # RUN 2 — same shared sink, made READ-ONLY so run 2's appends FAIL (typed)
+    # while run 1's markers stay READABLE in the file.
+    os.chmod(shared, stat.S_IREAD)
+    try:
+        wt2 = tmp_path / "worktree2" / "audit" / "reports" / "2026-07-19.md"
+        ping2 = PingRecorder()
+        cfg2 = _make_config(
+            tmp_path,
+            _child_writes_report(wt2, sha_prefix="abcdef12"),
+            report_date="2026-07-19",
+            ping=ping2,
+            marker_log=shared,
+            audit_worktree=tmp_path / "worktree2",
+        )
+        r2 = nr.NightlyRunner(cfg2)
+        r2.run()
+        # run 2's own appends failed (typed, recorded) — its markers never landed
+        assert r2._marker_failures
+        assert all(mf["status"] != nr.APPEND_OK for mf in r2._marker_failures)
+        # run 1's markers are STILL readable in the shared sink...
+        assert nr.MARK_START in shared.read_text()
+        # ...but run 2's contract is scoped to run 2 -> NOT met, NO false UP ping
+        assert ping2.up_calls(_PING_URL) == []
+        assert ping2.fail_calls()
+    finally:
+        os.chmod(shared, stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_completion_eval_exception_forces_down_ping_and_releases_lock(tmp_path, monkeypatch):
+    """Reviewer finding 3: a TOCTOU exception inside the completion evaluation
+    (report/marker races away) must NOT skip the ping or leak the lock, and must
+    NEVER leave the run looking green — it routes to an explicit DOWN ping."""
+    wt_report = tmp_path / "worktree" / "audit" / "reports" / "2026-07-18.md"
+    ping = PingRecorder()
+    cfg = _make_config(tmp_path, _child_writes_report(wt_report), ping=ping)
+
+    def _boom(*a, **k):
+        raise RuntimeError("toctou: report vanished mid-evaluation")
+
+    monkeypatch.setattr(nr, "evaluate_completion_contract", _boom)
+    nr.NightlyRunner(cfg).run()
+    assert ping.up_calls(_PING_URL) == []  # never an UP ping after an eval error
+    assert ping.fail_calls()  # DOWN ping fired instead
+    assert not cfg.lock_path.exists()  # lock released despite the exception
+
+
 # ---------------------------------------------------------------------------
 # completion contract re-reads durable evidence from disk (item 8)
 # ---------------------------------------------------------------------------
-def _write_contract_fixture(tmp_path, *, start=True, end=True, report=True, manifest=True, transcript=True):
+_TEST_RUN_TAG = "[run=fixture-run]"
+
+
+def _write_contract_fixture(
+    tmp_path, *, start=True, end=True, report=True, manifest=True, transcript=True, tag=_TEST_RUN_TAG
+):
     ml = tmp_path / "markers.log"
     if start:
-        nr.append_line(ml, f"==== ts {nr.MARK_START} (runner) ====")
+        nr.append_line(ml, f"==== ts {nr.MARK_START} (runner) {tag} ====")
     if end:
-        nr.append_line(ml, f"==== ts {nr.MARK_END} (exit 0) ====")
+        nr.append_line(ml, f"==== ts {nr.MARK_END} (exit 0) {tag} ====")
     rep = tmp_path / "r.md"
     if report:
         rep.write_text("# AUDIT report\n\nrun SHA: abcdef12\n", encoding="utf-8")
@@ -602,7 +675,7 @@ def _write_contract_fixture(tmp_path, *, start=True, end=True, report=True, mani
 
 def test_contract_met_when_all_present(tmp_path):
     mf, rep, ml, tr = _write_contract_fixture(tmp_path)
-    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", _good_child())
+    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", _good_child(), _TEST_RUN_TAG)
     assert c.met and c.status == "met" and c.missing_artifacts == []
 
 
@@ -620,7 +693,7 @@ def test_contract_not_met_when_each_artifact_missing(tmp_path, drop, klass):
     kwargs = {"start": True, "end": True, "report": True, "manifest": True, "transcript": True}
     kwargs[drop] = False
     mf, rep, ml, tr = _write_contract_fixture(tmp_path, **kwargs)
-    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", _good_child())
+    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", _good_child(), _TEST_RUN_TAG)
     assert not c.met
     assert klass in c.missing_artifacts
     assert c.status in ("partial", "failed")
@@ -629,9 +702,40 @@ def test_contract_not_met_when_each_artifact_missing(tmp_path, drop, klass):
 def test_contract_child_nonzero_is_failed(tmp_path):
     mf, rep, ml, tr = _write_contract_fixture(tmp_path)
     child = nr.ChildResult(exit_code=1, timed_out=False, duration_sec=1.0)
-    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", child)
+    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", child, _TEST_RUN_TAG)
     assert not c.met
     assert nr.ARTIFACT_CHILD_EXIT in c.missing_artifacts
+
+
+def test_contract_scoped_to_run_tag_ignores_prior_run_markers(tmp_path):
+    # The sink is append-only across nights: night-1 markers must NEVER satisfy
+    # a DIFFERENT run's contract (reviewer finding 1, unit-level).
+    mf, rep, ml, tr = _write_contract_fixture(tmp_path, tag="[run=NIGHT1]")
+    c = nr.evaluate_completion_contract(mf, rep, ml, tr, "abcdef1234", _good_child(), "[run=NIGHT2]")
+    assert not c.met
+    assert nr.ARTIFACT_START_MARKER in c.missing_artifacts
+    assert nr.ARTIFACT_END_MARKER in c.missing_artifacts
+
+
+def test_contract_missing_run_sha_is_a_reason(tmp_path):
+    # reviewer finding 2: a None run_sha (workspace rev-parse failed) must FAIL
+    # report_ok, not silently skip the SHA-grounding check.
+    mf, rep, ml, tr = _write_contract_fixture(tmp_path)
+    c = nr.evaluate_completion_contract(mf, rep, ml, tr, None, _good_child(), _TEST_RUN_TAG)
+    assert not c.met
+    assert nr.ARTIFACT_REPORT in c.missing_artifacts
+    assert any("SHA unavailable" in r for r in c.report_reasons)
+
+
+def test_structural_report_check_missing_sha_fails():
+    import tempfile
+
+    d = Path(tempfile.mkdtemp())
+    rep = d / "r.md"
+    rep.write_text("# AUDIT report body\n", encoding="utf-8")
+    ok, reasons = nr.structural_report_check(rep, None)
+    assert ok is False
+    assert any("SHA unavailable" in r for r in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +762,15 @@ def test_worktree_env_whitespace_uses_fallback(tmp_path, monkeypatch):
 def test_worktree_env_set_is_honoured(tmp_path, monkeypatch):
     target = tmp_path / "explicit-wt"
     monkeypatch.setenv("AUDIT_WORKTREE_DIR", str(target))
+    cfg = nr.build_production_config(tmp_path)
+    assert cfg.audit_worktree == target
+
+
+def test_worktree_env_padded_value_is_stripped(tmp_path, monkeypatch):
+    # reviewer finding 4: use the STRIPPED value for the Path, not the raw
+    # padded one (a padded path would resolve to a bogus location).
+    target = tmp_path / "explicit-wt"
+    monkeypatch.setenv("AUDIT_WORKTREE_DIR", f"   {target}   ")
     cfg = nr.build_production_config(tmp_path)
     assert cfg.audit_worktree == target
 

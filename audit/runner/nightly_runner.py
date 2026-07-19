@@ -737,6 +737,11 @@ def structural_report_check(
         short = run_sha[:8]
         if short[:7] not in text and short not in text:
             reasons.append(f"report does not reference run SHA {short[:7]}")
+    else:
+        # A missing run SHA means the workspace rev-parse failed — a broken
+        # workspace must NOT weaken report_ok (it must fail closed), so the
+        # absent SHA is itself a typed reason, never a silently skipped check.
+        reasons.append("run SHA unavailable (workspace rev-parse failed) — report cannot be SHA-grounded")
     return (len(reasons) == 0), reasons
 
 
@@ -781,6 +786,7 @@ def evaluate_completion_contract(
     transcript_path: Path,
     run_sha: Optional[str],
     child: ChildResult,
+    run_tag: str,
 ) -> ContractResult:
     """Evaluate the contract from DURABLE evidence RE-READ FROM DISK — never an
     in-memory boolean (item 8). The old code trusted ``_end_marker_written``,
@@ -788,10 +794,17 @@ def evaluate_completion_contract(
     here we re-read the marker sink and confirm the start AND end markers
     actually landed. Any missing artifact class → partial/failed, and the
     dead-man UP-ping is withheld upstream.
+
+    CRITICAL: the marker sink is an APPEND-ONLY log shared across nights. The
+    presence check is SCOPED to THIS run via ``run_tag`` (a unique per-run id
+    stamped into the start/end marker lines) — a prior night's start/end
+    markers must NEVER satisfy tonight's contract. A bare substring check over
+    the accumulated file would report every subsequent night as complete even
+    when tonight's appends all failed.
     """
-    marker_text = _read_text_safe(marker_log)
-    start_present = MARK_START in marker_text
-    end_present = MARK_END in marker_text
+    marker_lines = _read_text_safe(marker_log).splitlines()
+    start_present = any(MARK_START in ln and run_tag in ln for ln in marker_lines)
+    end_present = any(MARK_END in ln and run_tag in ln for ln in marker_lines)
 
     manifest_exists = manifest_path.exists()
     report_ok, reasons = structural_report_check(report_path, run_sha)
@@ -965,6 +978,13 @@ class NightlyRunner:
         # thread both emit through _emit_raw; independent `ab` handles race and
         # interleave (Windows has no atomic-append guarantee across handles).
         self._emit_lock = threading.Lock()
+        # Unique per-run id stamped into the start/end marker lines so the
+        # completion contract scopes its start/end check to THIS run's markers
+        # in the append-only, night-shared sink (never a prior night's markers).
+        self.run_id = f"{self.cfg.report_date}-{self.pid}-{os.urandom(4).hex()}"
+
+    def _run_tag(self) -> str:
+        return f"[run={self.run_id}]"
 
     # -- marker sink ------------------------------------------------------
     def _marker_log(self) -> Path:
@@ -1028,8 +1048,9 @@ class NightlyRunner:
     def _write_end_marker(self, exit_code: int) -> None:
         # Reflects the TYPED append result — NOT set unconditionally (item 3).
         # The contract re-reads the sink from disk regardless, so a swallowed
-        # append can no longer read as "written".
-        res = self._emit_raw(f"==== {_utc_ts()} {MARK_END} (exit {exit_code}) ====")
+        # append can no longer read as "written". The run tag scopes it to THIS
+        # run in the night-shared append-only sink.
+        res = self._emit_raw(f"==== {_utc_ts()} {MARK_END} (exit {exit_code}) {self._run_tag()} ====")
         self._end_marker_written = res.ok
 
     # -- phases -----------------------------------------------------------
@@ -1149,6 +1170,18 @@ class NightlyRunner:
             except Exception as exc:  # noqa: BLE001
                 self._log(f"ALERT copy-back failed: {exc}")
 
+    def _send_fail_ping(self, reason: str) -> None:
+        """DOWN ping to "<base>/fail" with a no-secret reason (items 10/11). The
+        UP ping is NEVER sent from here — this is the fail path only."""
+        if not self.cfg.ping_url:
+            return
+        try:
+            fail_url = self.cfg.ping_url.rstrip("/") + "/fail"
+            rc = self.cfg.ping_run(fail_url, reason[:200])
+            self._log(f"DOWN (/fail) ping sent (curl exit {rc})")
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"DOWN ping attempt errored: {exc}")
+
     def _do_ping(self, contract: ContractResult) -> None:
         """UP-ping ONLY when the contract is met (every artifact re-read from
         disk). On partial/failure, WITHHOLD the UP ping and — if a ping URL is
@@ -1169,17 +1202,10 @@ class NightlyRunner:
             f"completion contract NOT met ({contract.status}) — UP ping WITHHELD; "
             f"missing artifact classes: {contract.missing_artifacts}"
         )
-        if not self.cfg.ping_url:
-            return
-        try:
-            fail_url = self.cfg.ping_url.rstrip("/") + "/fail"
-            msg = "nightly-audit " + contract.status + "; missing artifact classes: " + ",".join(
-                contract.missing_artifacts
-            )
-            rc = self.cfg.ping_run(fail_url, msg)
-            self._log(f"DOWN (/fail) ping sent (curl exit {rc})")
-        except Exception as exc:  # noqa: BLE001
-            self._log(f"DOWN ping attempt errored: {exc}")
+        self._send_fail_ping(
+            "nightly-audit " + contract.status + "; missing artifact classes: "
+            + ",".join(contract.missing_artifacts)
+        )
 
     # -- orchestrator -----------------------------------------------------
     def run(self) -> int:
@@ -1187,7 +1213,7 @@ class NightlyRunner:
         if not lock.acquire():
             self._emit_raw(
                 f"==== {_utc_ts()} {MARK_START} ABORTED — another nightly run holds "
-                f"the lock ({self.cfg.lock_path}) ===="
+                f"the lock ({self.cfg.lock_path}) {self._run_tag()} ===="
             )
             return 3  # duplicate run
 
@@ -1197,7 +1223,9 @@ class NightlyRunner:
         child = ChildResult(exit_code=-1, timed_out=False, duration_sec=0.0)
         try:
             self._emit_raw("=" * 68)
-            self._emit_raw(f"==== {_utc_ts()} {MARK_START} (runner v{RUNNER_VERSION}, PID {self.pid}) ====")
+            self._emit_raw(
+                f"==== {_utc_ts()} {MARK_START} (runner v{RUNNER_VERSION}, PID {self.pid}) {self._run_tag()} ===="
+            )
 
             wake_factory = self.cfg.wake_lock_factory or (lambda log: WakeLock(log))
             with wake_factory(self._log):
@@ -1227,37 +1255,48 @@ class NightlyRunner:
             self._log(f"UNEXPECTED runner error: {type(exc).__name__}: {exc}")
             exit_code = 1
         finally:
-            # UNCONDITIONAL end marker with the exact child exit code.
-            self._write_end_marker(child.exit_code)
+            # The whole completion evaluation is guarded: a TOCTOU exception
+            # (e.g. the report/marker file races away between exists() and read)
+            # must NEVER skip the ping or leak the lock, and must NEVER leave the
+            # run looking green. On any such error we send an explicit DOWN ping
+            # and always release the lock (item 3 hardening).
+            try:
+                # UNCONDITIONAL end marker with the exact child exit code.
+                self._write_end_marker(child.exit_code)
 
-            # Completion contract — every artifact RE-READ FROM DISK (item 8),
-            # evaluated after the end marker was appended to the sink.
-            contract = evaluate_completion_contract(
-                self._manifest_worktree(),
-                self._operator_report(),
-                self._marker_log(),
-                transcript_path,
-                workspace.sha,
-                child,
-            )
-            self._log(f"completion contract: {contract.summary()}")
-            if not contract.met:
-                try:
-                    write_failure_artifact(
-                        self.cfg.operator_repo / "audit" / f"ALERT-{self.cfg.report_date}-runner.md",
-                        self.cfg.report_date,
-                        contract,
-                        workspace,
-                        transcript_path,
-                        marker_log=self._marker_log(),
-                        marker_failures=self._marker_failures,
-                        fatal_error=self._fatal_error,
-                    )
-                    self._log("failure artifact written: audit/ALERT-<date>-runner.md")
-                except Exception as exc:  # noqa: BLE001
-                    self._log(f"failure-artifact write failed: {exc}")
-            self._do_ping(contract)
-            lock.release()
+                # Completion contract — every artifact RE-READ FROM DISK (item 8),
+                # scoped to THIS run's markers, evaluated after the end marker.
+                contract = evaluate_completion_contract(
+                    self._manifest_worktree(),
+                    self._operator_report(),
+                    self._marker_log(),
+                    transcript_path,
+                    workspace.sha,
+                    child,
+                    self._run_tag(),
+                )
+                self._log(f"completion contract: {contract.summary()}")
+                if not contract.met:
+                    try:
+                        write_failure_artifact(
+                            self.cfg.operator_repo / "audit" / f"ALERT-{self.cfg.report_date}-runner.md",
+                            self.cfg.report_date,
+                            contract,
+                            workspace,
+                            transcript_path,
+                            marker_log=self._marker_log(),
+                            marker_failures=self._marker_failures,
+                            fatal_error=self._fatal_error,
+                        )
+                        self._log("failure artifact written: audit/ALERT-<date>-runner.md")
+                    except Exception as exc:  # noqa: BLE001
+                        self._log(f"failure-artifact write failed: {exc}")
+                self._do_ping(contract)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"completion evaluation errored — forcing DOWN ping (never UP): {exc}")
+                self._send_fail_ping(f"nightly-audit completion-evaluation error: {type(exc).__name__}")
+            finally:
+                lock.release()
 
         return exit_code
 
@@ -1284,7 +1323,7 @@ def build_production_config(
     # checkout). Geometry resolution/verification happens later, in
     # refresh_audit_worktree (item 2), before any git command.
     _wt_env = os.environ.get("AUDIT_WORKTREE_DIR", "")
-    worktree = Path(_wt_env) if _wt_env and _wt_env.strip() else _local_appdata_worktree()
+    worktree = Path(_wt_env.strip()) if _wt_env.strip() else _local_appdata_worktree()
     report_date = local_date_str()
 
     if selftest:

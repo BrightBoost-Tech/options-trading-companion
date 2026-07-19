@@ -36,13 +36,6 @@ from run_signed_task import (
     _redact_sensitive_fields,
 )
 
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster A] reload() on mocked module
-# Tracked in #768 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster A] reload() on mocked module; tracked in #768',
-)
-
 
 # =============================================================================
 # Time Gate Tests
@@ -150,8 +143,10 @@ class TestCheckTimeGate:
             assert "Not a market day" in result
 
     def test_gated_task_outside_window(self):
-        """Gated tasks should fail outside time window."""
-        mock_now = datetime(2025, 1, 13, 10, 0, tzinfo=CHICAGO_TZ)  # Monday 10 AM
+        """Gated tasks should fail outside the time window. The legacy default
+        window is 150 min, so suggestions_close (08:00 gate) runs only within
+        [08:00, 10:30); 11:00 is genuinely out of window."""
+        mock_now = datetime(2025, 1, 13, 11, 0, tzinfo=CHICAGO_TZ)  # Monday 11 AM
         with patch("run_signed_task.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             result = check_time_gate("suggestions_close", skip_time_gate=False)
@@ -186,10 +181,10 @@ class TestCheckTimeGate:
             assert result is not None
             assert "not within" in result
 
-    def test_paper_auto_execute_blocked_at_1230_chicago(self):
-        """CDT wrong-offset cron at 12:30 PM Chicago should be rejected."""
-        # 17:30 UTC during CDT = 12:30 PM Chicago (1 hour too late)
-        mock_now = datetime(2025, 7, 14, 12, 30, tzinfo=CHICAGO_TZ)  # Monday 12:30 CDT
+    def test_paper_auto_execute_blocked_after_window(self):
+        """paper_auto_execute (11:30 gate, 150-min window → [11:30, 14:00))
+        should be rejected once genuinely past the window (14:30 CDT)."""
+        mock_now = datetime(2025, 7, 14, 14, 30, tzinfo=CHICAGO_TZ)  # Monday 14:30 CDT
         with patch("run_signed_task.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             result = check_time_gate("paper_auto_execute", skip_time_gate=False)
@@ -215,10 +210,10 @@ class TestCheckTimeGate:
             assert result is not None
             assert "not within" in result
 
-    def test_validation_preflight_blocked_at_1405_chicago(self):
-        """CDT wrong-offset cron at 2:05 PM Chicago should be rejected."""
-        # 19:05 UTC during CDT = 2:05 PM Chicago (1 hour too late)
-        mock_now = datetime(2025, 7, 14, 14, 5, tzinfo=CHICAGO_TZ)  # Monday 2:05 PM CDT
+    def test_validation_preflight_blocked_after_window(self):
+        """validation_preflight (13:05 gate, 150-min window → [13:05, 15:35))
+        should be rejected once genuinely past the window (16:00 CDT)."""
+        mock_now = datetime(2025, 7, 14, 16, 0, tzinfo=CHICAGO_TZ)  # Monday 4:00 PM CDT
         with patch("run_signed_task.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             result = check_time_gate("validation_preflight", skip_time_gate=False)
@@ -285,8 +280,10 @@ class TestBuildPayload:
         assert payload == {}
 
     def test_user_id_added(self):
-        """Should add user_id when provided."""
-        payload = build_payload("universe_sync", user_id="test-user-123")
+        """Should add user_id for a user_id_mode='allow' task when provided.
+        (universe_sync is user_id_mode='none' and never injects one — see
+        test_empty_payload; learning_ingest is 'allow' with no other default.)"""
+        payload = build_payload("learning_ingest", user_id="test-user-123")
         assert payload == {"user_id": "test-user-123"}
 
     def test_suggestions_defaults(self):
@@ -464,7 +461,9 @@ class TestTaskDefinitions:
             assert len(task["description"]) > 5, f"Task {name} has too short description"
 
     def test_expected_tasks_exist(self):
-        """All expected tasks should be defined."""
+        """All expected tasks should be defined. (plaid_backfill and
+        learning_train were retired from the CLI registry; the set below is the
+        current stable core.)"""
         expected = [
             "suggestions_close",
             "suggestions_open",
@@ -475,9 +474,9 @@ class TestTaskDefinitions:
             "weekly_report",
             "validation_eval",
             "strategy_autotune",
-            "plaid_backfill",
             "iv_daily_refresh",
-            "learning_train",
+            "paper_auto_execute",
+            "alpaca_order_sync",
         ]
         for task_name in expected:
             assert task_name in TASKS, f"Missing expected task: {task_name}"
@@ -496,7 +495,9 @@ class TestDryRun:
             "TASK_SIGNING_SECRET": "test-secret",
             "BASE_URL": "https://api.example.com",
         }):
-            with patch("run_signed_task.check_time_gate", return_value=True):
+            # check_time_gate returns None to RUN (a truthy string is a SKIP
+            # reason) — mock None so the dry-run path is reached.
+            with patch("run_signed_task.check_time_gate", return_value=None):
                 # Patch requests.post to verify it's not called
                 with patch("run_signed_task.requests.post") as mock_post:
                     result = run_task(
@@ -516,7 +517,9 @@ class TestDryRun:
             "TASK_SIGNING_SECRET": "test-secret",
             "BASE_URL": "https://api.example.com",
         }):
-            with patch("run_signed_task.check_time_gate", return_value=True):
+            # check_time_gate returns None to RUN (a truthy string is a SKIP
+            # reason) — mock None so the dry-run request-logging path is reached.
+            with patch("run_signed_task.check_time_gate", return_value=None):
                 run_task(
                     task_name="suggestions_open",
                     user_id="test-user",
@@ -571,12 +574,15 @@ class TestVerboseResponseTasks:
     """Tests for verbose response JSON printing."""
 
     def test_verbose_tasks_constant_contains_paper_tasks(self):
-        """VERBOSE_RESPONSE_TASKS should contain all paper pipeline tasks."""
+        """VERBOSE_RESPONSE_TASKS should contain all paper pipeline tasks.
+        (paper_safety_close_one was retired; paper_exit_evaluate and
+        paper_mark_to_market were added — this mirrors the current CLI set.)"""
         expected_tasks = {
             "paper_process_orders",
             "paper_auto_execute",
             "paper_auto_close",
-            "paper_safety_close_one",
+            "paper_exit_evaluate",
+            "paper_mark_to_market",
         }
         assert expected_tasks == VERBOSE_RESPONSE_TASKS
 
@@ -595,10 +601,11 @@ class TestVerboseResponseTasks:
         with patch.dict(os.environ, {}, clear=True):
             assert _should_print_response_json("paper_auto_close") is True
 
-    def test_should_print_for_paper_safety_close_one(self):
-        """Should return True for paper_safety_close_one task."""
+    def test_should_print_for_paper_exit_evaluate(self):
+        """Should return True for paper_exit_evaluate task (a current member of
+        VERBOSE_RESPONSE_TASKS; paper_safety_close_one was retired)."""
         with patch.dict(os.environ, {}, clear=True):
-            assert _should_print_response_json("paper_safety_close_one") is True
+            assert _should_print_response_json("paper_exit_evaluate") is True
 
     def test_should_not_print_for_suggestions_open(self):
         """Should return False for suggestions_open (not a verbose task)."""

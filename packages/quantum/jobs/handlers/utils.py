@@ -1,11 +1,23 @@
 import asyncio
 import logging
-from datetime import datetime
 from typing import List, Any, Tuple
 from supabase import create_client, Client
 from packages.quantum.security.secrets_provider import SecretsProvider
+from packages.quantum.services.market_session import (
+    MarketCalendarUnavailable,
+    get_market_session,
+)
 
 logger = logging.getLogger(__name__)
+
+# Re-export so entry consumers can catch the fail-closed signal from one place.
+__all__ = [
+    "get_admin_client",
+    "get_active_user_ids",
+    "is_market_day",
+    "MarketCalendarUnavailable",
+    "run_async",
+]
 
 def get_admin_client() -> Client:
     """Initializes and returns a Supabase admin client."""
@@ -47,26 +59,31 @@ def get_active_user_ids(client: Client) -> List[str]:
         raise
 
 def is_market_day() -> Tuple[bool, str]:
+    """Is today a US equity trading day? Returns ``(is_trading_day, reason)``.
+
+    Holiday- AND half-day-aware: delegates to the canonical broker-calendar
+    source (``services/market_session.get_market_session``), the same broker
+    truth the intraday monitor and reentry cooldown trust. This REPLACES the
+    prior weekday-only check whose docstring falsely claimed "the scheduler
+    already handles" holidays — APScheduler's CronTrigger fires mon–fri
+    regardless of exchange holidays (F-A10-HOLIDAY).
+
+    RAISES ``MarketCalendarUnavailable`` when the broker calendar cannot be
+    read. This is the fail-closed signal for ENTRY paths (they must generate no
+    entries + surface typed job truth, never silently fall back to weekday
+    logic). A successfully-determined non-trading day returns
+    ``(False, reason)`` — it is NOT an error. Callers that must not be blocked
+    by a transient calendar outage (non-entry / exit-management paths) catch
+    the exception and preserve their prior always-ran semantics.
     """
-    Fast check: is today a US equity trading day?
-    Returns (is_open, reason).
-
-    Checks weekday only (no holiday calendar — scheduler already handles this).
-    For jobs that should only run on trading days, call this before doing any work.
-    """
-    try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        from backports.zoneinfo import ZoneInfo
-
-    now = datetime.now(ZoneInfo("America/Chicago"))
-    weekday = now.weekday()
-
-    if weekday >= 5:
-        day_name = "Saturday" if weekday == 5 else "Sunday"
-        return False, f"weekend ({day_name})"
-
-    return True, f"trading_day (Chicago {now.strftime('%H:%M')})"
+    session = get_market_session()
+    if not session.is_trading_day:
+        return False, f"market_closed (non-trading day {session.session_date})"
+    reason = f"trading_day ({session.session_date}"
+    if session.is_early_close:
+        reason += f", early_close {session.close_at:%H:%M ET}"
+    reason += ")"
+    return True, reason
 
 
 def run_async(coro: Any) -> Any:

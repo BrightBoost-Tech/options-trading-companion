@@ -8,11 +8,28 @@ Tests the admin authentication logic including:
 - Audit logging
 """
 
+import sys
+import types
 import pytest
 import json
 import jwt
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi import HTTPException
+
+# Windows-local shim ONLY: importing ``rq`` calls
+# ``multiprocessing.get_context('fork')`` at import time, which raises on
+# Windows (the known local '9 fork uncollectable files' class). The
+# admin-auth endpoints import test transitively imports
+# packages.quantum.jobs.endpoints -> jobs.rq_enqueue -> ``from rq import
+# Queue``. On CI (Linux) the real ``rq`` imports fine and this is a no-op —
+# the shim engages only where ``rq`` itself cannot load. Same pattern as
+# test_api_info_disclosure.py / test_shadow_fleet_activation_route.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
 
 from packages.quantum.security.admin_auth import (
     verify_admin_access,
@@ -22,13 +39,6 @@ from packages.quantum.security.admin_auth import (
     reload_admin_user_ids,
     AdminAuthResult,
     ADMIN_USER_IDS,
-)
-
-# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
-# [Cluster A] reload() on mocked module
-# Tracked in #768 (umbrella: #767).
-pytestmark = pytest.mark.skip(
-    reason='[Cluster A] reload() on mocked module; tracked in #768',
 )
 
 

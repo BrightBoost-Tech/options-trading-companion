@@ -1264,6 +1264,32 @@ class MarketDataTruthLayer:
 
         return (to_float(price_raw), to_int(ts_raw))
 
+    @staticmethod
+    def _extract_provider_oi_date(payload: Optional[Dict]) -> Tuple[Optional[Any], Optional[str]]:
+        """Genuine provider-supplied OI observation date + the field it came from.
+
+        OI observation-date provenance is only observable when the provider
+        payload ACTUALLY carries it. Alpaca exposes ``open_interest_date`` on the
+        trading ``/v2/options/contracts`` endpoint (snake_case) and camelCase
+        ``openInterestDate`` on snapshot-style payloads; Polygon's
+        ``/v3/snapshot/options`` returns ``open_interest`` but NO dedicated OI
+        observation-date field (only per-section ``last_updated`` bar timestamps,
+        which are a bar-update time, NOT an OI observation date, and must never be
+        used as one). We therefore read ONLY real OI-date fields — never a
+        retrieval time or an unrelated bar/quote timestamp.
+
+        Returns ``(raw_value, field_name)`` when a genuine field is present and
+        non-null, else ``(None, None)``. A present-but-malformed value is threaded
+        through and TYPED downstream (never fabricated into a date here).
+        """
+        if not isinstance(payload, dict):
+            return None, None
+        for field in ("open_interest_date", "openInterestDate"):
+            val = payload.get(field)
+            if val is not None:
+                return val, field
+        return None, None
+
     def _parse_snapshot_item(self, item: Dict) -> Dict:
         """
         Parses a Polygon snapshot item into our canonical format.
@@ -1759,6 +1785,12 @@ class MarketDataTruthLayer:
         opt_type = parsed.get("type", "")
         right_val = "call" if opt_type == "C" else "put" if opt_type == "P" else opt_type.lower()
 
+        # OI observation-date provenance: thread it ONLY when the provider payload
+        # genuinely carries it (typically the /v2/options/contracts fields merged
+        # onto the snap); absent → None → typed provider_date_unavailable
+        # downstream. retrieved_ts below is the SEPARATE retrieval/known-at time.
+        oi_obs_date, oi_date_field = self._extract_provider_oi_date(snap)
+
         return {
             "contract": f"O:{occ_symbol}",
             "underlying": underlying,
@@ -1780,6 +1812,8 @@ class MarketDataTruthLayer:
             },
             "oi": snap.get("openInterest"),
             "volume": snap.get("dailyBar", {}).get("v"),
+            "open_interest_date": oi_obs_date,
+            "oi_date_field": oi_date_field,
             "retrieved_ts": datetime.utcnow().isoformat(),
             "provider_ts": None,
             "source": "alpaca",
@@ -1834,6 +1868,12 @@ class MarketDataTruthLayer:
 
                 provider_ts = quote_ts or trade_ts
 
+                # OI observation-date provenance: only when Polygon genuinely
+                # supplies an OI date field (the snapshot does not today — this
+                # captures it if/when present, else typed unavailable). NEVER
+                # inferred from provider_ts / day.last_updated (a bar-update time).
+                oi_obs_date, oi_date_field = self._extract_provider_oi_date(item)
+
                 all_contracts.append({
                     "contract": details.get("ticker"),
                     "underlying": underlying,
@@ -1855,6 +1895,8 @@ class MarketDataTruthLayer:
                     },
                     "oi": item.get("open_interest"),
                     "volume": item.get("day", {}).get("volume"),
+                    "open_interest_date": oi_obs_date,
+                    "oi_date_field": oi_date_field,
                     "retrieved_ts": datetime.utcnow().isoformat(),
                     "provider_ts": provider_ts,
                     "source": "polygon"

@@ -214,10 +214,15 @@ class TestBuildOIByContract(unittest.TestCase):
 
     def test_open_interest_and_date_fallbacks(self):
         chain = [{"contract": "TEST100C", "open_interest": 900,
-                  "open_interest_date": "2026-07-18"}]
+                  "open_interest_date": "2026-07-18",
+                  "oi_date_field": "open_interest_date",
+                  "retrieved_ts": "2026-07-18T20:00:00Z"}]
         m = _build_oi_by_contract(chain)
         self.assertEqual(m["TEST100C"]["oi"], 900)
-        self.assertEqual(m["TEST100C"]["oi_known_at"], "2026-07-18")
+        # Genuine observation date + retrieval time threaded SEPARATELY.
+        self.assertEqual(m["TEST100C"]["oi_observation_date"], "2026-07-18")
+        self.assertEqual(m["TEST100C"]["oi_retrieved_at"], "2026-07-18T20:00:00Z")
+        self.assertEqual(m["TEST100C"]["oi_date_field"], "open_interest_date")
 
     def test_garbage_entries_skipped_and_fail_soft(self):
         chain = ["not-a-dict", {"no_ticker": 1},

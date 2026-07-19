@@ -15,8 +15,13 @@ rem   - enforces a hard timeout, writes an UNCONDITIONAL end marker, and
 rem   - only pings the dead-man when the completion contract is met.
 rem
 rem The shim's only jobs: locate a Python 3.11 interpreter and launch the
-rem wrapper, capturing any python-level traceback into cron.log as a last
-rem resort. The wrapper writes its own start/heartbeat/end markers directly.
+rem wrapper, capturing its stdout narration + any python-level traceback into
+rem cron.log via the >> redirect below. The wrapper writes its DURABLE
+rem start/heartbeat/end markers to its own runner-owned sidecar
+rem audit\runner-markers.log (NOT cron.log — the shim holds cron.log open via
+rem this same >> redirect, and a second open of it triggered the Windows
+rem sharing violation that silently dropped every marker). The completion
+rem contract re-reads runner-markers.log, so that sidecar is the evidence sink.
 rem ====================================================================
 cd /d C:\options-trading-companion
 

@@ -35,7 +35,7 @@ import logging
 import os
 import re
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,110 @@ OI_FLOOR_REFERENCES: Dict[int, str] = {
 }
 DEFAULT_OI_FLOOR_CANDIDATES: List[int] = [100, 250, 500, 1000]
 
+# OI is EOD prior-session data; a genuine observation date is "fresh" if it is
+# within this many days of the retrieval reference (default tolerates a long
+# weekend + a holiday). Env override OI_OBSERVATION_MAX_AGE_DAYS.
+DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS = 4
+
+
+def oi_observation_max_age_days() -> int:
+    """Freshness horizon (days) for a genuine OI observation date.
+
+    Env override ``OI_OBSERVATION_MAX_AGE_DAYS`` (non-negative int); else the
+    default. Bad/negative values fall back to the default (never crash the
+    observe-only recorder).
+    """
+    raw = os.getenv("OI_OBSERVATION_MAX_AGE_DAYS", "").strip()
+    if not raw:
+        return DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
+    return v if v >= 0 else DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
+
+
+def _normalize_oi_date(raw: Any) -> tuple:
+    """Normalize a provider OI OBSERVATION date to an ISO 'YYYY-MM-DD' string.
+
+    Returns ``(iso_date_or_None, status)`` where status is one of:
+      * ``"absent"``    — no date supplied (None/empty) → provider_date_unavailable
+      * ``"malformed"`` — a value was supplied but is not a parseable date →
+                          typed unavailable, NEVER a fabricated date
+      * ``"ok"``        — a genuine date; iso_date is 'YYYY-MM-DD'
+
+    A RETRIEVAL timestamp is never passed here — this is the observation date
+    only (H9: a value you cannot observe is not invented from when you fetched
+    it).
+    """
+    if raw is None:
+        return None, "absent"
+    if isinstance(raw, datetime):
+        return raw.date().isoformat(), "ok"
+    if isinstance(raw, date):
+        return raw.isoformat(), "ok"
+    s = str(raw).strip()
+    if not s:
+        return None, "absent"
+    # Accept date or datetime ISO forms; keep the date component only.
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date().isoformat(), "ok"
+    except ValueError:
+        pass
+    try:
+        return date.fromisoformat(s[:10]).isoformat(), "ok"
+    except ValueError:
+        return None, "malformed"
+
+
+def _oi_reference_date(retrieved_at: Any) -> date:
+    """Reference 'now' for freshness — the RETRIEVAL date if available, else
+    today (UTC).
+
+    Retrieval time is used ONLY as the comparison anchor; it never becomes the
+    observation date. Keeping the two separate is the whole point of the fix.
+    """
+    iso, status = _normalize_oi_date(retrieved_at)
+    if status == "ok" and iso is not None:
+        try:
+            return date.fromisoformat(iso)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).date()
+
+
+def _compute_oi_freshness(obs_iso: Optional[str], status: str,
+                          retrieved_at: Any) -> tuple:
+    """Freshness computed ONLY from a real observation date.
+
+    Returns ``(freshness, age_days)``:
+      * ``("provider_date_unavailable", None)`` — no genuine observation date
+      * ``("malformed_date", None)``            — supplied date unparseable
+      * ``("fresh"|"stale", age_days)``         — real date; age vs the retrieval
+                                                  reference (fresh ≤ horizon)
+    """
+    if status == "absent":
+        return "provider_date_unavailable", None
+    if status == "malformed" or obs_iso is None:
+        return "malformed_date", None
+    try:
+        obs = date.fromisoformat(obs_iso)
+    except (TypeError, ValueError):
+        return "malformed_date", None
+    age_days = (_oi_reference_date(retrieved_at) - obs).days
+    freshness = "fresh" if age_days <= oi_observation_max_age_days() else "stale"
+    return freshness, age_days
+
+
+def _oi_date_provenance(source: Any, field: Optional[str], status: str) -> str:
+    """Explicit which-provider / which-field label for the OI observation date."""
+    src = str(source or "unknown")
+    if status == "absent":
+        return "provider_date_unavailable"
+    if status == "malformed":
+        return f"{src}:{field}:malformed_date" if field else f"{src}:malformed_date"
+    return f"{src}:{field}" if field else f"{src}:observation_date"
+
 
 def oi_floor_candidates() -> List[int]:
     """Hypothetical OI floors for the observe-only counterfactual.
@@ -239,6 +343,14 @@ def resolve_leg_oi(
     own stamped ``oi`` if the scanner attached one, else the per-cycle
     ``oi_by_contract`` map keyed by BARE OCC contract. Missing OI is typed
     UNAVAILABLE with a reason — NEVER zero.
+
+    OI observation-date provenance: the GENUINE provider OI date
+    (``oi_observation_date``) is kept SEPARATE from the retrieval/known-at time
+    (``oi_retrieved_at``); ``oi_freshness`` is computed ONLY from the observation
+    date, never inferred from retrieval. A provider that supplies no date stays
+    typed ``provider_date_unavailable``; a malformed date → ``malformed_date``
+    (never a fabricated date). ``oi_date_provenance`` names which provider/field
+    supplied the date.
     """
     contract = _bare(leg.get("symbol"))
     src = (oi_by_contract or {}).get(contract)
@@ -247,10 +359,23 @@ def resolve_leg_oi(
     raw_oi = leg.get("oi", src.get("oi"))
     raw_vol = leg.get("oi_volume", leg.get("volume", src.get("volume")))
     oi_source = leg.get("oi_source", src.get("source")) or "unknown"
-    oi_known_at = leg.get("oi_known_at", src.get("oi_known_at"))
+    # Observation date (genuine provider OI date) — stored separately from the
+    # retrieval time. Accept the legacy ``oi_known_at`` stamp as an observation
+    # date only when no explicit observation date is present.
+    raw_obs_date = leg.get("oi_observation_date", src.get("oi_observation_date"))
+    if raw_obs_date is None:
+        raw_obs_date = leg.get("oi_known_at", src.get("oi_known_at"))
+    oi_retrieved_at = leg.get("oi_retrieved_at", src.get("oi_retrieved_at"))
+    oi_date_field = leg.get("oi_date_field", src.get("oi_date_field"))
+
     oi = coerce_oi(raw_oi)
     vol = coerce_oi(raw_vol)
     available = oi is not None
+
+    obs_iso, date_status = _normalize_oi_date(raw_obs_date)
+    freshness, age_days = _compute_oi_freshness(obs_iso, date_status, oi_retrieved_at)
+    date_provenance = _oi_date_provenance(oi_source, oi_date_field, date_status)
+
     return {
         "contract": contract,
         "oi": oi,                       # int incl. 0, or None (unavailable)
@@ -258,11 +383,14 @@ def resolve_leg_oi(
         "oi_unavailable_reason": None if available else "oi_absent_from_snapshot",
         "oi_source": str(oi_source),
         "oi_volume": vol,
-        "oi_known_at": oi_known_at,     # None when the snapshot path carries no OI ts
-        # The snapshot/chain path has no OI-specific timestamp (the
-        # open_interest_date only rides get_option_contracts, not wired
-        # here). Freshness is honestly typed-unknown when known_at is absent.
-        "oi_freshness": "known_at_unavailable" if oi_known_at is None else "known_at_present",
+        # OI observation date (genuine provider date only) — None when the
+        # provider carries no OI date; freshness derives from THIS, never from
+        # the retrieval time held separately below.
+        "oi_observation_date": obs_iso,          # 'YYYY-MM-DD' or None (typed unavailable)
+        "oi_observation_age_days": age_days,     # int (days vs retrieval/today) or None
+        "oi_retrieved_at": oi_retrieved_at,      # retrieval/known-at — SEPARATE from obs date
+        "oi_date_provenance": date_provenance,   # "<source>:<field>" | provider_date_unavailable | ...:malformed_date
+        "oi_freshness": freshness,               # fresh | stale | provider_date_unavailable | malformed_date
     }
 
 
@@ -640,9 +768,10 @@ class QuoteProvenanceRecorder:
         the recorder computes nothing that could disagree with the gate.
 
         ``oi_by_contract`` (Lane H, observe-first): per-cycle bare-OCC →
-        {oi, volume, source, oi_known_at} map from the chain, used ONLY to
-        stamp exact-leg OI and hypothetical-floor counterfactuals into the
-        row's ``details`` (no gate — see compute_oi_counterfactuals).
+        {oi, volume, source, oi_observation_date, oi_retrieved_at,
+        oi_date_field} map from the chain, used ONLY to stamp exact-leg OI +
+        observation-date provenance and hypothetical-floor counterfactuals into
+        the row's ``details`` (no gate — see compute_oi_counterfactuals).
         """
         if not self._enabled:
             return
@@ -707,7 +836,10 @@ class QuoteProvenanceRecorder:
                     "oi_unavailable_reason": oi_info["oi_unavailable_reason"],
                     "oi_source": oi_info["oi_source"],
                     "oi_volume": oi_info["oi_volume"],
-                    "oi_known_at": oi_info["oi_known_at"],
+                    "oi_observation_date": oi_info["oi_observation_date"],
+                    "oi_observation_age_days": oi_info["oi_observation_age_days"],
+                    "oi_retrieved_at": oi_info["oi_retrieved_at"],
+                    "oi_date_provenance": oi_info["oi_date_provenance"],
                     "oi_freshness": oi_info["oi_freshness"],
                 })
 
@@ -766,7 +898,10 @@ class QuoteProvenanceRecorder:
                                 "oi_unavailable_reason": r["oi_unavailable_reason"],
                                 "oi_source": r["oi_source"],
                                 "oi_volume": r["oi_volume"],
-                                "oi_known_at": r["oi_known_at"],
+                                "oi_observation_date": r["oi_observation_date"],
+                                "oi_observation_age_days": r["oi_observation_age_days"],
+                                "oi_retrieved_at": r["oi_retrieved_at"],
+                                "oi_date_provenance": r["oi_date_provenance"],
                                 "oi_freshness": r["oi_freshness"],
                             }
                             for r in leg_oi_rows

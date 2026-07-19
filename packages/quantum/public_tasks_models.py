@@ -616,7 +616,10 @@ class ShadowFleetActivationPayload(TaskPayloadBase):
         default=None,
         description="Activate step: operator attestation with "
                     "stale_order_reconciliation_receipt, "
-                    "legacy_terminal_verified_at (tz-aware ISO), attested_by"
+                    "legacy_terminal_verified_at (tz-aware ISO), attested_by, "
+                    "and expected_binding_fingerprint (SHA-256 hex of the "
+                    "server-derived binding manifest; the RPC re-derives and "
+                    "must match it — V17-2)"
     )
 
     @field_validator("user_id")

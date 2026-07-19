@@ -4,6 +4,55 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR (fable + opus; serialized) · status:shipped
+
+Full record: `docs/review/parallel-implementation-results-2026-07-19.md`. **Six merges**, each
+adversarially reviewed, serialized, per-merge all-services deploy SUCCESS (VERIFIED-GITHUB +
+VERIFIED-DEPLOYMENT). Serialized order #1290→#1289→#1291→#1293→#1294→#1292; final code main
+**`4851ec8d`**. **ZERO broker / production-DB-write / migration / env / fleet mutations this run.**
+
+- **#1290 `89a736807`** D3 ratio-blindness FIXED — `leg_full_contract_count` owner helper; a 1×2
+  ratio spread now scales to 150 (was ratio-blind); a 1:1 structure is byte-identical to the
+  pre-fix path; `check_greeks` + `compute_stress_scenarios` both migrated to the helper. **§8 D3
+  ratio-blindness line now RESOLVED** (the last-pinned greek defect).
+- **#1289 `b3f10031`** TCM v2 realized-accrual reporting — no schema; the join spine (v2 stamp →
+  realized close) is proven; **0 / 528 v2 stamps exist yet** — v2 accrues on post-#1278 cycles, so
+  the report is empty-by-construction today (accrues naturally forward).
+- **#1291 `bd87025f`** SQL-mirror parity fixtures — 6 families, 78 tests; **ZERO defects found**
+  (the SQL mirror already agreed with the Python path across all six families).
+- **#1293 `d60b7ad0`** fork/collection sweep — root cause = rq fork-context at import; 6 files
+  fixed; 12-file subprocess harness; **full-suite collection now 0 errors** (closes the
+  fork-uncollectable P2 tail).
+- **#1294 `21e88e5f`** seven owner-decision packets — `docs/review/owner-packet-1..7`:
+  (1) activation-after-Sunday+Monday · (2) RETAIN `h7_dropped` · (3) E19 minimum = **8** (alt 15) ·
+  (4) single-leg opt-in = two NEW draft registry rows + matched controls · (5) TCM N = **15**
+  (alt 10) · (6) taper `[800,1000]` band · (7) greek caps Plan A staged.
+- **#1292 `4851ec8d`** single-leg hard veto at the REAL submit seam — `should_submit_to_broker`
+  guard at **4 sites**; byte-identity proven against 100% of live rows; VRP second gate (resolves
+  #1287's C1); raw-jsonb registry opt-in lookup, **0 / 50 enabled** → veto stays DARK; two repair
+  cycles synced stage-route fake signatures. (Lands the veto at the seam #1287's reviewer R1
+  identified — `execute_order` guard host was DORMANT.)
+
+**Fleet DRY-RUN (Phase 1, READ-ONLY) — VERIFIED-DB (reads only, NO writes):** registry 50 / 50
+approved, per-row hashes recompute-clean; fleet counts BEFORE == AFTER byte-identical (1 fleet
+`pending_legacy_terminal` / 50 inactive / 0 active / 0 bindings / 50 `shadow_only` / 0 receipts);
+binding manifest fingerprint
+`6f8d14995ff4371bf940364d90bf82de1faff188823cf3e61280b81740836bad` (`ORDER BY
+policy_registration_id ASC`; anchors slots 17 / 33 / 50); **all 13 replicated checks PASS ⇒
+`READY_TO_ACTIVATE`**. Artifacts (manifest JSON + dry-run md) in the ops bundle (outside repo).
+**ACTIVATION REMAINS FORBIDDEN** — no un-activate RPC exists (reversal = retire path), so it is
+irreversible-in-place and owner-gated; recorded as read-only replication, not service invocation.
+
+**Dark/observe-only states (nothing armed):** single-leg DARK 0-opt-in (veto now owns the real
+seam) · TCM v2 observe-only (frozen model retains authority) · taper DARK · greek caps 0 · OI
+no-gate · E19-2B BLOCKED (§7 minimum now recommended 8/alt 15, unratified) · event-review inert.
+Operator checkout **clean-behind** at hash `5c6ae8bf…` (fast-forward pull, no reconciliation this
+run). UI still Palette-owned. `ACTIVATE_FLEET=false`; `entries_paused` untouched.
+
+**Owner decisions still OPEN (the seven #1294 packets):** fleet ACTIVATION (first, after
+Sunday/Monday PASS; + attestation) · `h7_dropped` retention ratification · E19 §7 minimum ·
+single-leg opt-in designation · TCM promotion N · taper activation band · greek-cap arming.
+
 ## 2026-07-19 — OWNER-DECISIONS ORCHESTRATOR (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/owner-decisions-implementation-2026-07-19.md`. **Ten merges**, each

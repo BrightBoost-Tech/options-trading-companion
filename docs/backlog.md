@@ -10,7 +10,51 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — OWNER-DECISIONS ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+## 2026-07-19 — PARALLEL IMPLEMENTATION ORCHESTRATOR CLOSED (authoritative standing; supersedes older queue text)
+
+Main pointer: verify on Railway/GitHub (closed at `4851ec8d` + docs; all four services
+deploy-verified per merge). **MERGED+DEPLOYED (6; serialized #1290→#1289→#1291→#1293→#1294→#1292,
+each adversarially reviewed):** #1290 `89a736807` (D3 ratio-blindness FIXED —
+`leg_full_contract_count` helper; 1×2→150; 1:1 byte-identical; `check_greeks` + stress migrated;
+**§8 D3 line now RESOLVED**) · #1289 `b3f10031` (TCM v2 realized-accrual reporting; no schema; join
+spine proven; **0/528 v2 stamps yet** — accrues post-#1278 cycles) · #1291 `bd87025f` (SQL-mirror
+parity fixtures; 6 families / 78 tests; **ZERO defects found**) · #1293 `d60b7ad0` (fork/collection
+sweep; root cause rq fork-context; 6 files fixed + 12-file subprocess harness; **full-suite
+collection 0 errors**) · #1294 `21e88e5f` (seven owner-decision packets `docs/review/owner-packet-1..7`:
+activation-after-Sunday+Monday · RETAIN `h7_dropped` · E19 minimum **8** (alt 15) · single-leg opt-in
+= two NEW draft registry rows + matched controls · TCM N **15** (alt 10) · taper `[800,1000]` band ·
+greek caps Plan A staged) · #1292 `4851ec8d` (single-leg hard veto at the REAL submit seam —
+`should_submit_to_broker` at 4 sites; byte-identity vs 100% of live rows; VRP second gate resolves
+#1287 C1; raw-jsonb registry opt-in lookup **0/50 enabled** → DARK; two repair cycles). **FLEET
+DRY-RUN (Phase 1, READ-ONLY; NO writes):** registry 50/50 approved, hashes recompute-clean; fleet
+counts BEFORE==AFTER byte-identical (1 `pending_legacy_terminal` / 50 inactive / 0 active / 0
+bindings / 50 `shadow_only` / 0 receipts); binding manifest fingerprint
+`6f8d14995ff4371bf940364d90bf82de1faff188823cf3e61280b81740836bad` (`ORDER BY
+policy_registration_id ASC`; anchors 17/33/50); **all 13 replicated checks PASS ⇒
+`READY_TO_ACTIVATE`**; artifacts in the ops bundle. **ACTIVATION REMAINS FORBIDDEN** (no
+un-activate RPC — reversal = retire path); recorded as read-only replication, not service
+invocation. **ZERO broker / production-DB-write / migration / env / fleet mutations this run;
+`ACTIVATE_FLEET=false`; `entries_paused` untouched.** States: single-leg DARK 0-opt-in · TCM v2
+observe-only · taper DARK · greek caps 0 · OI no-gate · E19-2B BLOCKED · event-review inert ·
+operator checkout clean-behind (`5c6ae8bf…`) · UI still Palette-owned. Full record:
+`docs/review/parallel-implementation-results-2026-07-19.md`.
+
+Re-ranked build order (verified outcomes only):
+1. **Runtime handoffs (not build slots):** Sunday nightly under the wrapper (verify wrapper-flow
+   run) · Monday natural evidence — now incl. `h7_subreason`-typed finals, exact-leg OI capture,
+   scan-time spot on staged rows, first TCM-v2 stamps, and D3-corrected greeks on ratio structures.
+2. **Owner decisions (the seven #1294 packets):** fleet **ACTIVATION first** (after Sunday+Monday
+   PASS; + attestation, the 50 slots bind at activation from the 50 approved registry ids) ·
+   `h7_dropped` retention · E19 minimum (8/alt 15) · single-leg opt-in (two new draft registry
+   rows) · TCM promotion N (15/alt 10) · taper band (`[800,1000]`) · greek-cap arming (Plan A).
+3. **⑤ + event-review natural accrual:** accumulate natural scorable outcomes; the #1286
+   event-driven review fires on the first scorable close.
+4. **Remaining wiring:** single-leg contract selection (the veto guards the seam; contract
+   selection for opted-in policies is the next slice) · TCM v2 multi-fill accrual coverage.
+5. **Cap / taper / OI / TCM activation decisions per the packets** (each consumes item-1 evidence).
+6. **E19-2B** after fleet activation (epoch) + the ratified §7 minimum.
+
+## 2026-07-19 — OWNER-DECISIONS ORCHESTRATOR CLOSED (superseded by the parallel-implementation standing above)
 
 Main pointer: verify on Railway/GitHub (closed at `cef4e600` + docs; all four services
 deploy-verified per merge). **MERGED+DEPLOYED (10):** #1278 `1d1951d8` (TCM v2 dual-run,

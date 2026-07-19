@@ -437,6 +437,32 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   BLOCKED_OPERATOR_PULL_CONFLICT (dirty audit/ledger.md +281; patch +
   handoff in bundle) — the nightly wrapper flow starts only after the
   operator pull. Zero migrations/production-DB/broker/fleet actions.
+  **07-19 OWNER-DECISIONS run** (`docs/review/
+  owner-decisions-implementation-2026-07-19.md`): ten merges, adversarial
+  review + per-merge deploy each — #1278 1d1951d8 TCM v2 dual-run
+  (observe-only) · #1280 79f4ba76 F-BAN phantom REMOVED (no-op by
+  construction; `settings.banned_strategies` drift column ledgered to drop
+  later) · #1282 3c3874e1 greek-cap alert-only counterfactual (caps 0) ·
+  #1281 4c12dafa H7 typed subreason (owner ratification OPEN) · #1279
+  78c71a8e versioned policy registry + 3-anchor/47-variant design · #1283
+  ed5d6f48 tier taper DARK · #1284 7d95f143 E19-2B protocol v2 FROZEN (hash
+  50e7e237…; BLOCKED on §7 minimum) · #1285 e161714f exact-leg OI capture
+  (NO gate) · #1287 9b63dcc1 single-leg experiment DARK · #1286 cef4e600
+  event-driven model review (inert until natural trigger). **Three
+  migrations APPLIED via the migration procedure (receipts in risk_alerts;
+  NEVER REAPPLY):** `policy_registrations` (receipt eac6a4b9…) · 50-row
+  approved seed in one fingerprinted txn (receipt 14ca10ab…; 50 rows / 50
+  distinct hashes / 0 mismatches / lineage 17-17-16) · `h7_subreason_check`
+  NOT VALID+VALIDATEd (receipt 6c49ce87…). **Fleet PROVISIONED INACTIVE**:
+  `b8b1ea1f…` status pending_legacy_terminal, 50 inactive $2,000 slots / 50
+  shadow_only portfolios / 0 bindings, idempotency PROVEN (re-run →
+  already_provisioned, 0 writes); **`ACTIVATE_FLEET=false` — NOT activated**.
+  Dark states: taper DARK · greek caps counterfactual-only · TCM v2
+  observe-only · single-leg DARK · OI observe-first no-gate · E19-2B BLOCKED
+  · event-review inert-until-trigger · UI BLOCKED_UI_FILE_OWNERSHIP. Ledger
+  reconciliation Phase 1 = 0 PRESERVE / 4 REJECT (local +281 pure lag);
+  operator checkout fast-forwarded to main; the nightly wrapper is now LIVE.
+  Zero broker writes; zero fleet activation; entries_paused untouched.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -873,16 +899,23 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-18 Sat-night run)
+## Current overnight standing (2026-07-16; updated through the 07-19 owner-decisions run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
   semantics. Fleet schema applied 07-17 (`20260717052208`); the fleet
-  RPC + dispositions + quote-provenance migrations applied 07-18; **no fleet
-  is provisioned or active** (0 rows). The seven activation blockers were
-  RESOLVED 07-18 (weekend run) — the legacy-terminal boundary is clean;
-  provisioning remains BLOCKED on the owner manifest (50 policy ids + the
-  `FLEET_ACTIVATION_AUTHORIZED=1` env window).
+  RPC + dispositions + quote-provenance migrations applied 07-18; the
+  `policy_registrations` migration + `h7_subreason_check` constraint applied
+  07-19. The seven activation blockers were RESOLVED 07-18 (weekend run) —
+  the legacy-terminal boundary is clean. **07-19: the fleet is now PROVISIONED
+  INACTIVE** — fleet `b8b1ea1f…` status `pending_legacy_terminal`, 50 inactive
+  `$2,000` slots / 50 `shadow_only` portfolios / 0 policy bindings, and **50
+  approved policies are registered** (seed receipt `14ca10ab…`; NEVER
+  REAPPLY). **`ACTIVATE_FLEET=false` — the fleet is NOT active; ACTIVATION
+  (with owner attestation, binding the 50 slots to the 50 approved registry
+  ids) is the ONLY remaining owner-gated fleet step.** F-BAN was removed
+  07-19 (#1280) — a phantom feature; do not cite `banned_strategies`
+  enforcement as live.
 - #1228 is a draft read-only persisted-tape hash/count verifier with an
   operator-triggered job path. It is unscheduled and does not prove full
   deterministic strategy replay.

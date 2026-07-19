@@ -38,6 +38,8 @@ _CALL = (
     "%s::numeric,%s::numeric,%s::numeric,%s::numeric)"  # qty, mag, realized_pl, mult
 )
 
+_CALL_PROV = _CALL[:-1] + ",%s::text,%s::numeric)"  # + p_fill_quality, p_fill_mid_reference
+
 _REASON = "target_profit_hit"
 _SOURCE = "exit_evaluator"
 
@@ -413,3 +415,72 @@ def test_no_broker_or_live_path_mutation(conn):
     # no extra rows manufactured
     assert int(_scalar(cur, "select count(*) from paper_orders", ())) == 1
     assert int(_scalar(cur, "select count(*) from paper_positions", ())) == 1
+
+
+# ─────────────── FIX 1: live-order isolation (never ghost-fill a broker order) ─
+def test_reject_live_execution_mode(conn):
+    """An order with execution_mode='alpaca_live' is the broker-filled cohort;
+    internally committing it is the ghost-position class (doctrine §9). Reject,
+    zero writes."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u, routing="shadow_only")
+    pos = _mk_position(cur, u, pf, qty=2)
+    od = _mk_order(cur, u, pf, pos, execution_mode="alpaca_live")
+    _commit_err(cur, _args(u, pf, pos, od), "live_order_forbidden")
+    _assert_clean(cur, pf, pos, od, 10000.0)
+
+
+def test_reject_live_eligible_routing(conn):
+    """A 'live_eligible' portfolio is the broker book (should_submit_to_broker
+    True). The internal committer must refuse it. Reject, zero writes."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u, routing="live_eligible")
+    pos = _mk_position(cur, u, pf, qty=2)
+    od = _mk_order(cur, u, pf, pos, execution_mode="internal_paper")
+    _commit_err(cur, _args(u, pf, pos, od), "live_order_forbidden")
+    _assert_clean(cur, pf, pos, od, 10000.0)
+
+
+# ─────────────── FIX 2: non-finite numerics never poison the book ─────────────
+@pytest.mark.parametrize("field", ["mag", "qty", "mult", "realized"])
+@pytest.mark.parametrize("badval", [float("nan"), float("inf"), float("-inf")])
+def test_reject_non_finite_inputs(conn, field, badval):
+    """NaN/±Infinity on ANY numeric input is rejected BEFORE derivation — the
+    `<= 0` guards miss NaN/+Inf (Postgres orders them > everything) and a numeric
+    column would irreversibly store them into cash/realized_pl (H9)."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u)
+    pos = _mk_position(cur, u, pf, qty=2)
+    od = _mk_order(cur, u, pf, pos)
+    _commit_err(cur, _args(u, pf, pos, od, **{field: badval}), "non_finite_input")
+    _assert_clean(cur, pf, pos, od, 10000.0)
+
+
+# ─────────────── FIX 3: #1017 fill-quality provenance round-trips ─────────────
+def test_fill_quality_provenance_round_trips_both_sinks(conn):
+    """Optional p_fill_quality / p_fill_mid_reference land in BOTH the order_json
+    and the ledger metadata (so learning can weight/exclude mid-fallback fills)."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u); pos = _mk_position(cur, u, pf, qty=2); od = _mk_order(cur, u, pf, pos)
+    cur.execute(_CALL_PROV, _args(u, pf, pos, od) + ("mid_fallback", 1.87))
+    r = _decode(cur.fetchone()[0])
+    assert r["committed"] is True
+    oj = _row_json(cur, "paper_orders", od)["order_json"]
+    assert oj["fill_quality"] == "mid_fallback" and float(oj["fill_mid_reference"]) == 1.87
+    cur.execute("select metadata from paper_ledger where order_id=%s and event_type='fill'", (od,))
+    meta = _decode(cur.fetchone()[0])
+    assert meta["fill_quality"] == "mid_fallback" and float(meta["fill_mid_reference"]) == 1.87
+
+
+def test_happy_close_without_provenance_leaves_order_json_untouched(conn):
+    """The economic core is byte-unchanged: with no provenance supplied the
+    filled order's order_json stays '{}' and the ledger provenance keys are
+    NULL — the fix is purely additive."""
+    cur = conn.cursor(); u = str(uuid.uuid4())
+    pf = _mk_portfolio(cur, u); pos = _mk_position(cur, u, pf, qty=2); od = _mk_order(cur, u, pf, pos)
+    r = _commit(cur, _args(u, pf, pos, od, mag=2.00, realized=100.0))
+    assert float(r["cash_after"]) == 10400.0 and float(r["realized_pl"]) == 100.0
+    assert _row_json(cur, "paper_orders", od)["order_json"] == {}
+    cur.execute("select metadata->>'fill_quality', metadata->>'fill_mid_reference' "
+                "from paper_ledger where order_id=%s and event_type='fill'", (od,))
+    assert cur.fetchone() == [None, None]

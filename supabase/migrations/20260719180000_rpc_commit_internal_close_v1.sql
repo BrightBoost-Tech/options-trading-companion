@@ -41,6 +41,17 @@
 --      an already-closed position) -> typed reject.
 --  12. any error rolls back every write (no dblink / autonomous sub-txn).
 --
+-- POST-REVIEW HARDENING (additive guards; economic core unchanged):
+--   FIX 1 LIVE-ORDER ISOLATION — reject a broker order (execution_mode
+--         'alpaca_live', or a 'live_eligible' portfolio) BEFORE any write; an
+--         internal committer must never ghost-fill a live order (doctrine §9).
+--   FIX 2 NON-FINITE GUARD — reject NaN/±Infinity on every numeric input; the
+--         `<= 0` checks do NOT catch NaN/+Inf and a numeric column would store
+--         them, poisoning cash irreversibly (H9).
+--   FIX 3 #1017 PROVENANCE — optional p_fill_quality / p_fill_mid_reference
+--         round-trip into BOTH order_json and the ledger metadata so learning
+--         can weight/exclude mid-fallback fills.
+--
 -- SECURITY: operator-only. EXECUTE revoked from PUBLIC/anon/authenticated,
 -- granted to service_role. Fixed safe search_path. No dynamic SQL.
 --
@@ -93,7 +104,12 @@ CREATE OR REPLACE FUNCTION rpc_commit_internal_close_v1(
     p_fill_qty             numeric,   -- absolute contracts (== |position.qty|)
     p_fill_price_magnitude numeric,   -- POSITIVE per-contract executable price
     p_realized_pl          numeric,   -- computed upstream (close_math); required
-    p_multiplier           numeric DEFAULT 100
+    p_multiplier           numeric DEFAULT 100,
+    -- (FIX 3, #1017 provenance) optional fill-quality provenance the existing
+    -- route persists in BOTH order_json + ledger metadata "so learning can
+    -- weight/exclude" mid-fallback fills. Nullable/defaulted => backward-safe.
+    p_fill_quality         text    DEFAULT NULL,
+    p_fill_mid_reference   numeric DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -133,6 +149,21 @@ BEGIN
     -- equivalent of the upstream realized-P&L computation failing.
     IF p_realized_pl IS NULL THEN
         RAISE EXCEPTION 'commit_internal_close: realized_pl_required';
+    END IF;
+
+    -- ── (FIX 2) reject NON-FINITE numerics BEFORE any derivation/write ───────
+    -- Postgres numeric orders NaN and +Infinity GREATER than every value, so
+    -- the `<= 0` guards below do NOT catch them ('NaN'::numeric <= 0 is FALSE);
+    -- a numeric NOT NULL column would then STORE NaN/Inf and irreversibly poison
+    -- cash_balance / balance_after / realized_pl (H9: never let an unpriceable/
+    -- garbage value flow into the book). For numeric, `x = 'NaN'` is TRUE only
+    -- when x IS NaN (so IN-equality is the correct test; `x <> x` is NOT).
+    IF p_fill_price_magnitude IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
+       OR p_multiplier        IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
+       OR p_fill_qty          IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
+       OR p_realized_pl       IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
+    THEN
+        RAISE EXCEPTION 'commit_internal_close: non_finite_input';
     END IF;
 
     -- ── (6a) enum / domain validation (before any lock or write) ─────────────
@@ -200,6 +231,28 @@ BEGIN
     END IF;
     IF v_portfolio.user_id <> p_user_id THEN
         RAISE EXCEPTION 'commit_internal_close: portfolio_ownership_mismatch';
+    END IF;
+
+    -- ── (FIX 1) LIVE-ORDER ISOLATION — BEFORE the idempotency check / any write
+    -- This is an INTERNAL-close committer ONLY. A broker order must NEVER be
+    -- internally filled (doctrine §9's most-emphasized never-do; the 2026-04-16
+    -- ghost-position class). Two authoritative broker signals, either one
+    -- rejects: (a) execution_mode='alpaca_live' is the broker-filled marker;
+    -- (b) a 'live_eligible' portfolio is the broker book — this DB guard mirrors
+    -- the route's own P0-A gate (execution_router.should_submit_to_broker is
+    -- True iff routing_mode='live_eligible'; the internal-fill block runs only
+    -- when it is False). Placed ABOVE the marker block so even a replay of a
+    -- (hypothetically) committed live order rejects rather than returning a
+    -- 'committed' no-op — live isolation outranks everything.
+    IF v_order.execution_mode = 'alpaca_live' THEN
+        RAISE EXCEPTION
+            'commit_internal_close: live_order_forbidden (execution_mode=%)',
+            v_order.execution_mode;
+    END IF;
+    IF v_portfolio.routing_mode IS DISTINCT FROM 'shadow_only' THEN
+        RAISE EXCEPTION
+            'commit_internal_close: live_order_forbidden (routing_mode=%)',
+            v_portfolio.routing_mode;
     END IF;
 
     -- ── (5)/(10)/(11) commit-marker idempotency — BEFORE any mutation ────────
@@ -288,9 +341,11 @@ BEGIN
     v_now := now();
 
     -- ── (8b) mark the order filled + set the WRITE-ONCE commit marker ────────
-    -- Broker/live provenance columns (execution_mode, alpaca_order_id,
-    -- broker_status, broker_response, routing) are deliberately UNTOUCHED — this
-    -- is an internal-close economic commit only.
+    -- BROKER/LIVE columns (execution_mode, alpaca_order_id, broker_status,
+    -- broker_response) remain deliberately UNTOUCHED — this is an internal-close
+    -- economic commit only. order_json gets ONLY the additive #1017 fill-quality
+    -- provenance merged in (existing keys preserved), matching the route's
+    -- :2451-2452 writes so learning can weight/exclude the fill (FIX 3).
     UPDATE paper_orders SET
         status                       = 'filled',
         filled_qty                   = v_abs_qty,
@@ -300,7 +355,14 @@ BEGIN
         submitted_at                 = COALESCE(submitted_at, v_now),
         filled_at                    = v_now,
         internal_close_committed_at  = v_now,
-        internal_close_commit_key    = p_idempotency_key
+        internal_close_commit_key    = p_idempotency_key,
+        order_json                   = COALESCE(order_json, '{}'::jsonb)
+            || CASE WHEN p_fill_quality IS NOT NULL
+                    THEN jsonb_build_object('fill_quality', p_fill_quality)
+                    ELSE '{}'::jsonb END
+            || CASE WHEN p_fill_mid_reference IS NOT NULL
+                    THEN jsonb_build_object('fill_mid_reference', p_fill_mid_reference)
+                    ELSE '{}'::jsonb END
     WHERE id = p_close_order_id;
 
     -- ── (8c) portfolio cash (server-derived new balance) ─────────────────────
@@ -327,7 +389,12 @@ BEGIN
             'source', p_fill_source,
             'reason', p_close_reason,
             'commit', 'rpc_commit_internal_close_v1',
-            'idempotency_key', p_idempotency_key
+            'idempotency_key', p_idempotency_key,
+            -- (FIX 3, #1017) fill-quality provenance in the ledger metadata too
+            -- (matches the route's :2505-2506); keys always present, value NULL
+            -- when not supplied.
+            'fill_quality', p_fill_quality,
+            'fill_mid_reference', p_fill_mid_reference
         ),
         v_now
     )
@@ -368,7 +435,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION rpc_commit_internal_close_v1(
-    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric
+    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric, text, numeric
 ) IS
     'Atomically commits an INTERNAL (paper/shadow/fallback) close: marks the '
     'close order filled with a write-once commit marker, moves portfolio cash '
@@ -383,8 +450,8 @@ COMMENT ON FUNCTION rpc_commit_internal_close_v1(
 -- Operator-only execution surface
 -- =============================================================================
 REVOKE ALL ON FUNCTION rpc_commit_internal_close_v1(
-    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric
+    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric, text, numeric
 ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION rpc_commit_internal_close_v1(
-    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric
+    uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric, text, numeric
 ) TO service_role;

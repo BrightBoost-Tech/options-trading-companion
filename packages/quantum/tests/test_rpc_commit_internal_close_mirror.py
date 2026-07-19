@@ -22,6 +22,7 @@ against real Postgres in tests/pg/test_rpc_commit_internal_close_pg.py; a
 mirror cannot prove transactional rollback and does not claim to.
 """
 
+import math
 import re
 from pathlib import Path
 
@@ -148,10 +149,10 @@ _SQL_CLOSE_REASONS = frozenset(_VALID_CLOSE_REASONS)
 _SQL_FILL_SOURCES = frozenset(_VALID_FILL_SOURCES)
 
 
-def mirror_classify(*, position, order, req) -> str:
+def mirror_classify(*, position, order, req, routing_mode="shadow_only") -> str:
     """Return the verdict the RPC produces for `req` against the locked
-    `position`/`order` state. Verdict strings mirror the RAISE tokens / receipt
-    flags."""
+    `position`/`order`/portfolio state. Verdict strings mirror the RAISE tokens
+    / receipt flags. Guard ORDER is kept 1:1 with the plpgsql body."""
     # (1) required inputs
     for k in ("user_id", "portfolio_id", "position_id", "close_order_id"):
         if req.get(k) is None:
@@ -160,6 +161,11 @@ def mirror_classify(*, position, order, req) -> str:
         return "idempotency_key_required"
     if req.get("realized_pl") is None:
         return "realized_pl_required"
+    # (FIX 2) non-finite numerics rejected before any derivation
+    for k in ("fill_price_magnitude", "multiplier", "fill_qty", "realized_pl"):
+        v = req.get(k)
+        if isinstance(v, (int, float)) and not math.isfinite(v):
+            return "non_finite_input"
     # (6a) domain
     if req["close_reason"] not in _SQL_CLOSE_REASONS:
         return "invalid_close_reason"
@@ -180,6 +186,11 @@ def mirror_classify(*, position, order, req) -> str:
         return "order_ownership_mismatch"
     if order["position_id"] != req["position_id"]:
         return "order_position_linkage_mismatch"
+    # (FIX 1) live-order isolation — before the marker / any write
+    if order.get("execution_mode") == "alpaca_live":
+        return "live_order_forbidden"
+    if routing_mode != "shadow_only":
+        return "live_order_forbidden"
     # (5)/(10)/(11) commit marker
     if order.get("internal_close_committed_at") is not None:
         if order.get("internal_close_commit_key") == req["idempotency_key"]:
@@ -212,10 +223,12 @@ def _pos(qty=2, status="open", user="u", pf="pf"):
     return {"user_id": user, "portfolio_id": pf, "quantity": qty, "status": status}
 
 
-def _ord(user="u", pf="pf", position_id="pos", committed_at=None, commit_key=None):
+def _ord(user="u", pf="pf", position_id="pos", committed_at=None, commit_key=None,
+         execution_mode="internal_paper"):
     return {"user_id": user, "portfolio_id": pf, "position_id": position_id,
             "internal_close_committed_at": committed_at,
-            "internal_close_commit_key": commit_key}
+            "internal_close_commit_key": commit_key,
+            "execution_mode": execution_mode}
 
 
 def _req(**over):
@@ -287,3 +300,75 @@ def test_enum_parity_python_matches_canonical_and_sql():
         assert f"'{r}'" in s
     for src in _SQL_FILL_SOURCES:
         assert f"'{src}'" in s
+
+
+# ── FIX 1/2 mirror branches ──────────────────────────────────────────────────
+def test_mirror_live_execution_mode_forbidden():
+    v = mirror_classify(position=_pos(qty=2), order=_ord(execution_mode="alpaca_live"), req=_req())
+    assert v == "live_order_forbidden"
+
+
+def test_mirror_live_eligible_routing_forbidden():
+    v = mirror_classify(position=_pos(qty=2), order=_ord(), req=_req(), routing_mode="live_eligible")
+    assert v == "live_order_forbidden"
+
+
+@pytest.mark.parametrize("field", ["fill_price_magnitude", "multiplier", "fill_qty", "realized_pl"])
+@pytest.mark.parametrize("badval", [float("nan"), float("inf"), float("-inf")])
+def test_mirror_non_finite_rejected(field, badval):
+    assert mirror_classify(position=_pos(qty=2), order=_ord(), req=_req(**{field: badval})) == "non_finite_input"
+
+
+# ── FIX 4: enum drift-lock is BIDIRECTIONAL (SQL IN-list == canonical set) ────
+def _sql_inlist_tokens(param: str) -> frozenset:
+    """Extract the quoted tokens inside `<param> NOT IN ( … )` in the SQL."""
+    m = re.search(rf"{param} NOT IN \((.*?)\)", _sql(), re.S)
+    assert m, f"{param} NOT IN (...) list not found in SQL"
+    return frozenset(re.findall(r"'([^']+)'", m.group(1)))
+
+
+def test_sql_enum_inlists_are_exactly_canonical():
+    """A future ROGUE enum token added to the SQL IN-list (outside the canonical
+    close_helper sets) must fail CI — set EQUALITY, not just canonical ⊆ SQL."""
+    assert _sql_inlist_tokens("p_close_reason") == frozenset(_VALID_CLOSE_REASONS)
+    assert _sql_inlist_tokens("p_fill_source") == frozenset(_VALID_FILL_SOURCES)
+
+
+# ── Structural drift-lock for the three post-review guards ────────────────────
+def test_sql_live_order_isolation_guard_present():
+    s = _sql()
+    assert "execution_mode = 'alpaca_live'" in s
+    assert "routing_mode IS DISTINCT FROM 'shadow_only'" in s
+    assert s.count("live_order_forbidden") >= 2  # execution_mode + routing_mode
+
+
+def test_sql_non_finite_guard_present():
+    s = _sql()  # raw: _sql_code() blanks the 'NaN' literals we need to see
+    # all four numeric inputs checked against NaN / ±Infinity
+    for p in ("p_fill_price_magnitude", "p_multiplier", "p_fill_qty", "p_realized_pl"):
+        assert re.search(
+            rf"{p}\s+IN \('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric\)", s
+        ), p
+    assert "non_finite_input" in s
+
+
+def test_sql_provenance_round_trips_to_both_sinks():
+    s = _sql()
+    # optional, backward-safe params
+    assert re.search(r"p_fill_quality\s+text\s+DEFAULT NULL", s)
+    assert re.search(r"p_fill_mid_reference\s+numeric\s+DEFAULT NULL", s)
+    # order_json sink (single-key jsonb_build_object, closing paren)
+    assert "jsonb_build_object('fill_quality', p_fill_quality)" in s
+    assert "jsonb_build_object('fill_mid_reference', p_fill_mid_reference)" in s
+    # ledger metadata sink (keys inside the multi-key object => trailing comma
+    # distinguishes them from the order_json single-key builds above)
+    assert "'fill_quality', p_fill_quality,\n" in s
+    assert "'fill_mid_reference', p_fill_mid_reference\n" in s
+
+
+def test_grant_surface_covers_14_arg_signature():
+    """The REVOKE/GRANT/COMMENT signatures must include the two new provenance
+    param types (…, text, numeric)."""
+    s = _sql()
+    sig14 = "uuid, uuid, uuid, uuid, text, text, text, text, numeric, numeric, numeric, numeric, text, numeric"
+    assert s.count(sig14) == 3  # COMMENT + REVOKE + GRANT

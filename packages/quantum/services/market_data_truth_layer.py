@@ -1414,7 +1414,10 @@ class MarketDataTruthLayer:
             logger.warning("[MTM] Alpaca options skipped — ALPACA_API_KEY/ALPACA_SECRET_KEY not set")
             return {}
 
-        logger.info(f"[MTM] Alpaca keys present, key_id={alpaca_key[:8]}...")
+        # SECURITY (v1.7 A9): never interpolate any slice/prefix/length/hash of a
+        # credential into a log record — this line fires on every RTH scan/MTM/
+        # monitor. Constant, non-secret message only.
+        logger.info("[MTM] Alpaca option-data credentials configured")
 
         # Alpaca wants bare OCC symbols without the O: prefix
         # e.g. "ADBE260515P00255000" not "O:ADBE260515P00255000"

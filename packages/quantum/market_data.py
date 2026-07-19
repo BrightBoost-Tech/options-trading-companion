@@ -602,7 +602,15 @@ class PolygonService:
 
         except Exception as e:
             meta["error_type"] = "exception"
-            meta["msg_snippet"] = str(e)[:120]
+            # SECURITY (v1.7 A9): str(e) of a requests exception can embed the
+            # request URL, whose query string carries apiKey=<secret>. Redact the
+            # configured key AND any apiKey query param (covers URL-encoded forms)
+            # BEFORE truncating — mirrors the HTTP-error path above (~L554-556).
+            snippet = str(e)
+            if self.api_key and self.api_key in snippet:
+                snippet = snippet.replace(self.api_key, "[REDACTED]")
+            snippet = re.sub(r'(apiKey=)[^&\s]+', r'\1[REDACTED]', snippet)
+            meta["msg_snippet"] = snippet[:120]
             return (empty_quote, meta)
 
     def get_option_snapshot(self, symbol: str) -> Dict:

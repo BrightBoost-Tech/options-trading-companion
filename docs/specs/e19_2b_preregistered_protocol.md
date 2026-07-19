@@ -1,13 +1,15 @@
 # E19-2B — Preregistered Analysis Protocol (FROZEN)
 
     PROTOCOL_ID:        e19_2b_preregistration
-    PROTOCOL_VERSION:   e19_2b_protocol_v1
+    PROTOCOL_VERSION:   e19_2b_protocol_v2
     STATUS:             FROZEN — immutable once merged
     EXECUTION_STATUS:   BLOCKED
     EXECUTE_E19_2B:      false
-    AUTHORED_AT:        2026-07-18 (pre-market, RTH-closed, docs-only)
+    AUTHORED_AT:        2026-07-18 (v1, pre-market, RTH-closed, docs-only)
+    RE-FROZEN_AT:       2026-07-18 (v2 — arm B pinned by CONTENT after #1279 merged)
     BASE_SHA:           79f4ba76 (branch feat/e19-2b-preregistration)
-    CURRENT_MAIN_SHA:   3c3874e1 (origin/main at authoring; provenance only)
+    CURRENT_MAIN_SHA:   ed5d6f48 (origin/main at v2 re-freeze; provenance only)
+    FLEET_MANIFEST_SHA: 78c71a8e (#1279 squash — arm-B 50-policy design merged to main)
 
 > **Why this document exists.** E19-2B is the backlogged full counterfactual
 > experiment: compare decision outcomes across a comparable fleet epoch (the
@@ -41,6 +43,20 @@
   identity — §12). The test pins THIS doc. The doc never embeds its own hash
   (that self-reference is impossible to compute); the doc-hash lives only in the
   test. That is the whole immutability chain.
+
+### Version record (preregistration integrity)
+
+- **v1 (2026-07-18):** initial freeze. Arm B (the 50 fleet policies) was defined
+  by SHAPE only (50 slots) because the 50-policy manifest did not yet exist.
+- **v2 (2026-07-18):** arm B pinned by CONTENT after PR **#1279** (squash
+  `78c71a8e`) merged `docs/specs/fleet_policy_design_50.md` +
+  `packages/quantum/policy_lab/fleet_policy_design.py` to main. Changes: §2 arm-B
+  wording, §10 gate 2 (now SATISFIED), §12 (manifest content SHA-256 + the
+  50-policy config-hash-set fingerprint replace the former PENDING block). **No
+  metric, unit, censoring, dedup, stopping rule, promotion prohibition, or the
+  §7 minimum-source-event adjudication changed** — the scientific plan is
+  unchanged; only the previously-undefined arm-B identity became pinnable. The
+  §7 minimum remains UNDEFINED and execution remains BLOCKED.
 
 ---
 
@@ -113,8 +129,12 @@ arm classes are compared, all on the SAME set of admitted decision events:
   `supabase/migrations/20260716060000_small_tier_shadow_fleet.sql:47-77`). The
   fleet design is **50 isolated slots** (`shadow_fleet.MICRO_ACCOUNT_COUNT = 50`,
   `:21`); each activated slot contributes one policy response per decision event.
-  See §5 for the epoch identity and §12 for the (currently PENDING) 50-policy
-  manifest.
+  The 50-policy parameterization is FIXED and pinned by CONTENT (§12): **3
+  anchors** (aggressive/neutral/conservative, verbatim from
+  `policy_lab_cohorts.policy_config`) **+ 47 single-/two-axis variants** inside
+  the 3-anchor convex hull — `docs/specs/fleet_policy_design_50.md` +
+  `packages/quantum/policy_lab/fleet_policy_design.py` (#1279, squash
+  `78c71a8e`). See §5 for the epoch identity.
 - **ARM C — BASELINE AUTHORITY (frozen production math).** The frozen baseline
   adapters `packages/quantum/analytics/terminal_distribution/baselines.py` —
   "the thing challengers must beat" — which reproduce current production EV/PoP
@@ -332,9 +352,13 @@ ALL of the following are simultaneously true (each is an independent gate):
    `legacy_100k` positions and working orders proven terminal
    (`shadow_fleet.activate` `:142-178`; migration `:38-44`). Authorization alone
    is not runtime parity (backlog `:411-412`).
-2. **50-policy manifest authored** — the arm-B policy set is defined and pinned
-   (§12; currently 3 of 50 exist, gap 47 — OWNER decision, bundle
-   `fleet-readiness-2026-07-18.md`).
+2. **50-policy manifest authored — SATISFIED.** The arm-B policy set is defined
+   and pinned by CONTENT (§12): `docs/specs/fleet_policy_design_50.md` (50/50
+   distinct config hashes) merged in #1279 (squash `78c71a8e`). This gate is MET.
+   The migration/seed (`20260719000000_policy_registrations.sql` +
+   `policy_registrations_seed_50.sql`) remain UNAPPLIED — registration into
+   `policy_registrations` is a later operator step — but the design CONTENT is
+   frozen and pinned.
 3. **Capital-basis parity applied** — cross-arm raw-dollar comparisons
    normalized (F-SHADOW-CAPITAL-PARITY / #1124), or the comparison restricted to
    notional-invariant metrics.
@@ -394,18 +418,31 @@ Schema / migration identity:
 Git provenance (context, not a content hash):
 
     BASE_SHA          79f4ba76  (this branch's base)
-    CURRENT_MAIN_SHA  3c3874e1  (origin/main at authoring)
+    CURRENT_MAIN_SHA  ed5d6f48  (origin/main at v2 re-freeze)
+    FLEET_MANIFEST    78c71a8e  (#1279 squash — arm-B design on main)
 
-PENDING — NOT YET PINNABLE (feeds the §10 block):
+ARM B — 50-POLICY DESIGN, PINNED BY CONTENT (#1279, squash 78c71a8e):
 
-    50-POLICY DESIGN MANIFEST — the arm-B policy parameterization set (the
-    "which 50 policies" manifest, referenced in the task as PR #1279's manifest)
-    DOES NOT YET EXIST in this repo: only 3 of 50 policy families exist (gap 47),
-    and the manifest is an open OWNER decision (bundle
-    `fleet-readiness-2026-07-18.md`; `docs/backlog.md:64-66,99-101`). Its design
-    hash CANNOT be pinned here. When the owner authors it, its content hash is
-    added and this protocol is re-versioned (v2). Until then, arm B is defined by
-    SHAPE (50 uniquely-registered slots, `shadow_fleet.py`) but not by CONTENT.
+    manifest file    docs/specs/fleet_policy_design_50.md
+    manifest sha256  5cb76f9981ee12a34204dec63368c918de802f71a99f5766410aa34638d8922c
+                     (CRLF->LF normalized — same convention as this doc's pin)
+    generator        packages/quantum/policy_lab/fleet_policy_design.py
+    migration        supabase/migrations/20260719000000_policy_registrations.sql   (UNAPPLIED)
+    seed             supabase/migrations/policy_registrations_seed_50.sql          (UNAPPLIED)
+
+    FLEET CONFIG-HASH SET FINGERPRINT
+    18766a1e882e36a46d708add8d3e5c258ea117607954210a8d142fc8844a9a39
+
+    Recipe (reproducible): take the 50 config_hash values from the manifest's
+    "## config_hash" table (50/50 distinct, lowercase hex), sort ascending, join
+    with a single LF ("\n", no trailing newline), UTF-8 encode, SHA-256. This
+    fingerprint IS arm B's frozen identity: changing ANY of the 50 policy configs
+    changes a config_hash -> changes this fingerprint -> MUST re-open this
+    protocol (new version + owner review). The 3 anchors are verbatim
+    policy_lab_cohorts.policy_config (aggressive = live champion); the 47 variants
+    lie inside the 3-anchor convex hull, so no variant is looser than the loosest
+    anchor (e.g. stop_loss_pct hull max 0.30 never widens the live loss stop —
+    manifest "Bounds derivation"; CLAUDE.md §5 / NEVER-DO).
 
 ---
 

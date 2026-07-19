@@ -30,10 +30,19 @@ PROTOCOL_DOC = _REPO_ROOT / "docs" / "specs" / "e19_2b_preregistered_protocol.md
 # The frozen protocol's LF-normalized content hash. To change the protocol:
 # re-version it, then update this constant in the SAME reviewed commit.
 FROZEN_PROTOCOL_SHA256 = (
-    "45dbf257f0a8336dbc48c016fd4e4c7c2a9d429d67674ebcb381c9e884567587"
+    "50e7e237436f1bc43d9679c1081eb1e8218048640fb1b325885fd2cf0bc3b76c"
 )
 
-PROTOCOL_VERSION = "e19_2b_protocol_v1"
+PROTOCOL_VERSION = "e19_2b_protocol_v2"
+
+# Arm B (the 50 fleet policies) is pinned by CONTENT in v2 after #1279 merged.
+# These are the two upstream pins carried in §12 of the frozen doc.
+FLEET_MANIFEST_SHA256 = (
+    "5cb76f9981ee12a34204dec63368c918de802f71a99f5766410aa34638d8922c"
+)
+FLEET_CONFIG_HASH_SET_FINGERPRINT = (
+    "18766a1e882e36a46d708add8d3e5c258ea117607954210a8d142fc8844a9a39"
+)
 
 
 def _normalized_bytes() -> bytes:
@@ -106,3 +115,14 @@ def test_fleet_epoch_identity_pinned():
     text = _text()
     assert "small_tier_v1" in text
     assert "legacy_100k" in text
+
+
+def test_arm_b_pinned_by_content():
+    """v2: arm B (the 50 fleet policies) is pinned by CONTENT — the manifest
+    file hash and the config-hash-set fingerprint — not by SHAPE. The former
+    'NOT YET PINNABLE' PENDING block must be gone."""
+    text = _text()
+    assert FLEET_MANIFEST_SHA256 in text
+    assert FLEET_CONFIG_HASH_SET_FINGERPRINT in text
+    assert "fleet_policy_design_50.md" in text
+    assert "NOT YET PINNABLE" not in text

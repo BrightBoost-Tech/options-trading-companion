@@ -285,7 +285,9 @@ class TestArtifactFailureNeverBreaksWrite(unittest.TestCase):
         with patch("packages.quantum.analytics.cost_basis."
                    "reconcile_cost_bases",
                    side_effect=RuntimeError("boom deep in cost_basis")):
-            rec.record_final(cand, "h7_dropped", detail={"reason": "sized_zero"})
+            rec.record_final(cand, "h7_dropped",
+                             detail={"reason": "sized_zero",
+                                     "h7_subreason": "sizing_zero"})
         row = _final(client)
         self.assertEqual(row["disposition"], "h7_dropped")
         self.assertEqual(row["detail"]["reason"], "sized_zero")

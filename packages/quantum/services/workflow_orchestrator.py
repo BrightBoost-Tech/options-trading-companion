@@ -2777,9 +2777,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 # final. Shadow mode drops nothing, so records nothing.
                 if _ctd is not None:
                     for _dc, _dl in zip(_h7_dropped_cands, _h7_drops_log):
+                        # Typed subreason (owner 2026-07-18): the prefilter is
+                        # literally a round-trip BP check
+                        # (collateral + close_bp×safety > deployable_capital).
                         _ctd.record_final(
                             _dc, "h7_dropped",
-                            detail={"reason": "h7_prefilter", **_dl},
+                            detail={"reason": "h7_prefilter",
+                                    "h7_subreason": "roundtrip_bp", **_dl},
                         )
                 # New exit_reason when active-mode filter drops everything:
                 # set a flag so the downstream no_suggestions_after_gates
@@ -3239,8 +3243,20 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # durable final (capital/priceability-fit family; exact cause in
             # detail.reason).
             if _ctd is not None:
+                # Typed subreason (owner 2026-07-18): suggested_entry<=0 is a
+                # data/priceability death — the same family as the marketdata
+                # quality gate, NOT capital-fit (it never reaches sizing). It
+                # is NOT stamped sizing_outcome='marketdata_quality_gate' (it
+                # did not traverse the gate); reason='unpriceable_candidate'
+                # distinguishes it within the quality_gate family.
+                # Query recipe within h7_subreason='quality_gate':
+                #   real marketdata gate (E4/E5):
+                #     AND detail->>'sizing_outcome' = 'marketdata_quality_gate'
+                #   this unpriceable death (E1):
+                #     AND detail->>'reason' = 'unpriceable_candidate'
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": "unpriceable_candidate",
+                    "h7_subreason": "quality_gate",
                     "suggested_entry": cand.get("suggested_entry"),
                 })
             continue
@@ -3483,6 +3499,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             if _ctd is not None:
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": "risk_budget_exhausted",
+                    "h7_subreason": "risk_budget",
                     "remaining_global": remaining_global,
                 })
             continue
@@ -3720,10 +3737,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e4_fatal",
-                                    # Typed discriminator so capital-fit queries
-                                    # can cleanly exclude marketdata deaths from
-                                    # the overloaded h7_dropped bucket (C2 pkt
-                                    # Option-A) without parsing reason strings.
+                                    # Typed subreason (owner 2026-07-18): the
+                                    # marketdata quality-gate family.
+                                    "h7_subreason": "quality_gate",
+                                    # Existing discriminator kept unchanged so
+                                    # capital-fit queries can cleanly exclude
+                                    # marketdata deaths without parsing reason
+                                    # strings (C2 pkt Option-A).
                                     "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
                                     "quality_gate_mode": quality_gate_mode,
@@ -3773,9 +3793,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e5_skip_policy",
-                                    # Typed discriminator (see E4 above): lets
-                                    # capital-fit queries exclude marketdata
-                                    # deaths from the h7_dropped bucket cleanly.
+                                    # Typed subreason (owner 2026-07-18): the
+                                    # marketdata quality-gate family (see E4).
+                                    "h7_subreason": "quality_gate",
+                                    # Existing discriminator kept unchanged.
                                     "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
                                     "quality_gate_mode": quality_gate_mode,
@@ -4032,8 +4053,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # REAL H7/capital-fit verdict — the dominant selected-then-
             # vanished death (4-of-4 on 2026-05-21). Durable final.
             if _ctd is not None:
+                # Typed subreason (owner 2026-07-18): the sizing engine
+                # returned contracts==0 — the dominant capital-fit death. Its
+                # 6 root causes (no-BP, round-trip, risk<1-contract,
+                # collateral, invalid-max-loss, lifecycle-veto) stay in
+                # detail.reason (sizing.reason), verbatim.
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": sizing.get("reason") or "sized_to_zero",
+                    "h7_subreason": "sizing_zero",
                     "round_trip_required": sizing.get("round_trip_required"),
                     "available_bp": deployable_capital,
                 })

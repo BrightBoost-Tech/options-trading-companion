@@ -16,8 +16,22 @@ Source-level + unit tests, mirroring the convention from
 """
 
 import re
+import sys
+import types
 import unittest
 from unittest.mock import patch, MagicMock
+
+# Windows-local shim: rq's import raises ValueError (no 'fork' context) so
+# packages.quantum.jobs.rq_enqueue — which does `from rq import Queue` at
+# module level — is unimportable locally (the known fork class). CI (Linux)
+# imports the real rq; the shim only engages where rq itself cannot load.
+# Same pattern as test_rebalance_endpoint_contract.py.
+try:  # pragma: no cover - environment-dependent
+    import rq  # noqa: F401
+except Exception:
+    _rq_stub = types.ModuleType("rq")
+    _rq_stub.Queue = type("Queue", (), {"__init__": lambda self, *a, **k: None})
+    sys.modules["rq"] = _rq_stub
 
 from packages.quantum.jobs.rq_enqueue import (
     DEFAULT_JOB_TIMEOUT,

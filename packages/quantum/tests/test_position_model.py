@@ -48,6 +48,7 @@ from packages.quantum.risk.position_model import (
     entry_cashflow_from_net_premium,
     expiration_pnl,
     intrinsic_value,
+    leg_full_contract_count,
     leg_greeks_from_persisted,
     normalize_position,
     reconcile_legs,
@@ -290,6 +291,31 @@ def _permissive_config(**overrides) -> EnvelopeConfig:
     return config
 
 
+def _persisted_put_ratio_1x2(structure_quantity: int = 1, premium: float = 1.00) -> dict:
+    """_f6 (1×2 put ratio) as persisted: long 1×100P + short 2×95P, full-count.
+
+    Defined-risk (all puts → S=0 floor). At structure_quantity q the legs carry
+    full counts q and 2q (ratio 1 and 2). Credit structure → negative persisted
+    quantity. Complete four-greek blocks are attached by the caller.
+    """
+    q = structure_quantity
+    return {
+        "id": "spy-put-ratio-1x2",
+        "symbol": "SPY",
+        "strategy": "put_ratio_1x2",
+        "quantity": -q,  # credit
+        "avg_entry_price": premium,
+        "legs": [
+            {"symbol": _occ("SPY", "P", 100.0), "action": "buy",
+             "type": "put", "strike": 100.0, "expiry": "2026-09-18",
+             "quantity": q},
+            {"symbol": _occ("SPY", "P", 95.0), "action": "sell",
+             "type": "put", "strike": 95.0, "expiry": "2026-09-18",
+             "quantity": 2 * q},
+        ],
+    }
+
+
 def _persisted_iron_condor() -> dict:
     """_f3 as a persisted one-contract credit structure."""
     return {
@@ -325,14 +351,15 @@ class TestCurrentDefects(unittest.TestCase):
     the unclamped linear-stress slice of D5 is inverted by PR-3 (payoff-capped
     stress). **D2 is inverted by 4B** — check_greeks now signs each leg via the
     canonical _direction_sign, so its assertions pin the SIGNED net (long+short
-    cancel), no longer the unsigned add. **D3 remains pinned; never delete it**:
-    check_greeks still scales by the POSITION quantity, not the leg ratio, so a
-    same-direction 1×2 ratio is still counted once (see
-    test_d3_leg_ratios_are_ignored — untouched by the D2 fix because both legs
-    share a sign). The D2/D3 fixtures carry COMPLETE greeks blocks — all four
-    values finite — because check_greeks aggregates a leg only when
-    delta/gamma/vega/theta are all present and finite (null-safe), contributing
-    nothing otherwise, never a fabricated 0.
+    cancel), no longer the unsigned add. **D3 is inverted by Lane D** —
+    check_greeks now scales each leg by its OWN full contract count via the
+    canonical ``position_model.leg_full_contract_count`` (the same magnitude
+    ``aggregate_greeks`` composes), so a same-direction 1×2 ratio counts the
+    2-lot twice (see test_d3_leg_ratios_are_ignored, assertion flipped). The
+    D2/D3 fixtures carry COMPLETE greeks blocks — all four values finite —
+    because check_greeks aggregates a leg only when delta/gamma/vega/theta are
+    all present and finite (null-safe), contributing nothing otherwise, never a
+    fabricated 0.
     """
 
     def test_d1_exact_max_loss_replaces_credit_received(self):
@@ -470,9 +497,18 @@ class TestCurrentDefects(unittest.TestCase):
         self.assertEqual(violations, [])  # no cap => no violation, at any size
 
     def test_d3_leg_ratios_are_ignored(self):
-        """The loop scales every leg by the POSITION quantity, not leg quantity."""
+        """D3 FIXED (Lane D): each leg is scaled by its OWN full contract count
+        via the canonical ``position_model.leg_full_contract_count`` — the same
+        magnitude ``aggregate_greeks`` composes (``signed_ratio ×
+        structure_quantity``) — so a 1×2 ratio's 2-lot is counted twice.
+
+        ASSERTION FLIP (the point of the D3 lane): the pre-fix loop scaled every
+        leg by the POSITION quantity (both legs by qty=1 → 50 + 50 = 100, the 2×
+        leg counted once); it now reports the ratio-aware 150. The honest
+        canonical aggregate agreed with 150 all along.
+        """
         # A 1x2 ratio: leg quantities 1 and 2. Complete greeks blocks (null-safe
-        # completeness bar); D3 ratio-blindness is unchanged and still pinned.
+        # completeness bar); same-direction so the D2 sign fix does not touch it.
         pos = {
             "quantity": 1,
             "legs": [
@@ -481,10 +517,10 @@ class TestCurrentDefects(unittest.TestCase):
             ],
         }
         _violations, greeks = check_greeks([pos], EnvelopeConfig())
-        # Both legs scaled by qty=1: 50 + 50 = 100. The 2x leg counted once.
-        self.assertAlmostEqual(greeks["delta"], 100.0, places=2)
-        # Ratio-aware: 0.50*1*100 + 0.50*2*100 = 150.
-        self.assertNotAlmostEqual(greeks["delta"], 150.0, places=2)
+        # FLIP: ratio-aware 0.50*1*100 + 0.50*2*100 = 150. Was 100.0 (the retired
+        # ratio-blind add that scaled both legs by the position quantity 1).
+        self.assertAlmostEqual(greeks["delta"], 150.0, places=2)
+        self.assertNotAlmostEqual(greeks["delta"], 100.0, places=2)
 
     def test_d3_ratio_blindness_prices_a_ratio_spread_as_riskless(self):
         """The payoff consequence of D3, in dollars."""
@@ -1019,6 +1055,174 @@ class TestStressSignedGreekAggregation(unittest.TestCase):
             self.assertEqual(
                 greek_v, [], f"caps-0 must be non-gating for {pos['id']}"
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Lane D — leg-ratio-aware greek aggregation (D3 closure)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestD3LegRatioAwareGreeks(unittest.TestCase):
+    """Lane D: the greek-summing consumers (check_greeks + the stress lane)
+    scale each leg by its OWN full contract count via the canonical
+    ``position_model.leg_full_contract_count`` — the same magnitude
+    ``aggregate_greeks`` composes (``signed_ratio × structure_quantity``) — so
+    leg RATIOS are honored. A 1:1 book is byte-identical to the retired
+    ``abs(position-quantity)`` scaling; a 1×2 ratio's 2-lot counts twice.
+
+    Tests drive the production entrypoints (check_greeks / check_all_envelopes /
+    compute_stress_scenarios) and assert the top-level output (doctrine: inject
+    at the origin, assert the truth at the top).
+    """
+
+    EQUITY = 100_000.0
+    _FULL = {"delta": 0.50, "gamma": 0.02, "vega": 0.10, "theta": -0.03}
+
+    def _greeked_ratio(self, structure_quantity: int = 1) -> dict:
+        pos = _persisted_put_ratio_1x2(structure_quantity)
+        for leg in pos["legs"]:
+            leg["greeks"] = dict(self._FULL)
+        return pos
+
+    # ── the canonical owner helper (H9 typed) ─────────────────────────────
+
+    def test_helper_present_count_is_read_abs(self):
+        self.assertEqual(leg_full_contract_count({"quantity": 2}, 1), 2)
+        self.assertEqual(leg_full_contract_count({"quantity": -3}, 1), 3)
+
+    def test_helper_absent_or_none_falls_back_to_position_quantity(self):
+        # The full-count identity: leg.quantity == abs(pos.quantity). Preserves
+        # 1:1 byte-identity and the sideless minimal-dict fixtures.
+        self.assertEqual(leg_full_contract_count({}, 2.0), 2)
+        self.assertEqual(leg_full_contract_count({"quantity": None}, 3), 3)
+        self.assertEqual(leg_full_contract_count({"greeks": {}}, -4), 4)
+
+    def test_helper_malformed_or_zero_is_typed_none(self):
+        for bad in (0, 2.5, "x", True, float("nan"), float("inf")):
+            with self.subTest(quantity=bad):
+                self.assertIsNone(leg_full_contract_count({"quantity": bad}, 1))
+        # a degenerate zero position quantity in the fallback is also typed None
+        self.assertIsNone(leg_full_contract_count({}, 0))
+
+    # ── 1:1 byte-identity (the entire pre-existing corpus must not move) ───
+
+    def test_1x1_vertical_byte_identical_to_position_quantity_scaling(self):
+        # A 1:1 credit vertical: each leg's full count == abs(pos.quantity) == 2,
+        # so the ratio-aware count equals the retired abs(qty) scaling exactly.
+        pos = _persisted_short_put_vertical()
+        pos["legs"][0]["greeks"] = {"delta": 0.45, "gamma": 0.03, "vega": 0.18, "theta": -0.04}
+        pos["legs"][1]["greeks"] = {"delta": 0.20, "gamma": 0.02, "vega": 0.10, "theta": -0.02}
+        _v, greeks = check_greeks([pos], EnvelopeConfig())
+
+        _sign = {"sell": -1, "buy": +1}
+        qty = abs(pos["quantity"])  # 2 == each leg's full count
+        for g in ("delta", "gamma", "vega", "theta"):
+            old = sum(_sign[l["action"]] * l["greeks"][g] * qty * 100 for l in pos["legs"])
+            self.assertAlmostEqual(greeks[g], old, places=6)
+        # Genuinely nonzero (distinct greeks) — not a trivial symmetric cancel.
+        self.assertNotAlmostEqual(greeks["delta"], 0.0, places=6)
+
+    def test_iron_condor_1to1_byte_identical_distinct_greeks(self):
+        # All four legs are 1:1 (leg.quantity == abs(pos.quantity) == 1), so the
+        # ratio-aware count == the retired abs(qty) scaling — byte-identical.
+        pos = _persisted_iron_condor()
+        vals = [
+            {"delta": -0.30, "gamma": 0.02, "vega": 0.12, "theta": -0.03},  # sell P
+            {"delta": -0.15, "gamma": 0.01, "vega": 0.08, "theta": -0.02},  # buy P
+            {"delta": 0.25, "gamma": 0.02, "vega": 0.11, "theta": -0.03},   # sell C
+            {"delta": 0.05, "gamma": 0.01, "vega": 0.07, "theta": -0.02},   # buy C
+        ]
+        for leg, g in zip(pos["legs"], vals):
+            leg["greeks"] = dict(g)
+        _v, greeks = check_greeks([pos], EnvelopeConfig())
+
+        _sign = {"sell": -1, "buy": +1}
+        qty = abs(pos["quantity"])  # 1
+        for g in ("delta", "gamma", "vega", "theta"):
+            old = sum(_sign[l["action"]] * l["greeks"][g] * qty * 100 for l in pos["legs"])
+            self.assertAlmostEqual(greeks[g], old, places=6)
+        self.assertNotAlmostEqual(greeks["delta"], 0.0, places=6)
+
+    # ── the ratio is now honored (the D3 fix, in dollars) ─────────────────
+
+    def test_1x2_ratio_counts_the_2lot_twice(self):
+        pos = self._greeked_ratio(structure_quantity=1)  # long 1×100P, short 2×95P
+        _v, greeks = check_greeks([pos], EnvelopeConfig())
+        # Ratio-aware: long(+1)*0.50*1*100 + short(-1)*0.50*2*100 = 50 - 100 = -50.
+        self.assertAlmostEqual(greeks["delta"], -50.0, places=2)
+        # Ratio-BLIND (both legs scaled by abs(pos qty)=1) was +50 - 50 = 0.
+        self.assertNotAlmostEqual(greeks["delta"], 0.0, places=2)
+
+    def test_2x1_ratio_the_mirror(self):
+        pos = self._greeked_ratio(structure_quantity=1)
+        pos["legs"][0]["quantity"] = 2  # long 2×100P
+        pos["legs"][1]["quantity"] = 1  # short 1×95P
+        _v, greeks = check_greeks([pos], EnvelopeConfig())
+        # Ratio-aware: long(+1)*0.50*2*100 + short(-1)*0.50*1*100 = 100 - 50 = +50.
+        self.assertAlmostEqual(greeks["delta"], 50.0, places=2)
+        self.assertNotAlmostEqual(greeks["delta"], 0.0, places=2)
+
+    def test_mixed_structure_quantity_scales_full_counts(self):
+        pos = self._greeked_ratio(structure_quantity=2)  # legs full-count 2 and 4
+        _v, greeks = check_greeks([pos], EnvelopeConfig())
+        # long(+1)*0.50*2*100 + short(-1)*0.50*4*100 = 100 - 200 = -100.
+        self.assertAlmostEqual(greeks["delta"], -100.0, places=2)
+        # Exactly 2× the structure_quantity=1 case (-50): linear in structure qty.
+        self.assertAlmostEqual(greeks["delta"], 2 * -50.0, places=2)
+
+    def test_malformed_leg_quantity_typed_uncovered_never_fabricated(self):
+        pos = self._greeked_ratio(structure_quantity=1)
+        pos["legs"][1]["quantity"] = 2.5  # non-integral → typed uncovered (H9)
+        coverage: dict = {}
+        _v, greeks = check_greeks([pos], EnvelopeConfig(), coverage_out=coverage)
+        # The malformed leg contributes NOTHING; only the good long leg counts.
+        self.assertAlmostEqual(greeks["delta"], 50.0, places=2)  # +1*0.50*1*100
+        self.assertEqual(coverage["legs_total"], 2)
+        self.assertEqual(coverage["legs_with_greeks"], 1)
+        self.assertFalse(coverage["complete"])
+
+    # ── consumer inheritance: the real routes and the owner agree ─────────
+
+    def test_ratio_book_through_check_all_envelopes_dormant(self):
+        pos = self._greeked_ratio(structure_quantity=1)
+        result = check_all_envelopes(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        # portfolio_greeks is ratio-aware (2-lot counted twice); caps default 0
+        # → NO greek violation (the fix is a measurement correction, not a cap).
+        self.assertAlmostEqual(result.portfolio_greeks["delta"], -50.0, places=2)
+        self.assertEqual(
+            [v for v in result.violations if v.envelope.startswith("greeks_")], []
+        )
+
+    def test_check_greeks_matches_canonical_aggregate_on_ratio(self):
+        # The migrated consumer composes the SAME leg count the owner does, so a
+        # complete-greek ratio spread agrees leg-for-leg with the canonical
+        # aggregate (consumer inherits the owner).
+        pos = self._greeked_ratio(structure_quantity=1)
+        _v, live = check_greeks([pos], EnvelopeConfig())
+        canonical = aggregate_canonical_greeks([pos])
+        self.assertTrue(canonical["complete"])
+        for g in ("delta", "gamma", "vega", "theta"):
+            self.assertAlmostEqual(live[g], canonical[g], places=6)
+
+    def test_stress_lane_scales_delta_by_leg_ratio(self):
+        # A defined-risk ratio spread with per-leg deltas; the spy_down scenario
+        # scales each leg's delta by its OWN full count (2-lot counted twice).
+        pos = _persisted_put_ratio_1x2(structure_quantity=1)
+        pos["legs"][0]["greeks"] = {"delta": -0.50, "vega": 0.0}  # long 100P
+        pos["legs"][1]["greeks"] = {"delta": -0.30, "vega": 0.0}  # short 95P (2×)
+        _v, results, unavailable = compute_stress_scenarios(
+            [pos], equity=self.EQUITY, config=_permissive_config()
+        )
+        # Ratio-aware signed total delta:
+        #   long (+1)*-0.50*1*100 = -50 ; short (-1)*-0.30*2*100 = +60 → net +10.
+        # spy_down = total_delta * spy_move(0.05) * -1 = 10*0.05*-1 = -0.5.
+        self.assertNotIn("spy_down_raw", results)  # well inside the -8900 floor
+        self.assertAlmostEqual(results["spy_down"] * self.EQUITY, -0.5, places=6)
+        # Ratio-BLIND would scale the short 2-lot by 1: net (-50 + 30) = -20 → +1.0.
+        self.assertNotAlmostEqual(results["spy_down"] * self.EQUITY, 1.0, places=6)
+        self.assertEqual(unavailable, {})
 
 
 # ══════════════════════════════════════════════════════════════════════════

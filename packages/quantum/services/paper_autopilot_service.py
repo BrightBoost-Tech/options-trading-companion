@@ -1043,9 +1043,20 @@ class PaperAutopilotService:
                         _ug_live_portfolio_ids is None
                         or portfolio_id in _ug_live_portfolio_ids
                     ):
+                        # F-A4-RISKBASIS-SILENT: hand the gate the two risk bases
+                        # so it records durable arm evidence against the real cap
+                        # (observe-only; the decision uses candidate_cost_usd).
+                        _ug_prem, _ug_hon = ug.candidate_bases(s)
                         ug.evaluate_entry(
                             user_id, ticker, ug.candidate_cost_usd(s),
                             supabase=supabase,
+                            arm_bases={
+                                "premium_usd": _ug_prem, "honest_usd": _ug_hon,
+                                "context": {
+                                    "symbol": ticker, "suggestion_id": sid,
+                                    "cohort": cohort_name,
+                                },
+                            },
                         )
 
                     # B1/B2 one-beta bucket control + same-run reservation

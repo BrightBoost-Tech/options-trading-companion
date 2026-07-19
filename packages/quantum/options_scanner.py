@@ -1045,6 +1045,13 @@ def _build_oi_by_contract(chain: Optional[List[Dict[str, Any]]]) -> Dict[str, Di
     chain (top-level ``oi``/``volume``/``source``, verified
     market_data_truth_layer.py:1781/1856) and — defensively — the legacy
     flat Polygon fallback chain, which carries NO OI (→ None).
+
+    OI observation-date provenance: ``oi_observation_date`` is the GENUINE
+    provider OI date (``open_interest_date``) when the truth-layer parse
+    threaded one, kept SEPARATE from ``oi_retrieved_at`` (the retrieval/known-at
+    time, ``retrieved_ts``) — a retrieval time is never treated as an
+    observation date. ``oi_date_field`` records which provider field supplied
+    the date. All absent → None → typed provider_date_unavailable downstream.
     """
     out: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1060,7 +1067,13 @@ def _build_oi_by_contract(chain: Optional[List[Dict[str, Any]]]) -> Dict[str, Di
                 "oi": c.get("oi", c.get("open_interest")),
                 "volume": c.get("volume"),
                 "source": c.get("source") or "unknown",
-                "oi_known_at": c.get("open_interest_date") or c.get("oi_known_at"),
+                "oi_observation_date": (
+                    c.get("open_interest_date")
+                    or c.get("oi_observation_date")
+                    or c.get("oi_known_at")  # legacy stamp compat
+                ),
+                "oi_date_field": c.get("oi_date_field"),
+                "oi_retrieved_at": c.get("retrieved_ts") or c.get("oi_retrieved_at"),
             }
     except Exception:
         logger.debug("_build_oi_by_contract failed (non-fatal)", exc_info=True)

@@ -117,14 +117,22 @@ class TestResolveLegOI(unittest.TestCase):
         self.assertEqual(info["oi_source"], "alpaca")
 
     def test_map_join_by_bare_contract(self):
-        m = {"X260821C00100000": {"oi": 742, "volume": 55,
-                                  "source": "polygon", "oi_known_at": "2026-07-18"}}
+        m = {"X260821C00100000": {
+            "oi": 742, "volume": 55, "source": "polygon",
+            "oi_observation_date": "2026-07-18",
+            "oi_retrieved_at": "2026-07-18T20:00:00Z",
+        }}
         info = resolve_leg_oi(_leg("O:X260821C00100000", 100.0), m)
         self.assertEqual(info["oi"], 742)
         self.assertEqual(info["oi_volume"], 55)
         self.assertEqual(info["oi_source"], "polygon")
-        self.assertEqual(info["oi_known_at"], "2026-07-18")
-        self.assertEqual(info["oi_freshness"], "known_at_present")
+        # Genuine observation date threaded; retrieval kept SEPARATE.
+        self.assertEqual(info["oi_observation_date"], "2026-07-18")
+        self.assertEqual(info["oi_retrieved_at"], "2026-07-18T20:00:00Z")
+        # Freshness computed from the observation date (age 0 vs retrieval).
+        self.assertEqual(info["oi_freshness"], "fresh")
+        self.assertEqual(info["oi_observation_age_days"], 0)
+        self.assertEqual(info["oi_date_provenance"], "polygon:observation_date")
 
     def test_leg_stamp_wins_over_map(self):
         m = {"X260821C00100000": {"oi": 111, "source": "alpaca"}}
@@ -133,11 +141,16 @@ class TestResolveLegOI(unittest.TestCase):
         self.assertEqual(info["oi"], 999)
         self.assertEqual(info["oi_source"], "stamped")
 
-    def test_known_at_absent_freshness_typed(self):
-        m = {"X260821C00100000": {"oi": 300, "source": "alpaca"}}
+    def test_provider_date_absent_is_typed_unavailable(self):
+        # No provider OI date → freshness typed provider_date_unavailable,
+        # NEVER inferred from the retrieval time (which is present here).
+        m = {"X260821C00100000": {"oi": 300, "source": "alpaca",
+                                  "oi_retrieved_at": "2026-07-18T20:00:00Z"}}
         info = resolve_leg_oi(_leg("X260821C00100000", 100.0), m)
-        self.assertIsNone(info["oi_known_at"])
-        self.assertEqual(info["oi_freshness"], "known_at_unavailable")
+        self.assertIsNone(info["oi_observation_date"])
+        self.assertIsNone(info["oi_observation_age_days"])
+        self.assertEqual(info["oi_freshness"], "provider_date_unavailable")
+        self.assertEqual(info["oi_date_provenance"], "provider_date_unavailable")
 
 
 # ─────────────────────────────────────────────────────────────────

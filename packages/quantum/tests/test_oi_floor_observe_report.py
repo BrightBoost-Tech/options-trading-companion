@@ -40,7 +40,9 @@ def _oi_details(leg_ois, floor_verdicts):
             "contract": f"C{i}", "oi": v, "oi_available": avail,
             "oi_unavailable_reason": None if avail else "oi_absent_from_snapshot",
             "oi_source": "alpaca", "oi_volume": 10,
-            "oi_known_at": None, "oi_freshness": "known_at_unavailable",
+            "oi_observation_date": None, "oi_observation_age_days": None,
+            "oi_retrieved_at": None, "oi_date_provenance": "provider_date_unavailable",
+            "oi_freshness": "provider_date_unavailable",
         })
         if avail:
             available.append(v)

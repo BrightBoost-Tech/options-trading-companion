@@ -1,18 +1,24 @@
 """
-Regression tests for PR #6 Commit 5:
-paper_exit_evaluator internal-fill close path migrated to the
-shared close_math + close_helper pipeline.
+Regression tests for the internal-fill close path of
+paper_exit_evaluator._close_position.
+
+Originally PR #6 Commit 5 (migration to the shared close_math + close_helper
+pipeline); updated for V17-1 A2 (2026-07-19, Lane 1B), which moved the economic
+commit (order-fill + cash + one fill ledger event + the position close) into the
+ATOMIC rpc_commit_internal_close_v1 instead of the old non-atomic sequence.
 
 Scope
   1. _map_close_reason — pure unit tests for every reason string
      the exit evaluator or intraday_risk_monitor emits.
   2. Integration tests for the internal-fill close path: realized_pl
      matches the leg-level pipeline output, close_reason is the
-     mapped enum value, fill_source='exit_evaluator',
-     close_position_shared is called atomically.
-  3. Anomaly paths: unknown reason, PositionAlreadyClosed race —
-     must write severity='critical' risk_alert and abort with
-     routed_to='internal_aborted'.
+     mapped enum value, fill_source='exit_evaluator', committed through
+     EXACTLY ONE atomic RPC call (the capturing supabase records the
+     position close the RPC performs server-side).
+  3. Anomaly paths: unknown reason (aborts BEFORE the RPC →
+     routed_to='internal_aborted'); CAS race (the RPC RAISEs
+     position_already_closed → routed_to='internal_commit_failed') —
+     both write a severity='critical' risk_alert and make ZERO economic writes.
 
 The Alpaca-fill path (position_is_alpaca=True) is covered by
 test_reconciler_multileg_sign_convention.py (Commit 4b) — it flows
@@ -33,7 +39,6 @@ sys.modules.setdefault(
 )
 
 from packages.quantum.services import paper_exit_evaluator as pe  # noqa: E402
-from packages.quantum.services.close_helper import PositionAlreadyClosed  # noqa: E402
 
 
 class TestMapCloseReason(unittest.TestCase):
@@ -92,32 +97,66 @@ class TestMapCloseReason(unittest.TestCase):
         )
 
 
+class _FakeRpcChain:
+    def __init__(self, parent, name, params):
+        self.parent, self.name, self.params = parent, name, params
+
+    def execute(self):
+        return self.parent._run_rpc(self.name, self.params)
+
+
 class _CapturingSupabase:
     """Supabase mock that intercepts the call graph used by
     _close_position's internal-fill path:
-      - paper_orders.select().eq().in_().order().limit().execute()      (idempotency check, returns no rows)
       - paper_orders.select().eq().order().limit().execute()            (entry-order routing check)
       - paper_positions.select().eq().single().execute()                (fetch position)
-      - paper_orders.update().eq().execute()                            (mark order filled)
-      - paper_portfolios.select().eq().single().execute()               (fetch cash)
-      - paper_portfolios.update().eq().execute()                        (write cash)
-      - paper_ledger_events.insert().execute()                          (emitted by PaperLedgerService)
-      - paper_positions.update().eq().neq().execute()                   (close-write via helper)
-      - paper_positions.select().eq().limit().execute()                 (diagnostic SELECT, if any)
+      - paper_orders.select().eq().in_().order().limit().execute()      (idempotency check, returns no rows)
+      - paper_orders.update().eq().execute()                            (F-A3 close-reason order_json stamp)
+      - rpc('rpc_commit_internal_close_v1', {...}).execute()            (the ONE atomic economic commit)
       - risk_alerts.insert().execute()                                  (anomaly paths only)
+    The atomic RPC (recorded on rpc_calls) performs the order-fill + cash + fill
+    ledger + position close server-side; the fake records the position close on
+    position_updates so the pipeline assertions can inspect it.
     """
 
-    def __init__(self, position, portfolio_cash=10000.0, update_rows=None, position_is_alpaca=False):
+    def __init__(self, position, portfolio_cash=10000.0, update_rows=None,
+                 position_is_alpaca=False, rpc_raise=None):
         self.position = position
         self.portfolio_cash = portfolio_cash
         self.update_rows = update_rows if update_rows is not None else [{"id": position.get("id", "pos-1")}]
         self.position_is_alpaca = position_is_alpaca
-        self.position_updates = []  # Writes to paper_positions
+        self.rpc_raise = rpc_raise
+        self.position_updates = []  # Writes to paper_positions (via the atomic RPC)
         self.risk_alerts = []
         self.order_updates = []
+        self.rpc_calls = []
 
     def table(self, name):
         return _TableChain(self, name)
+
+    def rpc(self, name, params):
+        return _FakeRpcChain(self, name, params)
+
+    def _run_rpc(self, name, params):
+        # Faithful stand-in for rpc_commit_internal_close_v1: records the call,
+        # then (unless configured to raise) records the SAME paper_positions
+        # close-write the assertions below inspect, and returns the typed receipt.
+        self.rpc_calls.append((name, dict(params)))
+        if self.rpc_raise is not None:
+            raise self.rpc_raise
+        self.position_updates.append({
+            "status": "closed", "quantity": 0,
+            "realized_pl": str(params["p_realized_pl"]),
+            "close_reason": params["p_close_reason"],
+            "fill_source": params["p_fill_source"],
+        })
+        return MagicMock(data={
+            "committed": True, "idempotent_replay": False,
+            "order_id": params["p_close_order_id"],
+            "position_id": params["p_position_id"],
+            "cash_after": self.portfolio_cash,
+            "realized_pl": params["p_realized_pl"],
+        })
 
 
 class _TableChain:
@@ -254,7 +293,7 @@ class TestInternalFillPipeline(unittest.TestCase):
         upd = supabase.position_updates[0]
         self.assertEqual(upd["status"], "closed")
         self.assertEqual(upd["quantity"], 0)
-        self.assertEqual(str(upd["realized_pl"]), "500.00")
+        self.assertEqual(Decimal(str(upd["realized_pl"])), Decimal("500.00"))
         self.assertEqual(upd["close_reason"], "target_profit_hit")
         self.assertEqual(upd["fill_source"], "exit_evaluator")
         self.assertEqual(supabase.risk_alerts, [])
@@ -269,7 +308,7 @@ class TestInternalFillPipeline(unittest.TestCase):
         self._run_close(supabase, reason="stop_loss")
 
         upd = supabase.position_updates[0]
-        self.assertEqual(str(upd["realized_pl"]), "-750.00")
+        self.assertEqual(Decimal(str(upd["realized_pl"])), Decimal("-750.00"))
         self.assertEqual(upd["close_reason"], "stop_loss_hit")
 
     def test_short_credit_dte_threshold_close(self):
@@ -282,7 +321,7 @@ class TestInternalFillPipeline(unittest.TestCase):
         self._run_close(supabase, reason="dte_threshold")
 
         upd = supabase.position_updates[0]
-        self.assertEqual(str(upd["realized_pl"]), "400.00")
+        self.assertEqual(Decimal(str(upd["realized_pl"])), Decimal("400.00"))
         self.assertEqual(upd["close_reason"], "dte_threshold")
         self.assertEqual(upd["fill_source"], "exit_evaluator")
 
@@ -296,7 +335,7 @@ class TestInternalFillPipeline(unittest.TestCase):
 
         upd = supabase.position_updates[0]
         self.assertEqual(upd["close_reason"], "envelope_force_close")
-        self.assertEqual(str(upd["realized_pl"]), "-100.00")
+        self.assertEqual(Decimal(str(upd["realized_pl"])), Decimal("-100.00"))
 
 
 class TestAnomalyPaths(unittest.TestCase):
@@ -341,48 +380,27 @@ class TestAnomalyPaths(unittest.TestCase):
         self.assertEqual(alert["metadata"]["stage"], "map_close_reason")
 
     def test_position_already_closed_aborts_with_critical_alert(self):
-        """Race: another handler closed the same position between
-        our SELECT and UPDATE. close_position_shared raises
-        PositionAlreadyClosed; caller writes critical alert and
-        returns routed_to='internal_aborted'."""
+        """CAS race (V17-1 A2): another handler already closed the position, so
+        the atomic RPC RAISEs position_already_closed. The transaction rolled
+        back (ZERO economic writes); the caller writes a critical alert and
+        returns the not-completed sentinel routed_to='internal_commit_failed' —
+        no duplicate close."""
         pos = _position(qty=1.0, entry_price=2.00, current_mark=3.00)
-        # update_rows=[] simulates 0-rows-affected (someone beat us to it).
-        supabase = _CapturingSupabase(pos, update_rows=[])
+        supabase = _CapturingSupabase(pos, rpc_raise=RuntimeError(
+            "commit_internal_close: position_already_closed pos-1 "
+            "(existing reason=target_profit_hit, source=alpaca_fill_reconciler)"
+        ))
 
-        # The diagnostic SELECT inside close_position_shared needs to
-        # return a row with status='closed' to raise
-        # PositionAlreadyClosed. Patch _TableChain.execute to return
-        # that on the limited select after the update attempt.
-        original_execute = _TableChain.execute
-        call_count = {"n": 0}
+        result = self._run_close(supabase, reason="target_profit")
 
-        def patched_execute(self):
-            # The update(s) already happened via the capturing path.
-            # On a paper_positions SELECT with limit (diagnostic), return closed row.
-            if self.name == "paper_positions" and self._op == "select":
-                call_count["n"] += 1
-                # First select = initial fetch; second select (post-0-row update)
-                # is the diagnostic. The helper uses .limit(1) on the diagnostic.
-                if call_count["n"] >= 2:
-                    return MagicMock(data=[{
-                        "status": "closed",
-                        "close_reason": "target_profit_hit",
-                        "fill_source": "alpaca_fill_reconciler",
-                        "closed_at": "2026-04-22T12:00:00Z",
-                    }])
-            return original_execute(self)
-
-        with patch.object(_TableChain, "execute", patched_execute):
-            result = self._run_close(supabase, reason="target_profit")
-
-        self.assertEqual(result.get("routed_to"), "internal_aborted")
+        self.assertEqual(result.get("routed_to"), "internal_commit_failed")
+        self.assertEqual(result.get("processed"), 0)
+        self.assertEqual(supabase.position_updates, [])   # no duplicate close write
+        self.assertEqual(len(supabase.rpc_calls), 1)      # one attempt, rolled back
         self.assertEqual(len(supabase.risk_alerts), 1)
         alert = supabase.risk_alerts[0]
         self.assertEqual(alert["severity"], "critical")
-        self.assertEqual(alert["metadata"]["stage"], "close_position_shared")
-        self.assertEqual(
-            alert["metadata"]["existing_close_reason"], "target_profit_hit"
-        )
+        self.assertEqual(alert["metadata"]["stage"], "commit_internal_close_cas")
 
 
 if __name__ == "__main__":

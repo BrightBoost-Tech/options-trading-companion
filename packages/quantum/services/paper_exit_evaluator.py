@@ -15,6 +15,7 @@ Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
 """
 
 import logging
+import math
 import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -24,10 +25,11 @@ from packages.quantum.services.close_math import (
     compute_realized_pl,
     PartialFillDetected,
 )
-from packages.quantum.services.close_helper import (
-    close_position_shared,
-    PositionAlreadyClosed,
-)
+# V17-1 A2 (2026-07-19): the internal close route no longer calls
+# close_position_shared / catches PositionAlreadyClosed — the position close (and
+# its CAS) moved into the atomic rpc_commit_internal_close_v1. The other three
+# close handlers (reconciler, orphan-repair, manual endpoint) still use
+# close_position_shared from close_helper directly.
 from packages.quantum.observability.alerts import alert, _get_admin_supabase
 from packages.quantum.services.exit_geometry import (
     compute_spread_geometry,
@@ -1735,10 +1737,10 @@ class PaperExitEvaluator:
         from packages.quantum.services.paper_autopilot_service import (
             PaperAutopilotService,
         )
-        from packages.quantum.services.paper_ledger_service import (
-            PaperLedgerService,
-            PaperLedgerEventType,
-        )
+        # V17-1 A2 (2026-07-19): the internal-fill ledger write moved into the
+        # atomic rpc_commit_internal_close_v1 (server-side), so PaperLedgerService
+        # is no longer imported here — the RPC inserts the single fill ledger row
+        # inside the same transaction as the order-fill / cash / position close.
 
         supabase = self.client
         analytics = get_analytics_service()
@@ -2164,8 +2166,6 @@ class PaperExitEvaluator:
                 f"[CLOSE_REASON] stage stamp failed order_id={order_id}: {_cr_e}"
             )
 
-        now = datetime.now(timezone.utc).isoformat()
-
         if position_is_alpaca:
             if dry_run:
                 # Log what we WOULD submit, but hold the position open
@@ -2231,12 +2231,11 @@ class PaperExitEvaluator:
                         f"order_id={order_id} position_id={position_id[:8]}"
                     )
                     # #62a-D4-PR2b: don't return — fall through to the
-                    # internal-fill block below (line 1252+) which fills
-                    # at current_mark, updates portfolio cash, emits
-                    # ledger entry, and calls close_position_shared
-                    # (writes learning_feedback_loops outcome for cohort
-                    # comparison). Same code path exercised by DRY_RUN
-                    # and Alpaca-failure-fallback flows.
+                    # internal-fill block below, which fills at the executable
+                    # side (#1017) and commits the order-fill + portfolio cash +
+                    # one fill ledger event + the position close atomically via
+                    # rpc_commit_internal_close_v1 (V17-1 A2). Same code path
+                    # exercised by the Alpaca-failure-fallback flow.
                 else:
                     try:
                         from packages.quantum.brokers.alpaca_order_handler import submit_and_track
@@ -2431,130 +2430,24 @@ class PaperExitEvaluator:
         except Exception as _cfg_e:
             logger.warning(f"[CLOSE_FILL_GAP] internal emit failed: {_cfg_e}")
 
-        # 1. Mark order as filled.
-        #
-        # FIX 3 (2026-05-18 instrumentation gap): also stamp submitted_at
-        # = now. Pre-fix, target_profit_hit close orders had filled_at
-        # populated but submitted_at NULL (verified empirically: 11 of
-        # 11 such closes in 60d had submitted_at IS NULL). This broke
-        # exit-side latency analysis for the most common exit path.
-        # For internal/fallback fills the submission and fill happen
-        # in the same call site, so submitted_at == filled_at is the
-        # most honest timestamp. Alpaca-path submissions write
-        # submitted_at separately upstream.
-        try:
-            _oj_row = supabase.table("paper_orders") \
-                .select("order_json").eq("id", order_id).single().execute().data or {}
-            _order_json = _oj_row.get("order_json") or {}
-        except Exception:
-            _order_json = {}
-        _order_json["fill_quality"] = _fill_quality
-        _order_json["fill_mid_reference"] = _mid_reference
-        # CLOSE_FILL_GAP P2 persistence (existing JSONB, NO migration): fold
-        # {cross, mid, fill, gap_fraction} into this same write so the
-        # distribution is queryable beyond short log retention. Best-effort.
-        try:
-            from packages.quantum.services.close_fill_gap import (
-                stamp_payload as _cfg_payload,
-            )
-            _order_json.update(_cfg_payload(_cfg_cross, _cfg_mid, exit_price))
-        except Exception:
-            pass
-        supabase.table("paper_orders").update({
-            "status": "filled",
-            "filled_qty": abs_qty,
-            "avg_fill_price": round(exit_price, 2),
-            "fees_usd": 0,
-            "submitted_at": now,
-            "filled_at": now,
-            "order_json": _order_json,
-        }).eq("id", order_id).execute()
+        # ── Internal/shadow close: ONE atomic economic commit (V17-1 A2) ─────
+        # F-A2 (2026-07-19, Lane 1B): this route previously wrote, in order, the
+        # order-filled row (:2463) → portfolio cash (:2487) → fill ledger (:2493)
+        # BEFORE it validated realized-P&L (:2537), the close reason (:2558), and
+        # ran the position-close CAS (:2573). supabase-py has NO client-side
+        # transaction, so a raise or a CAS race between the writes and the close
+        # orphaned a filled order + cash delta + ledger event against a still-open
+        # position (or double-booked a racing close). Lane 1A shipped
+        # rpc_commit_internal_close_v1, which performs the ENTIRE economic commit
+        # inside one plpgsql body = one implicit transaction (all-or-none; any
+        # RAISE rolls back every write). This route now does ALL validation FIRST,
+        # then makes EXACTLY ONE economic-commit RPC call. There is NO non-atomic
+        # fallback: an RPC failure leaves ZERO economic writes (the position stays
+        # OPEN) and is surfaced as typed non-success — never a separate Python
+        # write, never a swallow. The live/broker route is untouched (it returned
+        # above at the P0-A guard); the RPC also rejects live orders server-side.
 
-        # 2. Update portfolio cash
-        #    Buy-to-close (short position): cash -= exit_price * qty * 100
-        #    Sell-to-close (long position): cash += exit_price * qty * 100
-        txn_value = exit_price * abs_qty * multiplier
-        cash_delta = txn_value if side == "sell" else -txn_value
-
-        port_res = supabase.table("paper_portfolios") \
-            .select("cash_balance") \
-            .eq("id", position["portfolio_id"]) \
-            .single() \
-            .execute()
-        current_cash = float(port_res.data["cash_balance"])
-        new_cash = current_cash + cash_delta
-
-        supabase.table("paper_portfolios").update({
-            "cash_balance": new_cash,
-        }).eq("id", position["portfolio_id"]).execute()
-
-        # 3. Emit ledger entry
-        ledger = PaperLedgerService(supabase)
-        ledger.emit_fill(
-            portfolio_id=position["portfolio_id"],
-            amount=cash_delta,
-            balance_after=new_cash,
-            order_id=order_id,
-            position_id=position_id,
-            trace_id=position.get("trace_id"),
-            user_id=user_id,
-            metadata={
-                "side": side,
-                "qty": abs_qty,
-                "price": exit_price,
-                "fill_quality": _fill_quality,
-                "fill_mid_reference": _mid_reference,
-                "symbol": position["symbol"],
-                "fees": 0,
-                "source": "exit_evaluator",
-                "reason": reason,
-            },
-        )
-
-        # 4. Close position via shared pipeline.
-        #
-        # PR #6 refactor. Route the internal-fill close through the
-        # canonical close_math + close_helper stack so all 4 handlers
-        # produce bit-identical realized_pl for equivalent inputs.
-        #
-        # Internal simulation vs real broker fill: the reconciler path
-        # extracts close_legs from Alpaca fill data (actual per-leg
-        # prices). The internal-fill path has only a per-spread
-        # current_mark, so we synthesize a single LegFill from it.
-        # This is the legitimate architectural difference between real
-        # leg-level reconciliation and internal MTM simulation — both
-        # flow through the same compute_realized_pl contract.
-        synth_action = "sell" if qty > 0 else "buy"
-        spread_type = "debit" if qty > 0 else "credit"
-        synth_legs = [{
-            "symbol": position.get("symbol"),
-            "action": synth_action,
-            "filled_qty": abs_qty,
-            "filled_avg_price": exit_price,
-        }]
-
-        try:
-            realized_pl_dec = compute_realized_pl(
-                close_legs=synth_legs,
-                entry_price=Decimal(str(entry_price)),
-                qty=int(abs_qty),
-                spread_type=spread_type,
-            )
-        except PartialFillDetected as exc:
-            # Internal synthesis should never trip this; if it does,
-            # something is wrong with abs_qty/exit_price inputs.
-            _write_exit_eval_critical_alert(
-                supabase, position, user_id,
-                stage="compute_realized_pl",
-                reason=str(exc),
-            )
-            return {
-                "order_id": order_id,
-                "processed": 0,
-                "routed_to": "internal_aborted",
-                "note": f"compute_realized_pl failed: {str(exc)[:120]}",
-            }
-
+        # (1) PREVALIDATE — map + validate the close reason (BEFORE any write).
         mapped_reason = _map_close_reason(reason)
         if mapped_reason is None:
             _write_exit_eval_critical_alert(
@@ -2569,34 +2462,147 @@ class PaperExitEvaluator:
                 "note": f"Unknown reason {reason!r}",
             }
 
+        # (2) PREVALIDATE — compute + validate realized P&L via the canonical
+        # close_math contract (BEFORE any write). The internal-fill path has only
+        # a per-spread mark, so synthesize a single LegFill from the UNSIGNED
+        # magnitude (exit_price is |mark| from _close_limit_and_direction);
+        # compute_realized_pl signs by leg action. Same contract the reconciler /
+        # orphan-repair / manual routes use, so all four produce bit-identical
+        # realized_pl for equivalent inputs.
+        synth_action = "sell" if qty > 0 else "buy"
+        spread_type = "debit" if qty > 0 else "credit"
+        synth_legs = [{
+            "symbol": position.get("symbol"),
+            "action": synth_action,
+            "filled_qty": abs_qty,
+            "filled_avg_price": exit_price,
+        }]
         try:
-            close_position_shared(
-                supabase=supabase,
-                position_id=position_id,
-                realized_pl=realized_pl_dec,
-                close_reason=mapped_reason,
-                fill_source="exit_evaluator",
-                closed_at=datetime.now(timezone.utc),
+            realized_pl_dec = compute_realized_pl(
+                close_legs=synth_legs,
+                entry_price=Decimal(str(entry_price)),
+                qty=int(abs_qty),
+                spread_type=spread_type,
             )
-        except PositionAlreadyClosed as exc:
+        except PartialFillDetected as exc:
+            # Internal synthesis should never trip this; if it does, something is
+            # wrong with abs_qty/exit_price inputs. Zero economic writes so far.
             _write_exit_eval_critical_alert(
                 supabase, position, user_id,
-                stage="close_position_shared",
+                stage="compute_realized_pl",
                 reason=str(exc),
-                extra_metadata={
-                    "existing_close_reason": exc.existing_close_reason,
-                    "existing_fill_source": exc.existing_fill_source,
-                    "existing_closed_at": exc.existing_closed_at,
-                },
             )
             return {
                 "order_id": order_id,
                 "processed": 0,
                 "routed_to": "internal_aborted",
-                "note": "PositionAlreadyClosed — race with another close handler",
+                "note": f"compute_realized_pl failed: {str(exc)[:120]}",
             }
+
+        # (3) Canonical UNSIGNED fill magnitude + typed metadata + #1017
+        # provenance. NON-FINITE HYGIENE (Lane 1A re-review): the RPC guards its
+        # four cash-math params against NaN/±Inf but NOT the provenance-only
+        # fill_mid_reference / fill_quality — coerce a non-finite value to None
+        # HERE so a garbage provenance value never even reaches the DB (H9).
+        _fill_mid_ref = _mid_reference
+        if isinstance(_fill_mid_ref, (int, float)) and not math.isfinite(_fill_mid_ref):
+            _fill_mid_ref = None
+        _fill_quality_param = _fill_quality
+        if isinstance(_fill_quality_param, (int, float)) and not math.isfinite(_fill_quality_param):
+            _fill_quality_param = None
+
+        # Idempotency key: STABLE for this logical close (a pure function of the
+        # close order id). An exact retry of the same close re-derives the same
+        # key, so the RPC returns idempotent_replay (no duplicate order-fill, cash
+        # move, or ledger row). A distinct close order gets a distinct key.
+        commit_key = f"internal_close::{order_id}"
+
+        # (4) EXACTLY ONE economic-commit RPC call. Atomic: order-filled + commit
+        # marker, portfolio cash (direction/delta derived SERVER-side from the
+        # locked position sign — never a client balance_after), ONE fill ledger
+        # event, and the position close — all-or-none in one transaction.
+        try:
+            _commit_res = supabase.rpc(
+                "rpc_commit_internal_close_v1",
+                {
+                    "p_user_id": user_id or position.get("user_id"),
+                    "p_portfolio_id": position["portfolio_id"],
+                    "p_position_id": position_id,
+                    "p_close_order_id": order_id,
+                    "p_idempotency_key": commit_key,
+                    "p_close_reason": mapped_reason,
+                    "p_fill_source": "exit_evaluator",
+                    "p_close_side": side,
+                    "p_fill_qty": abs_qty,
+                    "p_fill_price_magnitude": exit_price,
+                    "p_realized_pl": float(realized_pl_dec),
+                    "p_multiplier": multiplier,
+                    "p_fill_quality": _fill_quality_param,
+                    "p_fill_mid_reference": _fill_mid_ref,
+                },
+            ).execute()
+            receipt = _commit_res.data if _commit_res is not None else None
+        except Exception as exc:
+            # Atomic RPC failure (missing RPC / schema error / any RAISE incl. the
+            # CAS-race position_already_closed): the transaction rolled back → ZERO
+            # economic writes, position still OPEN. Do NOT write anything
+            # separately; classify TYPED (critical alert + a not-completed sentinel
+            # so the monitor HOLDS the position open and re-evaluates next cycle —
+            # never a false force-close success or symbol bench). NEVER swallow.
+            _msg = str(exc)
+            _cas = "position_already_closed" in _msg
+            _write_exit_eval_critical_alert(
+                supabase, position, user_id,
+                stage="commit_internal_close_cas" if _cas else "commit_internal_close",
+                reason=_msg,
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "internal_commit_failed",
+                "note": (
+                    ("CAS race — position already closed by another handler: "
+                     if _cas else "atomic internal-close commit failed: ")
+                    + _msg[:140]
+                ),
+            }
+
+        # A non-committed receipt is a failed commit, not a success. The RPC
+        # RAISEs on every reject (caught above), so this only guards a future
+        # contract regression — classify typed, do not proceed as if closed.
+        if not isinstance(receipt, dict) or not receipt.get("committed"):
+            _write_exit_eval_critical_alert(
+                supabase, position, user_id,
+                stage="commit_internal_close",
+                reason=f"RPC returned a non-committed receipt: {receipt!r}",
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "internal_commit_failed",
+                "note": "atomic internal-close commit returned no committed receipt",
+            }
+
+        # (5) Post-commit hooks run ONLY on a successful atomic receipt and MUST
+        # be idempotency-guarded — a FUTURE inline learning/outcome hook goes
+        # behind `if not idempotent_replay:` so an exact-retry replay never
+        # double-fires. TRACE RESULT (V17-1 Lane 1B): this route currently fires
+        # NO downstream learning/outcome hook inline after the close —
+        # learning/outcome ingest is the separate nightly paper_learning_ingest
+        # job, which reads DB rows of record with its own position-level dedup and
+        # never runs here. `idempotent_replay` is surfaced in the return so a
+        # replay is distinguishable from a first commit.
+        idempotent_replay = bool(receipt.get("idempotent_replay"))
+        logger.info(
+            f"[INTERNAL_CLOSE_COMMIT] position={position_id[:8]} "
+            f"order={str(order_id)[:8]} reason={mapped_reason} "
+            f"realized_pl={float(realized_pl_dec)} "
+            f"cash_after={receipt.get('cash_after')} "
+            f"idempotent_replay={idempotent_replay}"
+        )
 
         return {
             "order_id": order_id,
             "processed": 1,
+            "idempotent_replay": idempotent_replay,
         }

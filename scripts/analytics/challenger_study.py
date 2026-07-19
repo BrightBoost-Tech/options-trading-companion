@@ -59,6 +59,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from packages.quantum.analytics.terminal_distribution import (
+    CONTRACT_VERSION,
     EvalRecord,
     ModelReport,
     Provenance,
@@ -74,6 +75,18 @@ from packages.quantum.analytics.terminal_distribution import (
     records_from_rows,
 )
 from packages.quantum.analytics.terminal_distribution.evaluator import HeadToHead
+
+# Frozen model-SET version string for the two models this study scores against
+# the stored production baseline: the frozen baseline ADAPTER (offline re-run of
+# production math) + the lognormal_v1 CHALLENGER. It is pinned to the
+# terminal-distribution CONTRACT_VERSION so any breaking change to the contract
+# (or a model swap that bumps it) yields a NEW version string. The event-driven
+# model-review lane (Lane J) folds this into its scorable-set fingerprint so a
+# model-version change re-triggers a review of the SAME closed outcomes. Kept
+# here (the single import site of the frozen models) so there is one authority;
+# consumers outside packages/quantum import it from this module (the import-lock
+# forbids production modules from naming the terminal_distribution package).
+MODEL_SET_VERSION = f"td-baseline+lognormal_v1@{CONTRACT_VERSION}"
 
 # --- DB strategy vocabulary -> foundation contract strategy -----------------
 STRATEGY_MAP: Dict[str, str] = {

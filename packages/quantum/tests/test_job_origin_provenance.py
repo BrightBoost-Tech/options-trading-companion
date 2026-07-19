@@ -161,6 +161,7 @@ class TestBuildOriginTaxonomy:
             "internal_retry",
             "manual_cli",
             "replay",
+            "event",
             "unknown_legacy",
         }
 

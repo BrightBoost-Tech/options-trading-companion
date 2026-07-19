@@ -139,6 +139,14 @@ EXPECTED_JOBS = [
     ("scheduler_heartbeat", "rth_30min"),
 ]
 
+# EVENT-DRIVEN jobs are DELIBERATELY ABSENT from EXPECTED_JOBS. This list is an
+# opt-IN cadence registry (daily / weekly / RTH-interval); the watchdog flags a
+# registered job that stops firing. A job with NO calendar cadence — e.g.
+# ``model_review_event`` (Lane J, enqueued from the learning-ingest tail only
+# when a NEW scorable close lands) — has no expected interval, so registering it
+# would produce a permanent false ``job_late``/``never_run``. Omission IS the
+# exemption. Pinned by test_model_review_event.test_watchdog_does_not_expect_it.
+
 # Output-freshness registry: tables whose newest row proves a feedback loop
 # is actually WRITING, not merely that its job "succeeded". EXPECTED_JOBS
 # checks a job RAN; this checks its OUTPUT is FRESH — the distinction that

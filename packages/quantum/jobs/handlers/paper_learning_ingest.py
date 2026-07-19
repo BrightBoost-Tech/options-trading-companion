@@ -181,6 +181,23 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             logger.error(f"[STREAK_BREAKER] wrapper failure: {sb_exc}")
             streak_breaker = {"error": str(sb_exc)[:200]}
 
+        # Lane J (2026-07-18): event-driven model review — tail step so it sees
+        # TONIGHT's freshly-ingested closes. When a NEW scorable close is
+        # persisted (its opening order carried the ⑤ capture markers), enqueue
+        # ONE observe-only terminal-distribution review; suppressed when a
+        # same-fingerprint review already ran. evaluate_and_maybe_enqueue_review
+        # is internally fail-soft (never raises, enqueues at most once); this
+        # wrapper only guards the import/plumbing seam. OBSERVE-ONLY — it never
+        # mutates any selector / ranker / gate / calibration state.
+        try:
+            from packages.quantum.analytics.model_review import (
+                evaluate_and_maybe_enqueue_review,
+            )
+            model_review = evaluate_and_maybe_enqueue_review(client)
+        except Exception as mr_exc:
+            logger.error(f"[MODEL_REVIEW] wrapper failure: {mr_exc}")
+            model_review = {"error": str(mr_exc)[:200], "enqueued": False}
+
         timing_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[paper_learning_ingest] Completed: {counts}")
@@ -192,6 +209,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "lookback_days": lookback_days,
             "target_date": target_date,
             "streak_breaker": streak_breaker,
+            "model_review": model_review,
             "notes": notes[:20],
         }
 

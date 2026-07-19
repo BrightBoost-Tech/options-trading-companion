@@ -542,13 +542,24 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   markers in `audit/runner-markers.log`, completion re-read from disk, UP-ping
   only after artifacts validate; adversarial FAIL→repair→PASS; the 07-19
   operator-checkout mutation + false-green ping class is dead IN CODE).
-  ⚠ LOCAL LANDING `BLOCKED_LOCAL_RUNNER_PULL`: the Task-Scheduler checkout still
-  runs the OLD runner until the operator reconciles its tracked ledger drift and
-  ff-pulls — until then each 00:00 CT run still resets that checkout. Six lane
-  PRs (A #1306 arm evidence · B #1307 HMAC canonical-prod + 8 suites unskipped ·
-  C #1304 holiday sessions · D #1310 lifecycle milestones · E #1309 OI known-at
-  · F #1308 divisibility) are BUILT + review-complete DRAFTS, merge-blocked by
-  the landing hard gate — merged code ≠ these; verify on GitHub before citing.
+  LOCAL LANDING RESOLVED same day (completion run): three-way compare proved
+  `LOCAL_UNIQUE_CONTENT=0`, duplicates archived, ff-pull clean — the
+  Task-Scheduler checkout now runs the FIXED runner (first natural proof =
+  the next 00:00 CT nightly: per-run-tagged markers in
+  `audit/runner-markers.log`, fresh `%LOCALAPPDATA%` worktree, checkout
+  untouched). **ALL SIX LANES MERGED+DEPLOYED** (serialized, opus adversarial
+  PASS each, per-merge 4/4 deploy SUCCESS + safety): A #1306 `362bd3da` arm
+  evidence — durable `job_runs.result.cycle_metadata.risk_basis_arm_evidence`,
+  enforcement DARK (one H9 loud-partial repair in review) · B #1307 `aced5eaf`
+  HMAC canonical prod detector, production nonce-outage UNCONDITIONALLY
+  fail-closed (typed 503), all 8 #768/#769/#774 security suites unskipped ·
+  C #1304 `54fd978a` holiday market sessions — broker-calendar `MarketSession`,
+  ENTRIES fail closed on outage, exits structurally immune · D #1310 `0feb6cec`
+  lifecycle milestones staged/broker_submitted/filled (observe-only; broker
+  evidence only) · E #1309 `0be131f6` OI observation-date vs retrieved-at split,
+  freshness only from real dates · F #1308 `d4c083ea` shared divisibility gate
+  (non-divisible leg → typed uncovered; byte-identity proven; caps still 0).
+  Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md`.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.

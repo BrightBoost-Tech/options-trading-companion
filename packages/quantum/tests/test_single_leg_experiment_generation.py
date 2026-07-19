@@ -45,6 +45,7 @@ def passing_context(**overrides):
     ctx = {
         "symbol": "SPY",
         "iv_rank": 15.0,                       # < 20 (low IV, guardrails convention)
+        "iv_rv_spread": -0.02,                 # <= 0 (VRP: IV cheap/fair vs realized)
         "closes": rising_closes(),             # bullish, |20d run| ~6% > 3%
         "market_data": {"open_interest": 500, "volume": 200},  # liquid; no earnings
         "spot": 112.5,
@@ -144,6 +145,52 @@ def test_missing_iv_rank_rejects():
 
 def test_high_iv_rank_rejects():
     assert _only_rejection(_gen([passing_context(iv_rank=55.0)])).reason_code == sl.IV_NOT_LOW
+
+
+# ── VRP (low-IV gate (b)) — real second condition, consumed + provenance ─────
+
+def test_missing_vrp_spread_rejects_h9():
+    # iv_rv_spread absent -> VRP proxy unavailable -> reject (never assume cheap).
+    ctx = passing_context()
+    ctx.pop("iv_rv_spread")
+    assert _only_rejection(_gen([ctx])).reason_code == sl.VRP_UNAVAILABLE
+
+
+def test_nonfinite_vrp_spread_rejects_h9():
+    assert _only_rejection(_gen([passing_context(iv_rv_spread=float("nan"))])).reason_code == sl.VRP_UNAVAILABLE
+
+
+def test_iv_rich_vs_realized_rejects():
+    # Positive spread = IV rich vs realized -> vrp_score_multiplier < 1.0 -> reject
+    # (a long-premium buy wants cheap IV). iv_rank still low, so ONLY the VRP gate fires.
+    assert _only_rejection(_gen([passing_context(iv_rv_spread=0.05)])).reason_code == sl.IV_NOT_CHEAP_VS_REALIZED
+
+
+def test_vrp_provenance_stamped_on_candidate():
+    from packages.quantum.analytics.opportunity_scorer import vrp_score_multiplier
+    c = _gen([passing_context(iv_rv_spread=-0.03)]).candidates[0]
+    assert c.vrp_iv_rv_spread == -0.03
+    # The REAL versioned surface was consumed (not a reimplemented threshold).
+    assert c.vrp_multiplier == vrp_score_multiplier(-0.03) and c.vrp_multiplier >= 1.0
+    assert "vrp_score_multiplier" in (c.vrp_source or "")
+    assert c.as_dict()["vrp_iv_rv_spread"] == -0.03
+
+
+def test_vrp_zero_spread_fair_iv_passes():
+    # Exactly fair (spread == 0 -> multiplier == 1.0) is acceptable for a buyer.
+    c = _gen([passing_context(iv_rv_spread=0.0)]).candidates[0]
+    assert c.vrp_multiplier == 1.0
+
+
+def test_vrp_ceiling_cannot_be_loosened_above_zero():
+    # A policy trying to loosen the VRP ceiling above 0.0 is clamped to 0.0:
+    # rich IV still rejects even with single_leg_max_vrp_spread=0.10.
+    cfg = {"single_leg_experiment_enabled": True, "single_leg_max_vrp_spread": 0.10}
+    res = sl.generate_single_leg_candidates(
+        [passing_context(iv_rv_spread=0.05)], cfg,
+        routing_mode=SHADOW_ONLY_ROUTING, ev_estimator=real_estimator,
+    )
+    assert _only_rejection(res).reason_code == sl.IV_NOT_CHEAP_VS_REALIZED
 
 
 def test_insufficient_bars_directional_unavailable():

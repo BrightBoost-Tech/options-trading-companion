@@ -927,7 +927,10 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             # shadow_only portfolios mark execution_mode='shadow_blocked'
             # and skip Alpaca. Fill simulation deferred to PR2b.
             from packages.quantum.brokers.execution_router import should_submit_to_broker
-            if not should_submit_to_broker(order_row["portfolio_id"], supabase):
+            # order=order_row so the submit-seam single-leg experiment hard veto
+            # can inspect the order (order_json marker) and block regardless of
+            # routing_mode. Byte-identical for every non-experiment order.
+            if not should_submit_to_broker(order_row["portfolio_id"], supabase, order=order_row):
                 # PR2a: mark routing decision (preserved through fill —
                 # _commit_fill only writes filled-state fields, not
                 # execution_mode).

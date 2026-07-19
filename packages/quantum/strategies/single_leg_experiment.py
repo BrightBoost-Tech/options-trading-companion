@@ -7,11 +7,16 @@ this (verticals/condors only), and the historical verdict was DON'T-BUILD
 experiment — no live selector-pool change, no env activation.
 
 DARK BY CONSTRUCTION (all four must hold before a single candidate is emitted):
-  1. POLICY OPT-IN — the policy's ``policy_config`` (jsonb on the policy
-     registry, PR #1279) must carry the explicit key
-     ``single_leg_experiment_enabled = true``. No existing policy has it; the
-     50-policy shadow-fleet design does NOT include it. Absent/false -> the
-     generator produces nothing (``enabled=False``), never a rejection.
+  1. POLICY OPT-IN — the policy's RAW ``policy_config`` jsonb on the VERSIONED
+     registry (``policy_registrations``, PR #1279 / migration 20260719000000)
+     must carry the explicit key ``single_leg_experiment_enabled = true``. The
+     opt-in is read straight from that jsonb via
+     ``load_policy_registration_config`` — NOT through PolicyConfig, whose
+     ``from_dict`` keeps only its 11 dataclass fields and would DROP the opt-in
+     key. All 50 approved small_tier_v1 policies lack the key (verified), so the
+     experiment is dark; absent/false -> the generator produces nothing
+     (``enabled=False``), never a rejection. A missing/faulted registry row fails
+     CLOSED (dark) — the safe polarity for a behavioral opt-in.
   2. SHADOW-ONLY ROUTING — the policy/portfolio routing_mode must be
      ``shadow_only``. A ``live_eligible`` routing REFUSES the whole experiment
      (LIVE_ROUTING_FORBIDDEN) even when the flag is set: this is the structural
@@ -27,10 +32,20 @@ DARK BY CONSTRUCTION (all four must hold before a single candidate is emitted):
      ``routing == shadow_only``, ``lifecycle_state == experimental``,
      ``experiment == single_leg``. Structurally, never more.
 
-CONDITIONS -> EXISTING SURFACES (cited, not reinvented):
-  * low-IV                 guardrails.compute_conviction_score (iv_rank < 20 is
-                           the BUY/long-premium low-IV convention) +
-                           opportunity_scorer VRP (iv_rv_spread <= 0 = IV cheap)
+CONDITIONS -> EXISTING SURFACES (cited AND consumed, not reinvented):
+  * low-IV                 TWO real, distinct gates, BOTH must hold:
+                           (a) iv_rank < 20 — guardrails.compute_conviction_score
+                               BUY/long-premium low-IV convention (percentile of
+                               a name's OWN IV history), and
+                           (b) VRP cheap/fair — opportunity_scorer.vrp_score_multiplier
+                               on iv_rv_spread (= atm_iv - rv_20d, computed once in
+                               regime_engine_v3): a long-premium buy requires IV
+                               NOT rich vs realized (spread <= 0 => multiplier >= 1.0).
+                               This is a CROSS-sectional cheapness measure iv_rank
+                               cannot express. The proxy is REJECTED if unavailable
+                               (H9 — never assumed cheap); provenance
+                               (source / iv_rv_spread / multiplier / known_at) is
+                               stamped on the candidate.
   * strong directional     services.momentum_signals.direction_from_strategy +
                            compute_momentum_signals (signed_run_up_in_direction)
   * no earnings proximity  analytics.guardrails.is_earnings_safe (14-day window)
@@ -60,6 +75,7 @@ from packages.quantum.analytics.guardrails import (
     check_liquidity,
     is_earnings_safe,
 )
+from packages.quantum.analytics.opportunity_scorer import vrp_score_multiplier
 from packages.quantum.brokers.execution_router import (
     LIVE_ROUTING_MODE,
     SHADOW_ONLY_ROUTING,
@@ -79,6 +95,13 @@ LIFECYCLE_STATE = "experimental"
 # convention for long premium. Reused verbatim as the default; policy-config
 # bounded.
 DEFAULT_MAX_IV_RANK = 20.0
+# VRP ceiling: the maximum tolerated iv_rv_spread (atm_iv - rv_20d) for a
+# long-premium buy. Default 0.0 — IV must be CHEAP or FAIR vs realized (a
+# non-down-weight from opportunity_scorer.vrp_score_multiplier, i.e. mult >= 1.0
+# exactly when spread <= 0). Policy-config may tighten this ceiling; it is a
+# TIGHTENING knob (never loosens the experiment past cheap/fair).
+DEFAULT_MAX_VRP_SPREAD = 0.0
+VRP_PROVENANCE_SOURCE = "opportunity_scorer.vrp_score_multiplier(iv_rv_spread=atm_iv-rv_20d, regime_engine_v3)"
 # Strong-directional magnitude: |20d run-up in the trade's direction|. Bounded
 # default; policy-config overridable.
 DEFAULT_MIN_DIRECTIONAL_RUN = 0.03
@@ -92,6 +115,8 @@ LIVE_ROUTING_FORBIDDEN = "live_routing_forbidden"
 CONTRACT_MISSING = "contract_missing"
 IV_RANK_UNAVAILABLE = "iv_rank_unavailable"
 IV_NOT_LOW = "iv_not_low"
+VRP_UNAVAILABLE = "vrp_unavailable"
+IV_NOT_CHEAP_VS_REALIZED = "iv_not_cheap_vs_realized"
 DIRECTIONAL_SIGNAL_UNAVAILABLE = "directional_signal_unavailable"
 NO_DIRECTIONAL_BIAS = "no_directional_bias"
 DIRECTIONAL_SIGNAL_WEAK = "directional_signal_weak"
@@ -155,6 +180,11 @@ class SingleLegCandidate:
     spot: Optional[float]
     dte_days: Optional[float]
     known_at: str
+    # VRP (low-IV gate (b)) provenance — the real versioned surface consumed, its
+    # inputs, and the as-of stamp (H9: no cheap-IV claim without this evidence).
+    vrp_iv_rv_spread: Optional[float] = None
+    vrp_multiplier: Optional[float] = None
+    vrp_source: Optional[str] = None
     occ_symbol: Optional[str] = None
     contracts: int = 1                       # INVARIANT: always 1
     routing: str = SHADOW_ONLY_ROUTING       # INVARIANT: always shadow_only
@@ -198,6 +228,9 @@ class SingleLegCandidate:
             "ev_pop": self.ev_pop,
             "ev_basis": self.ev_basis,
             "ev_model": self.ev_model,
+            "vrp_iv_rv_spread": self.vrp_iv_rv_spread,
+            "vrp_multiplier": self.vrp_multiplier,
+            "vrp_source": self.vrp_source,
             "routing": self.routing,
             "lifecycle_state": self.lifecycle_state,
             "experiment": self.experiment,
@@ -236,12 +269,78 @@ def experiment_enabled(policy_config: Optional[Mapping[str, Any]]) -> bool:
     return str(raw).strip().lower() in ("true", "1", "yes", "on")
 
 
+# Versioned policy registry (PR #1279, migration 20260719000000). The RAW jsonb
+# `policy_config` is the runtime truth for the opt-in — NOT PolicyConfig, whose
+# `from_dict` keeps only its 11 dataclass fields and would silently DROP the
+# single_leg_experiment_enabled key. This lookup therefore reads the raw jsonb.
+POLICY_REGISTRATIONS_TABLE = "policy_registrations"
+
+
+def load_policy_registration_config(
+    supabase,
+    policy_registration_id: str,
+    *,
+    epoch: Optional[str] = None,
+) -> Optional[Mapping[str, Any]]:
+    """Read-only fetch of the RAW `policy_config` jsonb from the versioned
+    `policy_registrations` registry.
+
+    Returns the raw jsonb mapping (which may carry keys BEYOND the 11-field
+    PolicyConfig dataclass — critically the ``single_leg_experiment_enabled``
+    opt-in that ``PolicyConfig.from_dict`` drops). Read-only.
+
+    Fail-CLOSED: a missing row, a null/non-object config, or ANY read fault
+    returns None (-> experiment DISABLED). That is the safe polarity for a
+    behavioral opt-in (§3): an unavailable/faulted registry can only keep the
+    experiment dark, never silently enable it."""
+    try:
+        query = (
+            supabase.table(POLICY_REGISTRATIONS_TABLE)
+            .select("policy_config")
+            .eq("policy_registration_id", policy_registration_id)
+        )
+        if epoch:
+            query = query.eq("effective_epoch", epoch)
+        res = query.limit(1).execute()
+        rows = getattr(res, "data", None)
+        if not rows:
+            return None
+        cfg = rows[0].get("policy_config")
+        return cfg if isinstance(cfg, Mapping) else None
+    except Exception:
+        # Fail-closed to dark — an unreadable registry never enables the experiment.
+        return None
+
+
+def experiment_enabled_for_registration(
+    supabase,
+    policy_registration_id: str,
+    *,
+    epoch: Optional[str] = None,
+) -> bool:
+    """Convenience: opt-in decision sourced from the versioned registry's RAW
+    config (fail-closed to disabled)."""
+    return experiment_enabled(load_policy_registration_config(supabase, policy_registration_id, epoch=epoch))
+
+
 def _max_iv_rank(policy_config) -> float:
     try:
         v = float(_cfg_get(policy_config, "single_leg_max_iv_rank", DEFAULT_MAX_IV_RANK))
     except (TypeError, ValueError):
         v = DEFAULT_MAX_IV_RANK
     return max(0.0, min(100.0, v))
+
+
+def _max_vrp_spread(policy_config) -> float:
+    """Ceiling on iv_rv_spread for the VRP cheap/fair gate. Default 0.0
+    (IV must be cheap or fair vs realized). A policy may only TIGHTEN below 0.0
+    (require strictly cheaper IV); a value > 0.0 is clamped to 0.0 so the
+    experiment can never be loosened to buy rich IV."""
+    try:
+        v = float(_cfg_get(policy_config, "single_leg_max_vrp_spread", DEFAULT_MAX_VRP_SPREAD))
+    except (TypeError, ValueError):
+        v = DEFAULT_MAX_VRP_SPREAD
+    return min(v, DEFAULT_MAX_VRP_SPREAD)
 
 
 def _min_directional_run(policy_config) -> float:
@@ -311,12 +410,29 @@ def _evaluate_symbol(
 
     known_at = str(scan_context.get("known_at") or datetime.now(timezone.utc).isoformat())
 
-    # 1. LOW-IV (guardrails BUY convention: iv_rank < 20). Missing -> reject (H9).
+    # 1a. LOW-IV — percentile of own history (guardrails BUY convention:
+    #     iv_rank < 20). Missing -> reject (H9).
     iv_rank = scan_context.get("iv_rank")
     if not isinstance(iv_rank, (int, float)) or not math.isfinite(iv_rank):
         return SingleLegRejection(symbol, IV_RANK_UNAVAILABLE, "iv_rank missing/non-finite — cannot confirm low IV")
     if float(iv_rank) > _max_iv_rank(policy_config):
         return SingleLegRejection(symbol, IV_NOT_LOW, f"iv_rank {iv_rank} > max {_max_iv_rank(policy_config)}")
+
+    # 1b. VRP — IV cheap/fair vs REALIZED (opportunity_scorer.vrp_score_multiplier
+    #     on iv_rv_spread = atm_iv - rv_20d). A distinct, cross-sectional cheapness
+    #     signal iv_rank cannot express. H9: unavailable -> reject (never assume
+    #     cheap). A long-premium buy requires spread <= ceiling (default 0.0), i.e.
+    #     a NON-down-weight multiplier (>= 1.0); IV rich vs realized -> reject.
+    iv_rv_spread = scan_context.get("iv_rv_spread")
+    if not isinstance(iv_rv_spread, (int, float)) or isinstance(iv_rv_spread, bool) or not math.isfinite(iv_rv_spread):
+        return SingleLegRejection(symbol, VRP_UNAVAILABLE, "iv_rv_spread (VRP proxy) missing/non-finite — cannot confirm IV cheap vs realized")
+    vrp_multiplier = vrp_score_multiplier(float(iv_rv_spread))
+    if float(iv_rv_spread) > _max_vrp_spread(policy_config):
+        return SingleLegRejection(
+            symbol, IV_NOT_CHEAP_VS_REALIZED,
+            f"iv_rv_spread {float(iv_rv_spread):.4f} > max {_max_vrp_spread(policy_config):.4f} "
+            f"(IV rich vs realized; vrp_mult={vrp_multiplier:.4f}) — long-premium wants cheap IV",
+        )
 
     # 2. STRONG DIRECTIONAL SIGNAL (momentum_signals surface).
     closes = scan_context.get("closes")
@@ -421,6 +537,9 @@ def _evaluate_symbol(
         spot=ev_inputs.spot,
         dte_days=dte,
         known_at=known_at,
+        vrp_iv_rv_spread=float(iv_rv_spread),
+        vrp_multiplier=float(vrp_multiplier),
+        vrp_source=VRP_PROVENANCE_SOURCE,
         occ_symbol=(str(contract.get("occ_symbol")) if contract.get("occ_symbol") else None),
         contracts=1,
     )
@@ -430,12 +549,22 @@ def _evaluate_symbol(
 
 def generate_single_leg_candidates(
     scan_contexts: List[Mapping[str, Any]],
-    policy_config: Optional[Mapping[str, Any]],
+    policy_config: Optional[Mapping[str, Any]] = None,
     *,
     routing_mode: str,
     ev_estimator: Optional[EvEstimator] = None,
+    policy_registration_id: Optional[str] = None,
+    supabase: Any = None,
+    registry_epoch: Optional[str] = None,
 ) -> SingleLegGenerationResult:
     """Generate one-contract shadow-only single-leg candidates.
+
+    Opt-in SOURCE: when ``policy_registration_id`` (+ ``supabase``) is supplied,
+    the opt-in and bounded params are read from the VERSIONED registry's RAW
+    `policy_config` jsonb (``load_policy_registration_config``) — not from any
+    ad-hoc dict, and not through PolicyConfig (which drops the opt-in key). A
+    missing/faulted registry row fails CLOSED (dark). When no registration id is
+    given, the caller-supplied ``policy_config`` mapping is used (DI / tests).
 
     Gate order (any failure short-circuits with a typed outcome):
       * policy opt-in absent/false -> enabled=False, zero candidates (dark).
@@ -444,11 +573,17 @@ def generate_single_leg_candidates(
         never enable the experiment, flag notwithstanding).
       * per symbol: every entry condition must pass, else a typed rejection.
 
-    ``scan_contexts`` is one mapping per symbol (symbol, iv_rank, closes/momentum,
-    market_data, spot, known_at, and a chosen ``contract`` dict). Contract
-    SELECTION (which strike/expiry) is the caller's responsibility — this
+    ``scan_contexts`` is one mapping per symbol (symbol, iv_rank, iv_rv_spread,
+    closes/momentum, market_data, spot, known_at, and a chosen ``contract`` dict).
+    Contract SELECTION (which strike/expiry) is the caller's responsibility — this
     generator owns the experiment's GATES and the one-contract stamping.
     """
+    if policy_registration_id is not None:
+        # Versioned registry is the opt-in truth (RAW jsonb; fail-closed to dark).
+        policy_config = load_policy_registration_config(
+            supabase, policy_registration_id, epoch=registry_epoch
+        )
+
     if not experiment_enabled(policy_config):
         return SingleLegGenerationResult(enabled=False, routing_mode=str(routing_mode or ""))
 

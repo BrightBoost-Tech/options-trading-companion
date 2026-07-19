@@ -65,6 +65,118 @@ def is_single_leg_experiment(order_request: Any) -> bool:
     return str(marker or "").strip().lower() == SINGLE_LEG_EXPERIMENT
 
 
+# Single-leg experiment strategy names — emitted ONLY by the single-leg
+# experiment. contract.py verified verticals/condors are the ENTIRE pre-existing
+# structure surface; long_call/long_put were ADDED by #1287 for this experiment.
+# A paper_positions row carries NO explicit experiment column (only strategy /
+# strategy_key), so on the CLOSE seam these names are the by-construction marker.
+# ⚠ SEAM: a FUTURE non-experimental single-leg feature would also match these
+# names — revisit before building one (mirrors the add-to-position seam already
+# on the ledger).
+SINGLE_LEG_EXPERIMENT_STRATEGIES = frozenset({"long_call", "long_put"})
+
+
+def _coerce_mapping(obj: Any) -> Mapping:
+    if isinstance(obj, Mapping):
+        return obj
+    d = getattr(obj, "__dict__", None)
+    return d if isinstance(d, Mapping) else {}
+
+
+def is_single_leg_experiment_row(row: Any) -> bool:
+    """Submit-seam recognizer: True iff a DB row (paper_orders / paper_positions)
+    or an order request is a single-leg experiment that must never broker-submit.
+
+    Broader than ``is_single_leg_experiment`` (which keys on a top-level marker
+    only) so it fires on the SHAPES the real submit seam actually sees:
+      1. the explicit experiment marker at top level, OR nested inside
+         ``order_json`` (paper_orders stores the order request under an
+         ``order_json`` jsonb column — no top-level experiment column), OR
+      2. a single-leg experiment strategy name (long_call/long_put) on
+         strategy / strategy_key / strategy_type, top level or in order_json
+         (the paper_positions close shape carries no experiment column — see the
+         SEAM note on SINGLE_LEG_EXPERIMENT_STRATEGIES)."""
+    d = _coerce_mapping(row)
+    if not d:
+        return False
+    if is_single_leg_experiment(d):
+        return True
+    order_json = d.get("order_json")
+    oj = order_json if isinstance(order_json, Mapping) else {}
+    if oj and is_single_leg_experiment(oj):
+        return True
+
+    def _strategy_hit(m: Mapping) -> bool:
+        for key in ("strategy", "strategy_key", "strategy_type"):
+            val = m.get(key)
+            if isinstance(val, str) and val.strip().lower() in SINGLE_LEG_EXPERIMENT_STRATEGIES:
+                return True
+        return False
+
+    return _strategy_hit(d) or (bool(oj) and _strategy_hit(oj))
+
+
+def _alert_single_leg_submit_blocked(portfolio_id: str, supabase, order: Any) -> None:
+    """The single-leg experiment veto just blocked a broker submit. Emit LOUD
+    (critical alert) iff the portfolio was ``live_eligible`` — there the veto
+    actually OVERRODE a broker order (an upstream bug: a shadow-only experiment
+    reached a live-routed portfolio). For a shadow_only/missing portfolio the
+    routing check below would have blocked anyway (the normal shadow path), so a
+    single info line suffices. Best-effort — never raises."""
+    routing = None
+    try:
+        res = supabase.table("paper_portfolios") \
+            .select("routing_mode") \
+            .eq("id", portfolio_id) \
+            .limit(1) \
+            .execute()
+        if getattr(res, "data", None):
+            routing = res.data[0].get("routing_mode")
+    except Exception:
+        routing = None
+    if routing == LIVE_ROUTING_MODE:
+        logger.critical(
+            "[ROUTING] single-leg experiment order BLOCKED at the submit seam on a "
+            "LIVE_ELIGIBLE portfolio %s — shadow-only by construction; the veto "
+            "overrode a broker submission (upstream bug: a single-leg experiment "
+            "reached a live-routed portfolio)", str(portfolio_id)[:8],
+        )
+        try:
+            from packages.quantum.observability.alerts import alert, _get_admin_supabase
+            alert(
+                _get_admin_supabase(),
+                alert_type="single_leg_experiment_live_submit_blocked",
+                severity="critical",
+                message=(
+                    f"single-leg experiment blocked from broker submit on "
+                    f"live_eligible portfolio {portfolio_id}"
+                ),
+                metadata={
+                    "function_name": "should_submit_to_broker",
+                    "portfolio_id": str(portfolio_id),
+                    "consequence": (
+                        "Broker submission blocked (single-leg experiment is "
+                        "shadow-only by construction). No broker order placed; the "
+                        "order is marked shadow_blocked and fills internally."
+                    ),
+                    "operator_action_required": (
+                        "Investigate how a single-leg experiment order reached a "
+                        "live_eligible portfolio — the experiment is dark/shadow-only "
+                        "and should never bind to a live-routed portfolio."
+                    ),
+                },
+            )
+        except Exception:
+            # Alert path failure must not break the routing decision.
+            pass
+    else:
+        logger.info(
+            "[ROUTING] single-leg experiment order blocked at submit seam "
+            "(shadow-only by construction; portfolio %s routing=%s)",
+            str(portfolio_id)[:8], routing,
+        )
+
+
 def assert_single_leg_shadow_only(
     order_request: Any,
     *,
@@ -95,7 +207,7 @@ def assert_single_leg_shadow_only(
         )
 
 
-def should_submit_to_broker(portfolio_id: str, supabase) -> bool:
+def should_submit_to_broker(portfolio_id: str, supabase, order: Any = None) -> bool:
     """True if portfolio's routing_mode is live_eligible.
 
     False (block broker submission) if shadow_only or if the portfolio
@@ -113,7 +225,21 @@ def should_submit_to_broker(portfolio_id: str, supabase) -> bool:
 
     Composition with EXECUTION_MODE: routing_mode='shadow_only' blocks
     broker submission regardless of EXECUTION_MODE setting.
+
+    SINGLE-LEG EXPERIMENT HARD VETO (submit-seam SAFETY OWNER): when ``order`` is
+    supplied and carries the single-leg experiment marker
+    (``is_single_leg_experiment_row``), returns False (block broker submit)
+    REGARDLESS of routing_mode — even a mistakenly ``live_eligible`` portfolio
+    cannot broker-submit it. This seam — the one the 3 broker-submit sites call —
+    is now the OWNER of that safety; the ExecutionRouter.execute_order guard
+    (``assert_single_leg_shadow_only``, no production callers) remains as
+    defense-in-depth. A critical alert fires iff the veto overrode a live_eligible
+    routing. For any non-single-leg order — or when ``order`` is omitted — behavior
+    is byte-identical to the pre-veto function.
     """
+    if order is not None and is_single_leg_experiment_row(order):
+        _alert_single_leg_submit_blocked(portfolio_id, supabase, order)
+        return False
     try:
         res = supabase.table("paper_portfolios") \
             .select("routing_mode") \

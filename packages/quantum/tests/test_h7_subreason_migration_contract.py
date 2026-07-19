@@ -1,14 +1,16 @@
 """Lane B — contract tests for the h7_subreason CHECK migration FILE
 (20260719010000_h7_subreason_check.sql, unapplied by design).
 
-Pins the migration text to the writer contract:
-  - the CHECK's h7_subreason IN-list is set-equal to the writer's
-    H7_SUBREASONS frozenset (a drifted enum would strand writes / mislabel);
+Pins the migration text to the writer contract (amended per #1281 review):
+  - the CHECK's allowlist is set-equal to H7_SUBREASONS + the 'unspecified'
+    sentinel (SIX values) — the sentinel is accepted ON PURPOSE so the writer's
+    demote-then-retry fallback can never strand a candidate with zero finals;
+  - presence is enforced via COALESCE(...,'') so a MISSING h7_subreason key on
+    an h7_dropped row is rejected (NULL IN (...) would otherwise pass a CHECK);
   - the guard is disposition-scoped (disposition <> 'h7_dropped' OR ...), so
     non-h7 rows are unaffected;
-  - added NOT VALID (writer-first backstop; VALIDATE is a follow-up);
-  - the sentinel 'unspecified' is NOT in the DB allowlist (crisp taxonomy —
-    the writer's soft-fail reconciliation is documented in the file);
+  - added NOT VALID (writer-first backstop; enforces new writes at ADD time,
+    VALIDATE only scans pre-existing rows);
   - purely ADDITIVE: only ever touches the Lane-4B table; no new value in the
     parent disposition enum (that CHECK lives in the earlier migration and is
     untouched here).
@@ -41,6 +43,15 @@ def _sql_no_line_comments():
     )
 
 
+def _check_in_list():
+    """The value list inside the CHECK's COALESCE(...) IN (...). Parsed from
+    the comment-stripped SQL so a prose 'IN (…)' in a -- line can't leak in."""
+    body = _sql_no_line_comments()
+    m = re.search(r"IN\s*\(([^)]+)\)", body, re.S)
+    assert m is not None, "CHECK IN(...) allowlist missing"
+    return set(re.findall(r"'([a-z_]+)'", m.group(1)))
+
+
 class TestH7SubreasonMigrationContract(unittest.TestCase):
     def test_file_exists_with_expected_name(self):
         self.assertTrue(MIGRATION.is_file(), MIGRATION)
@@ -49,27 +60,33 @@ class TestH7SubreasonMigrationContract(unittest.TestCase):
         self.assertIn("ADD CONSTRAINT ctd_h7_subreason_required", _sql())
         self.assertIn("CHECK (", _sql())
 
-    def test_in_list_is_set_equal_to_writer_frozenset(self):
-        sql = _sql()
-        m = re.search(r"h7_subreason'\)\s*IN\s*\(([^)]+)\)", sql, re.S)
-        self.assertIsNotNone(m, "h7_subreason IN(...) allowlist missing")
-        migration_set = set(re.findall(r"'([a-z_]+)'", m.group(1)))
-        self.assertEqual(migration_set, set(H7_SUBREASONS))
+    def test_allowlist_is_five_canonical_plus_sentinel(self):
+        # Six values: the writer's canonical frozenset + the soft-fail sentinel.
+        self.assertEqual(
+            _check_in_list(),
+            set(H7_SUBREASONS) | {H7_SUBREASON_UNSPECIFIED},
+        )
+
+    def test_sentinel_accepted_so_invariant_wins(self):
+        # The sentinel MUST be allow-listed: a rejected soft-fail write would,
+        # via the writer's demote-then-retry path, leave zero active finals.
+        self.assertIn(H7_SUBREASON_UNSPECIFIED, _check_in_list())
+
+    def test_canonical_five_all_present(self):
+        self.assertTrue(set(H7_SUBREASONS).issubset(_check_in_list()))
+
+    def test_missing_key_rejected_via_coalesce(self):
+        # COALESCE(...,'') maps an absent key to '' (not allow-listed) so a bare
+        # h7_dropped row is rejected — NULL IN (...) would otherwise pass.
+        self.assertIn("COALESCE(detail->>'h7_subreason', '')", _sql())
 
     def test_guard_is_disposition_scoped(self):
         # Non-h7 rows are exempt; the constraint only binds h7_dropped.
         self.assertIn("disposition <> 'h7_dropped'", _sql())
 
-    def test_sentinel_not_in_db_allowlist(self):
-        sql = _sql()
-        m = re.search(r"h7_subreason'\)\s*IN\s*\(([^)]+)\)", sql, re.S)
-        self.assertIsNotNone(m)
-        self.assertNotIn(H7_SUBREASON_UNSPECIFIED,
-                         set(re.findall(r"'([a-z_]+)'", m.group(1))))
-
     def test_added_not_valid(self):
-        # NOT VALID: never scans existing rows at add time (safe on a live
-        # table); VALIDATE is the operator's documented follow-up.
+        # NOT VALID: enforces on every NEW write at ADD time; only skips the
+        # one-time scan of PRE-EXISTING rows (safe on a live table).
         self.assertIn("NOT VALID", _sql())
 
     def test_purely_additive_only_the_lane4b_table(self):

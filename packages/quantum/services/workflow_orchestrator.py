@@ -3267,6 +3267,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 # is NOT stamped sizing_outcome='marketdata_quality_gate' (it
                 # did not traverse the gate); reason='unpriceable_candidate'
                 # distinguishes it within the quality_gate family.
+                # Query recipe within h7_subreason='quality_gate':
+                #   real marketdata gate (E4/E5):
+                #     AND detail->>'sizing_outcome' = 'marketdata_quality_gate'
+                #   this unpriceable death (E1):
+                #     AND detail->>'reason' = 'unpriceable_candidate'
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": "unpriceable_candidate",
                     "h7_subreason": "quality_gate",

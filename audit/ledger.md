@@ -29,9 +29,12 @@ test-outside-docs / migration / DB-write / broker / env / fleet / deploy / merge
    contract "met" + dead-man UP-ping fired over an empty evidence sink — success
    indistinguishable from silent death, the exact mode #1264 was built to kill. Proof
    VERIFIED-CODE + reflog.
-2. **F-A4-RISKBASIS-SILENT — MED** (A4, NEW): the `[RISK_BASIS_SHADOW]` instrument has never
-   emitted (`services/risk_basis_shadow.py:31` / `risk_budget_engine.py:418` /
-   `utilization_gate.py:353`); its silence blocks the P0-B arm gate.
+2. **F-A4-RISKBASIS-SILENT — MED** (A4, NEW): the exact P0-B arm-decision / `would_flip`
+   evidence required for the observe→enforce decision has not emitted or reached its expected
+   durable evidence contract (`services/risk_basis_shadow.py:31` / `risk_budget_engine.py:418` /
+   `utilization_gate.py:353`). Historical generic `[RISK_BASIS_SHADOW]` lines (e.g.
+   `basis=null_legacy` / heartbeats for `rbe_open_book`-class consumers) do not satisfy that
+   gate, and log lines are ephemeral — the P0-B arm gate cannot clear on what exists today.
 3. **F-A9-1 — MED** (A9, NEW P2 security; proof INFERRED-from-code):
    `task_signing_v4._is_production_mode()` (`:59-79`) diverges from canonical
    `security/config.is_production()`; an APP_ENV-only prod worker fails OPEN on nonce-store

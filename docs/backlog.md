@@ -32,10 +32,13 @@ Re-ranked build order (folds the v1.6 deltas into the Sunday standing below):
 2. **Monday ≥ 17:45Z (unchanged):** `monday_evidence_reader` → review → fleet activation
    decision — v1.6 verdict **READY_FOR_SEPARATE_AUTHORIZATION** (packet 1 + ratification 1 +
    separate explicit token; activation stays forbidden until then).
-3. **P0-B arm-gate blocker (NEW, MED — F-A4-RISKBASIS-SILENT):** the `[RISK_BASIS_SHADOW]`
-   comparison instrument has NEVER emitted (`services/risk_basis_shadow.py:31` ·
-   `risk_budget_engine.py:418` · `utilization_gate.py:353`) — diagnose the emission path
-   before any P0-B arm decision; an unarmed instrument cannot green-light an arm.
+3. **P0-B arm-gate blocker (NEW, MED — F-A4-RISKBASIS-SILENT):** the exact P0-B
+   arm-decision / `would_flip` evidence required for the observe→enforce decision has not
+   emitted or reached its expected durable evidence contract
+   (`services/risk_basis_shadow.py:31` · `risk_budget_engine.py:418` ·
+   `utilization_gate.py:353`). Historical generic `[RISK_BASIS_SHADOW]` lines (null_legacy /
+   heartbeat variants) do NOT satisfy that gate, and logs are ephemeral — build the durable
+   would-flip evidence before any P0-B arm decision; absent evidence cannot green-light an arm.
 4. **Security P2 pair (NEW):** (a) F-A9-1 — reconcile `task_signing_v4._is_production_mode()`
    (`:59-79`, keys `ENV`/`ENABLE_DEV_AUTH_BYPASS`) with canonical
    `security/config.is_production()` (`APP_ENV`/`RAILWAY_ENVIRONMENT*`); today an

@@ -56,6 +56,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from packages.quantum.analytics.learning_read_filter import partition_trusted_rows
+
 logger = logging.getLogger(__name__)
 
 MODEL_REVIEW_JOB_NAME = "model_review_event"
@@ -188,15 +190,26 @@ def fetch_study_rows(client: Any, *, max_outcomes: int = _MAX_OUTCOMES) -> Dict[
         if prev is None or _staged_key(po) < _staged_key(prev):
             open_by_sid[sid] = po
 
-    # 4. F-CREDIT-SIGN corrected flag (LATERAL EXISTS mirror).
+    # 4. F-CREDIT-SIGN corrected flag (LATERAL EXISTS mirror). Routed through the
+    #    #1042 learning quarantine (partition_trusted_rows): the credit-sign
+    #    correction marker rides on the REAL trade_closed / individual_trade
+    #    outcome row, so a synthetic / historical (historical_win / aggregate)
+    #    row must never set a live/paper study outcome's `corrected` display
+    #    flag. Fail-closed allowlist (semantically correct, not mere compliance);
+    #    it also logs the excluded-row count. Selecting outcome_type so the
+    #    partition can see it.
     corrected_sids: set = set()
     lfl = (
         client.table("learning_feedback_loops")
-        .select("suggestion_id, details_json")
+        .select("suggestion_id, outcome_type, details_json")
         .in_("suggestion_id", sids)
         .execute()
     )
-    for r in (getattr(lfl, "data", None) or []):
+    lfl_trusted = partition_trusted_rows(
+        getattr(lfl, "data", None) or [],
+        reader="model_review.corrected_flag",
+    )
+    for r in lfl_trusted:
         dj = r.get("details_json") or {}
         sid = r.get("suggestion_id")
         if sid and isinstance(dj, dict) and _CORRECTED_MARKER in dj:

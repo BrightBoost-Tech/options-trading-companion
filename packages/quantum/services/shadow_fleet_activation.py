@@ -53,6 +53,10 @@ LEGACY_POSITIONS_NOT_TERMINAL = "legacy_positions_not_terminal"
 LEGACY_ORDERS_NOT_TERMINAL = "legacy_orders_not_terminal"
 POLICY_REGISTRATION_MISSING = "policy_registration_missing"
 POLICY_REGISTRATION_DUPLICATE = "policy_registration_duplicate"
+# Registry-existence gates (Lane A): a structurally-valid id that is not an
+# approved row in policy_registrations for the fleet epoch can never bind.
+POLICY_NOT_REGISTERED = "policy_not_registered"
+POLICY_NOT_APPROVED = "policy_not_approved"
 SLOT_COUNT_INVALID = "slot_count_invalid"
 CAPITAL_CONTRACT_INVALID = "capital_contract_invalid"
 ALREADY_PROVISIONED = "already_provisioned"
@@ -66,6 +70,8 @@ READINESS_OUTCOMES = frozenset({
     LEGACY_ORDERS_NOT_TERMINAL,
     POLICY_REGISTRATION_MISSING,
     POLICY_REGISTRATION_DUPLICATE,
+    POLICY_NOT_REGISTERED,
+    POLICY_NOT_APPROVED,
     SLOT_COUNT_INVALID,
     CAPITAL_CONTRACT_INVALID,
     ALREADY_PROVISIONED,
@@ -73,6 +79,10 @@ READINESS_OUTCOMES = frozenset({
     READY_TO_PROVISION,
     READY_TO_ACTIVATE,
 })
+
+# Registry table + status contract (mirrors migration 20260719000000).
+POLICY_REGISTRATIONS_TABLE = "policy_registrations"
+APPROVED_STATUS = "approved"
 
 # ── Fail-closed terminality allowlists (mirrored in the RPC migration) ──────
 TERMINAL_ORDER_STATUSES = frozenset({
@@ -267,6 +277,94 @@ def _validate_policy_registrations(
     return None, normalized, detail
 
 
+# ── Registry-approval validation (Lane A: exists + approved + epoch) ─────────
+
+def _validate_registry_approvals(
+    supabase, unique_ids, epoch: str,
+) -> tuple:
+    """Revalidate structurally-valid policy ids against the registry.
+
+    Returns (outcome_or_None, detail). Additive gate — it can only BLOCK, never
+    loosen. Each id must be a row in `policy_registrations` whose
+    `effective_epoch` == the fleet epoch AND `approval_status` == 'approved'.
+
+    * an id absent for this epoch            -> POLICY_NOT_REGISTERED
+    * an id present but not 'approved'
+      (draft / retired / revoked)            -> POLICY_NOT_APPROVED
+    * the registry read fails (incl. the
+      table not existing yet)                -> SCHEMA_UNAVAILABLE (fail-closed;
+      a failed read is NEVER ready — the E8-3 []-sentinel lesson).
+    """
+    ids = sorted(set(unique_ids))
+    try:
+        res = (
+            supabase.table(POLICY_REGISTRATIONS_TABLE)
+            .select("policy_registration_id,approval_status,effective_epoch")
+            .in_("policy_registration_id", ids)
+            .eq("effective_epoch", epoch)
+            .execute()
+        )
+        rows = list(res.data or [])
+    except Exception as exc:  # fail-closed: a failed read is never ready
+        logger.warning("[SHADOW_FLEET] registry read failed: %s", exc)
+        return SCHEMA_UNAVAILABLE, {
+            "error": f"{type(exc).__name__}: {exc}",
+            "registry_epoch": epoch,
+        }
+
+    by_id = {r.get("policy_registration_id"): r for r in rows}
+    missing = [rid for rid in ids if rid not in by_id]
+    if missing:
+        return POLICY_NOT_REGISTERED, {
+            "registry_epoch": epoch,
+            "missing_registration_ids": missing[:10],
+            "missing_count": len(missing),
+        }
+    not_approved = [
+        rid for rid in ids
+        if str(by_id[rid].get("approval_status")) != APPROVED_STATUS
+    ]
+    if not_approved:
+        return POLICY_NOT_APPROVED, {
+            "registry_epoch": epoch,
+            "unapproved": [
+                {"policy_registration_id": rid,
+                 "approval_status": by_id[rid].get("approval_status")}
+                for rid in not_approved[:10]
+            ],
+            "unapproved_count": len(not_approved),
+        }
+    return None, {
+        "registry_epoch": epoch,
+        "registry_approved_count": len(ids),
+    }
+
+
+def fetch_approved_policy_ids(supabase, epoch: str) -> List[str]:
+    """Provisioning-acceptance helper: the EXACT set of approved policy ids
+    registered for `epoch`, sorted. Read-only.
+
+    Fail-closed: raises on a read/shape failure rather than returning an empty
+    list (which a caller could misread as 'zero approved policies'). Fable's
+    provisioning step consumes this to know which ids exist to bind.
+    """
+    res = (
+        supabase.table(POLICY_REGISTRATIONS_TABLE)
+        .select("policy_registration_id,approval_status,effective_epoch")
+        .eq("effective_epoch", epoch)
+        .eq("approval_status", APPROVED_STATUS)
+        .execute()
+    )
+    rows = res.data
+    if rows is None:
+        raise ShadowFleetActivationError(
+            "policy_registrations read returned no data attribute")
+    return sorted({
+        r["policy_registration_id"] for r in rows
+        if r.get("policy_registration_id")
+    })
+
+
 # ── Fleet-contract validation ───────────────────────────────────────────────
 
 def _validate_fleet_contract(
@@ -447,6 +545,17 @@ def evaluate_readiness(
     detail.update(reg_detail)
     if reg_outcome is not None:
         return ReadinessReport(step, reg_outcome, detail)
+
+    # Registry-existence gate (Lane A): every structurally-valid id must be an
+    # approved policy_registrations row for THIS fleet epoch. Additive gate,
+    # fail-closed (registry read failure / absent table -> schema_unavailable).
+    # retired/revoked -> POLICY_NOT_APPROVED, so they can never newly bind.
+    registry_outcome, registry_detail = _validate_registry_approvals(
+        supabase, set(normalized.values()), FLEET_EPOCH,
+    )
+    detail.update(registry_detail)
+    if registry_outcome is not None:
+        return ReadinessReport(step, registry_outcome, detail)
 
     detail["registered_slots"] = len(normalized)
     return ReadinessReport(step, READY_TO_ACTIVATE, detail)

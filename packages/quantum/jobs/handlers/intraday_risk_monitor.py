@@ -63,6 +63,38 @@ _STAGE5A_REASON_MAP = {
 _INTRADAY_TARGET_PROFIT_ENABLED = os.environ.get("INTRADAY_TARGET_PROFIT_ENABLED", "0") == "1"
 
 
+def _compact_greek_cf(cf: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Compact the OBSERVE-ONLY greek-cap counterfactual for job_runs.result.
+
+    The full per-cycle structure is large; this keeps only what a would-block
+    FREQUENCY study needs (the greek_cap_counterfactual_report.py source): the
+    availability flags plus, per reference row, its would_block state and the
+    blocking greeks. Never fabricates — a missing/unavailable CF passes its own
+    typed shape through. Pure; risk-decision-free."""
+    if not isinstance(cf, dict) or not cf.get("available"):
+        return {
+            "available": False,
+            "reason": (cf or {}).get("reason") or (cf or {}).get("error")
+            or "unavailable",
+        }
+    return {
+        "available": True,
+        "greeks_coverage_complete": cf.get("coverage", {}).get(
+            "greeks_coverage_complete"),
+        "canonical_complete": cf.get("coverage", {}).get("canonical_complete"),
+        "n_positions": cf.get("book", {}).get("n_positions"),
+        "rows": [
+            {
+                "name": r.get("name"),
+                "would_block": r.get("would_block"),
+                "blocking_greeks": [b.get("greek") for b in r.get("blocking", [])],
+                "unavailable_greeks": r.get("unavailable_greeks", []),
+            }
+            for r in cf.get("reference_rows", [])
+        ],
+    }
+
+
 def _intraday_cohort_stop_enabled() -> bool:
     """INTRADAY_COHORT_STOP_ENABLED — default ON (empty/unset → ON; only an
     explicit 0/false/no/off disables — the #1038 convention). When on, the
@@ -442,6 +474,9 @@ class IntradayRiskMonitor:
             daily_pnl=daily_pnl,
             weekly_pnl=weekly_pnl,
             config=config,
+            # OBSERVE-ONLY: dedups the greek-cap counterfactual flip-log across
+            # q15min cycles (§4 owner items 9+11). No decision reads this scope.
+            observe_scope=f"monitor:{user_id}",
         )
 
         # 4a. loss_per_symbol degraded protection — LOUD, not silent (#1035
@@ -596,6 +631,12 @@ class IntradayRiskMonitor:
             "warnings_logged": warnings_logged,
             "envelope_passed": result.passed,
             "sizing_multiplier": result.sizing_multiplier,
+            # OBSERVE-ONLY greek-cap counterfactual (owner items 9+11) — a COMPACT
+            # per-cycle summary so would-block frequencies accrue in job_runs.result
+            # (the greek_cap_counterfactual_report.py source). Arms nothing.
+            "greek_cap_counterfactual": _compact_greek_cf(
+                getattr(result, "greek_cap_counterfactual", None)
+            ),
         }
 
     # ── Market hours ──────────────────────────────────────────────────

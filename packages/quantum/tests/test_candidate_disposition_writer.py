@@ -18,10 +18,15 @@ fake the full-route tests drive) so writer behavior here and route behavior
 there share one database contract.
 """
 
+import os
 import unittest
+from unittest.mock import patch
 
 from packages.quantum.services.candidate_disposition import (
     DISPOSITIONS,
+    H7_SUBREASONS,
+    H7_SUBREASON_UNSPECIFIED,
+    H7SubreasonViolation,
     TABLE,
     CandidateDispositionRecorder,
     candidate_fingerprint,
@@ -207,7 +212,9 @@ class TestOneFinalPerIdentity(unittest.TestCase):
         rec = _recorder(FakeSupabase())
         first, retry = _cand(), _cand()  # same identity, two attempts
         rec.record_selected([first])
-        rec.record_final(first, "h7_dropped", detail={"reason": "h7_prefilter"})
+        rec.record_final(first, "h7_dropped",
+                         detail={"reason": "h7_prefilter",
+                                 "h7_subreason": "roundtrip_bp"})
         rec.record_selected([retry])
         rec.record_final(retry, "persisted_executable")
 
@@ -236,7 +243,8 @@ class TestOneFinalPerIdentity(unittest.TestCase):
     def test_final_for_unregistered_candidate_registers_first(self):
         rec = _recorder(FakeSupabase())
         c = _cand()
-        rec.record_final(c, "h7_dropped")
+        rec.record_final(c, "h7_dropped",
+                         detail={"h7_subreason": "sizing_zero"})
         (row,) = _rows(rec._sb)
         self.assertTrue(row["is_final"])
         self.assertEqual(row["attempt"], 1)
@@ -261,7 +269,8 @@ class TestFailSoft(unittest.TestCase):
         c = _cand()
         rec.record_selected([c])          # first touch trips detection
         calls_after_detection = client.ctd_table_calls
-        rec.record_final(c, "h7_dropped")  # no-op, no client traffic
+        rec.record_final(c, "h7_dropped",  # no-op, no client traffic
+                         detail={"h7_subreason": "sizing_zero"})
         rec.record_final(c, "rank_blocked")
 
         d = rec.counters_dict()
@@ -280,7 +289,8 @@ class TestFailSoft(unittest.TestCase):
         rec = _recorder(client)
         c = _cand()
         rec.record_selected([c])
-        rec.record_final(c, "h7_dropped")
+        rec.record_final(c, "h7_dropped",
+                         detail={"h7_subreason": "sizing_zero"})
         self.assertGreaterEqual(rec.counters["write_failures"], 1)
         self.assertFalse(rec.counters_dict()["table_missing"])
         self.assertEqual(rec.counters["finals_recorded"], 0)
@@ -308,6 +318,100 @@ class TestFailSoft(unittest.TestCase):
             "rank_blocked", "persisted_blocked", "persisted_executable",
             "staged", "broker_submitted", "filled", "superseded_retry",
         })
+
+
+class TestH7SubreasonContract(unittest.TestCase):
+    """Owner 2026-07-18 (H7_DROPPED_PARENT_PLUS_TYPED_SUBREASON): every
+    h7_dropped final MUST carry exactly one canonical detail['h7_subreason'].
+    Strict-raise in dev/test; fail-soft (count + sentinel) in production."""
+
+    def test_h7_subreasons_are_the_five_canonical_values(self):
+        self.assertEqual(H7_SUBREASONS, {
+            "roundtrip_bp", "quality_gate", "sizing_zero",
+            "risk_budget", "account_capacity",
+        })
+        # The sentinel is NOT a canonical value.
+        self.assertNotIn(H7_SUBREASON_UNSPECIFIED, H7_SUBREASONS)
+
+    def test_valid_subreason_writes_clean(self):
+        client = FakeSupabase()
+        rec = _recorder(client)
+        c = _cand()
+        rec.record_selected([c])
+        rec.record_final(c, "h7_dropped",
+                         detail={"reason": "sized_to_zero",
+                                 "h7_subreason": "sizing_zero"})
+        (row,) = _final_rows(client)
+        self.assertEqual(row["disposition"], "h7_dropped")
+        self.assertEqual(row["detail"]["h7_subreason"], "sizing_zero")
+        self.assertNotIn("h7_subreason_violation", row["detail"])
+        self.assertEqual(rec.counters["writer_taxonomy_violation"], 0)
+        self.assertEqual(rec.counters["finals_recorded"], 1)
+
+    def test_non_h7_disposition_needs_no_subreason(self):
+        # The contract binds h7_dropped ONLY — other dispositions are untouched.
+        client = FakeSupabase()
+        rec = _recorder(client)
+        with patch.dict(os.environ,
+                        {"CANDIDATE_DISPOSITION_STRICT_TAXONOMY": "1"}):
+            rec.record_final(_cand(), "persisted_executable")
+        (row,) = _final_rows(client)
+        self.assertEqual(row["disposition"], "persisted_executable")
+        self.assertEqual(rec.counters["writer_taxonomy_violation"], 0)
+
+    def test_strict_mode_raises_on_missing_subreason(self):
+        client = FakeSupabase()
+        rec = _recorder(client)
+        c = _cand()
+        with patch.dict(os.environ,
+                        {"CANDIDATE_DISPOSITION_STRICT_TAXONOMY": "1"}):
+            with self.assertRaises(H7SubreasonViolation):
+                rec.record_final(c, "h7_dropped",
+                                 detail={"reason": "sized_to_zero"})
+        # Counted before the raise; NO row persisted (raise precedes the write).
+        self.assertEqual(rec.counters["writer_taxonomy_violation"], 1)
+        self.assertEqual(_final_rows(client), [])
+
+    def test_strict_mode_raises_on_invalid_subreason(self):
+        client = FakeSupabase()
+        rec = _recorder(client)
+        with patch.dict(os.environ,
+                        {"CANDIDATE_DISPOSITION_STRICT_TAXONOMY": "1"}):
+            with self.assertRaises(H7SubreasonViolation):
+                rec.record_final(_cand(), "h7_dropped",
+                                 detail={"h7_subreason": "not_a_real_value"})
+        self.assertEqual(rec.counters["writer_taxonomy_violation"], 1)
+
+    def test_soft_mode_counts_and_stamps_sentinel(self):
+        """Production fail-soft: a missing subreason NEVER blocks the cycle —
+        it counts writer_taxonomy_violation, stamps the queryable sentinel, and
+        STILL writes the row (one-final-per-candidate invariant preserved)."""
+        client = FakeSupabase()
+        rec = _recorder(client)
+        c = _cand()
+        rec.record_selected([c])
+        with patch.dict(os.environ,
+                        {"CANDIDATE_DISPOSITION_STRICT_TAXONOMY": "0"}):
+            rec.record_final(c, "h7_dropped",
+                             detail={"reason": "sized_to_zero"})
+        (row,) = _final_rows(client)
+        self.assertEqual(row["disposition"], "h7_dropped")
+        self.assertEqual(row["detail"]["h7_subreason"],
+                         H7_SUBREASON_UNSPECIFIED)
+        self.assertTrue(row["detail"]["h7_subreason_violation"])
+        # The exact free-text cause is still preserved underneath.
+        self.assertEqual(row["detail"]["reason"], "sized_to_zero")
+        self.assertEqual(rec.counters["writer_taxonomy_violation"], 1)
+        self.assertEqual(rec.counters["finals_recorded"], 1)
+        self.assertEqual(rec.counters["write_failures"], 0)
+
+    def test_soft_mode_counter_surfaces_in_counters_dict(self):
+        client = FakeSupabase()
+        rec = _recorder(client)
+        with patch.dict(os.environ,
+                        {"CANDIDATE_DISPOSITION_STRICT_TAXONOMY": "0"}):
+            rec.record_final(_cand(), "h7_dropped")
+        self.assertEqual(rec.counters_dict()["writer_taxonomy_violation"], 1)
 
 
 if __name__ == "__main__":

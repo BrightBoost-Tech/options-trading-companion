@@ -123,12 +123,14 @@ class _FakeRpc:
 
 class FakeSupabase:
     def __init__(self, fleets=None, micro_accounts=None, orders=None,
-                 positions=None, fail_tables=(), rpc_handler=None):
+                 positions=None, registrations=None, fail_tables=(),
+                 rpc_handler=None):
         self.tables = {
             "shadow_fleets": list(fleets or []),
             "shadow_micro_accounts": list(micro_accounts or []),
             "paper_orders": list(orders or []),
             "paper_positions": list(positions or []),
+            "policy_registrations": list(registrations or []),
         }
         self.fail_tables = set(fail_tables)
         self.rpc_handler = rpc_handler
@@ -207,6 +209,17 @@ def _registrations(n=50):
     return {slot: f"pol-{slot:02d}" for slot in range(1, n + 1)}
 
 
+def _approved_registry_rows(reg_map, epoch="small_tier_v1", status="approved"):
+    """Registry rows (policy_registrations) for the ids in reg_map, all with the
+    given epoch + approval status. Mirrors the seed shape (id/status/epoch)."""
+    return [
+        {"policy_registration_id": rid,
+         "approval_status": status,
+         "effective_epoch": epoch}
+        for rid in sorted(set(reg_map.values()))
+    ]
+
+
 def _attestation():
     return {
         "stale_order_reconciliation_receipt": "risk_alerts:receipt-abc123",
@@ -216,6 +229,10 @@ def _attestation():
 
 
 def _clean_activatable_fake(**kw):
+    # Registry seeded APPROVED for the default 50 ids so the happy path reaches
+    # READY_TO_ACTIVATE (the Lane-A registry gate). Callers override via
+    # registrations=... to exercise the not-registered / not-approved cases.
+    kw.setdefault("registrations", _approved_registry_rows(_registrations()))
     return FakeSupabase(
         fleets=[_fleet_row()],
         micro_accounts=_micro_rows(),
@@ -771,16 +788,110 @@ class TestMigrationDriftLock:
         assert f"'{sfa.ACTIVATION_RECEIPT_ALERT_TYPE}'" in rpc_sql
 
 
+# ── Registry-approval gates (Lane A: exists + approved + epoch) ─────────────
+
+class TestRegistryApprovalGates:
+    """The structurally-valid 50-id map must ALSO be approved rows in
+    policy_registrations for the fleet epoch. Additive gate — it only ever
+    BLOCKS after the structural + legacy + contract gates pass. Failure
+    injected at the ORIGIN (the registry rows / the failing read), truth
+    asserted at the TOP (typed outcome, zero writes/RPCs on execute)."""
+
+    def test_all_approved_reaches_ready(self):
+        report = sfa.evaluate_readiness(
+            _clean_activatable_fake(), USER, step="activate",
+            policy_registrations=_registrations())
+        assert report.outcome == sfa.READY_TO_ACTIVATE
+        assert report.detail["registry_approved_count"] == 50
+        assert report.detail["registry_epoch"] == "small_tier_v1"
+
+    def test_draft_registration_blocks(self):
+        rows = _approved_registry_rows(_registrations())
+        rows[7]["approval_status"] = "draft"
+        fake = _clean_activatable_fake(registrations=rows)
+        report = sfa.evaluate_readiness(
+            fake, USER, step="activate",
+            policy_registrations=_registrations())
+        assert report.outcome == sfa.POLICY_NOT_APPROVED
+        assert report.detail["unapproved_count"] == 1
+        assert report.detail["unapproved"][0]["approval_status"] == "draft"
+
+    def test_retired_and_revoked_can_never_newly_bind(self):
+        for bad in ("retired", "revoked"):
+            rows = _approved_registry_rows(_registrations())
+            rows[0]["approval_status"] = bad
+            fake = _clean_activatable_fake(registrations=rows)
+            report = sfa.evaluate_readiness(
+                fake, USER, step="activate",
+                policy_registrations=_registrations())
+            assert report.outcome == sfa.POLICY_NOT_APPROVED, bad
+            assert report.detail["unapproved"][0]["approval_status"] == bad
+
+    def test_missing_registration_blocks(self):
+        rows = _approved_registry_rows(_registrations())[:-1]  # drop pol-50
+        fake = _clean_activatable_fake(registrations=rows)
+        report = sfa.evaluate_readiness(
+            fake, USER, step="activate",
+            policy_registrations=_registrations())
+        assert report.outcome == sfa.POLICY_NOT_REGISTERED
+        assert report.detail["missing_count"] == 1
+        assert report.detail["missing_registration_ids"] == ["pol-50"]
+
+    def test_wrong_epoch_is_not_registered(self):
+        rows = _approved_registry_rows(_registrations(), epoch="other_epoch")
+        fake = _clean_activatable_fake(registrations=rows)
+        report = sfa.evaluate_readiness(
+            fake, USER, step="activate",
+            policy_registrations=_registrations())
+        assert report.outcome == sfa.POLICY_NOT_REGISTERED
+        assert report.detail["missing_count"] == 50
+
+    def test_registry_read_failure_is_schema_unavailable(self):
+        """A failed registry read is NEVER ready (E8-3 []-sentinel lesson)."""
+        fake = _clean_activatable_fake(fail_tables={"policy_registrations"})
+        report = sfa.evaluate_readiness(
+            fake, USER, step="activate",
+            policy_registrations=_registrations())
+        assert report.outcome == sfa.SCHEMA_UNAVAILABLE
+
+    def test_execute_blocks_on_unapproved_zero_writes(self, monkeypatch):
+        _authorize(monkeypatch)
+        rows = _approved_registry_rows(_registrations())
+        rows[3]["approval_status"] = "draft"
+        fake = _clean_activatable_fake(registrations=rows)
+        with pytest.raises(sfa.ReadinessBlocked) as exc_info:
+            sfa.execute_activation(
+                fake, USER, idempotency_key="k",
+                policy_registrations=_registrations(),
+                attestation=_attestation(), confirm=sfa.CONFIRM_LITERAL)
+        assert exc_info.value.outcome == sfa.POLICY_NOT_APPROVED
+        assert fake.rpc_calls == [] and fake.writes == []
+
+    def test_fetch_approved_policy_ids_returns_exact_set(self):
+        rows = _approved_registry_rows(_registrations())
+        rows[0]["approval_status"] = "draft"          # excluded (not approved)
+        rows.append({"policy_registration_id": "other-epoch-pol",
+                     "approval_status": "approved",
+                     "effective_epoch": "other_epoch"})  # excluded (epoch)
+        fake = FakeSupabase(registrations=rows)
+        ids = sfa.fetch_approved_policy_ids(fake, "small_tier_v1")
+        assert ids == sorted(f"pol-{s:02d}" for s in range(2, 51))
+        assert "pol-01" not in ids and "other-epoch-pol" not in ids
+
+
 # ── Outcome vocabulary is closed ────────────────────────────────────────────
 
 def test_readiness_outcome_vocabulary_is_closed():
-    """The typed outcome set is exactly the Lane-3A specification (11)."""
+    """The typed outcome set is exactly the spec (11 Lane-3A + 2 Lane-A
+    registry-existence outcomes)."""
     assert sfa.READINESS_OUTCOMES == {
         "schema_unavailable",
         "legacy_positions_not_terminal",
         "legacy_orders_not_terminal",
         "policy_registration_missing",
         "policy_registration_duplicate",
+        "policy_not_registered",
+        "policy_not_approved",
         "slot_count_invalid",
         "capital_contract_invalid",
         "already_provisioned",

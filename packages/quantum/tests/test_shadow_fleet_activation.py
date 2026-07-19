@@ -225,6 +225,11 @@ def _attestation():
         "stale_order_reconciliation_receipt": "risk_alerts:receipt-abc123",
         "legacy_terminal_verified_at": "2026-07-17T02:00:00+00:00",
         "attested_by": "operator",
+        # The default fixture registry (_approved_registry_rows(_registrations()))
+        # has ids pol-01..pol-50, so the server-derived binding is exactly
+        # _registrations() and its fingerprint is the value the operator attests.
+        "expected_binding_fingerprint": sfa.binding_manifest_fingerprint(
+            _registrations()),
     }
 
 
@@ -643,6 +648,10 @@ class TestExecutionTransaction:
         assert att["stale_order_reconciliation_receipt"] == \
             "risk_alerts:receipt-abc123"
         assert att["attested_by"] == "operator"
+        # The operator-attested binding fingerprint is threaded to the RPC as a
+        # top-level param and equals the server-derived binding fingerprint.
+        assert params["p_expected_binding_fingerprint"] == \
+            sfa.binding_manifest_fingerprint(_registrations())
         # DB-derived effective time: no client timestamp of any kind.
         assert not any("effective" in key for key in params)
         assert fake.writes == []

@@ -18,9 +18,16 @@ Pins:
    function NEVER raises (a pricing bug can never abort a close).
 4. One-sided-but-executable (a long leg missing only its ask) → still the
    honest executable price, flagged 'executable_partial_quote'.
-5. Source pins: the internal-fill block selects the price BEFORE the fill
-   update, and persists fill_quality + fill_mid_reference on the order row
-   and in the ledger metadata.
+
+The former `TestFillBlockWiring` source-string pins (inspect.getsource
+assertions on `_order_json["fill_quality"]` / the ledger emit) were REMOVED for
+V17-1 A2 (2026-07-19, Lane 1B): they were the #1126 costume the doctrine warns
+against — a string match that stays green while the route walks past. The
+persistence now happens server-side inside rpc_commit_internal_close_v1, and the
+route-level guarantee (fill_quality + fill_mid_reference reach the atomic commit;
+the price is selected before the commit) is proven by driving the REAL
+_close_position end-to-end in test_internal_close_route_atomic_switch.py and
+test_credit_close_sign_contract.py.
 """
 
 import os
@@ -131,30 +138,11 @@ class TestFallbacks(unittest.TestCase):
         self.assertAlmostEqual(price, 4.131, places=3)
 
 
-class TestFillBlockWiring(unittest.TestCase):
-    """Source pins on _close_position's internal-fill block — the selection
-    happens before the fill update and the flags persist to the order row
-    and ledger metadata."""
-
-    def _src(self):
-        import inspect
-        from packages.quantum.services.paper_exit_evaluator import PaperExitEvaluator
-        return inspect.getsource(PaperExitEvaluator._close_position)
-
-    def test_price_selected_before_fill_update(self):
-        src = self._src()
-        self.assertIn("_select_internal_fill_price(", src)
-        self.assertLess(
-            src.index("_select_internal_fill_price("),
-            src.index('"avg_fill_price": round(exit_price, 2)'),
-        )
-
-    def test_quality_persisted_on_order_row_and_ledger(self):
-        src = self._src()
-        self.assertIn('_order_json["fill_quality"]', src)
-        self.assertIn('_order_json["fill_mid_reference"]', src)
-        self.assertIn('"fill_quality": _fill_quality', src)       # ledger metadata
-        self.assertIn('"fill_mid_reference": _mid_reference', src)
+# NOTE (V17-1 A2, Lane 1B): TestFillBlockWiring was REMOVED here — see the module
+# docstring. Its route-level intent is covered by driving the real _close_position
+# in test_internal_close_route_atomic_switch.py (fill_quality + fill_mid_reference
+# reach the atomic RPC; price selected before the commit) and
+# test_credit_close_sign_contract.py (executable magnitude committed, not the mid).
 
 
 if __name__ == "__main__":

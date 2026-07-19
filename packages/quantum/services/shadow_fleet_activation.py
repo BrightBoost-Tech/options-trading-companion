@@ -32,8 +32,11 @@ the two together):
   unknown future statuses — blocks activation.
 """
 
+import hashlib
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
@@ -108,7 +111,75 @@ ATTESTATION_REQUIRED_KEYS = (
     "stale_order_reconciliation_receipt",
     "legacy_terminal_verified_at",
     "attested_by",
+    "expected_binding_fingerprint",
 )
+
+
+# ── Binding-manifest canonical serialization (client↔SQL, ONE definition) ────
+# The activation binding is the slot→policy_registration_id map DERIVED
+# server-side by `ORDER BY policy_registration_id ASC` over the 50 approved
+# registry rows (slot N ← the Nth id). This ONE canonical serialization is
+# mirrored byte-for-byte inside the hardened activation RPC (migration
+# 20260719020000) so the client fingerprint and the SQL fingerprint are taken
+# over identical bytes. Ids are constrained to a charset that json.dumps never
+# escapes and the SQL `format('[%s,"%s"]', slot, id)` builder emits verbatim,
+# guaranteeing byte parity (no quote/backslash/unicode escaping divergence).
+BINDING_ID_CHARSET = re.compile(r"^[A-Za-z0-9_-]+$")
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _canonical_policy_id(rid: Any) -> str:
+    text = str(rid).strip()
+    if not text or not BINDING_ID_CHARSET.match(text):
+        raise ValueError(
+            f"policy_registration_id outside the canonical binding charset "
+            f"[A-Za-z0-9_-]: {rid!r}"
+        )
+    return text
+
+
+def canonical_binding_manifest(mapping: Mapping[Any, Any]) -> str:
+    """Deterministic canonical JSON for the slot→policy binding.
+
+    A compact JSON array of ``[slot_number, policy_registration_id]`` pairs
+    ordered by slot ascending: ``[[1,"id1"],[2,"id2"],...]``. The hardened
+    activation RPC builds the byte-identical string, so the SQL fingerprint is
+    over the same bytes. Keys may be int or str; ids are charset-guarded.
+    """
+    normalized = {int(k): v for k, v in mapping.items()}
+    pairs = [[slot, _canonical_policy_id(normalized[slot])]
+             for slot in sorted(normalized)]
+    return json.dumps(pairs, separators=(",", ":"))
+
+
+def binding_manifest_fingerprint(mapping: Mapping[Any, Any]) -> str:
+    """SHA-256 hex of ``canonical_binding_manifest`` (mirrors the RPC's
+    ``encode(extensions.digest(<canonical>,'sha256'),'hex')``)."""
+    return hashlib.sha256(
+        canonical_binding_manifest(mapping).encode("utf-8")
+    ).hexdigest()
+
+
+def derive_binding_manifest(approved_ids) -> Dict[int, str]:
+    """Server-authoritative slot→id binding: slot N ← the Nth approved id in
+    ``ORDER BY policy_registration_id ASC``.
+
+    Ordering is Python codepoint (``sorted``), which the RPC pins to match via
+    ``ORDER BY policy_registration_id COLLATE "C" ASC`` (byte/codepoint order).
+    The two are therefore structurally equal regardless of the DB's default
+    locale — see 20260719020000_harden_shadow_fleet_activation_rpc.sql.
+
+    Requires exactly ``MICRO_ACCOUNT_COUNT`` distinct approved ids (the fleet
+    has exactly 50 slots; an ambiguous count can never bind) — raises otherwise.
+    """
+    ordered = sorted(set(approved_ids))
+    if len(ordered) != MICRO_ACCOUNT_COUNT:
+        raise ShadowFleetActivationError(
+            f"registry_not_exactly_50_approved: {len(ordered)} approved ids "
+            f"(need {MICRO_ACCOUNT_COUNT})"
+        )
+    return {slot: ordered[slot - 1]
+            for slot in range(1, MICRO_ACCOUNT_COUNT + 1)}
 
 
 class ShadowFleetActivationError(Exception):
@@ -134,6 +205,12 @@ class ReadinessBlocked(ShadowFleetActivationError):
         self.outcome = outcome
         self.detail = detail
         super().__init__(f"readiness_blocked:{outcome}")
+
+
+class BindingManifestMismatch(ShadowFleetActivationError):
+    """The operator payload / attested fingerprint does not match the
+    server-derived binding (ORDER BY policy_registration_id ASC). Defense in
+    depth — the SQL RPC re-derives and is the final authority."""
 
 
 @dataclass(frozen=True)
@@ -196,10 +273,14 @@ def validate_attestation(attestation: Any) -> Dict[str, Any]:
 
     Required keys:
       * stale_order_reconciliation_receipt — non-blank reference to the
-        reconciliation receipt for the stale legacy orders.
+        reconciliation receipt for the stale legacy orders. NOTE (scenario 5):
+        only NON-BLANK is checked; existence is not validated (no durable typed
+        receipt contract yet — see the prerequisite packet). OPEN by design.
       * legacy_terminal_verified_at — timezone-aware ISO-8601 timestamp;
         becomes shadow_fleets.legacy_terminal_verified_at verbatim.
       * attested_by — non-blank operator identity.
+      * expected_binding_fingerprint — the operator-attested binding-manifest
+        fingerprint (SHA-256 hex). The RPC re-derives and must match it.
     """
     if not isinstance(attestation, Mapping):
         raise AttestationInvalid("attestation_payload_required")
@@ -218,10 +299,19 @@ def validate_attestation(attestation: Any) -> Dict[str, Any]:
         raise AttestationInvalid("attestation_unparseable_legacy_terminal_verified_at") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise AttestationInvalid("attestation_legacy_terminal_verified_at_must_be_tz_aware")
+    fingerprint = str(
+        attestation.get("expected_binding_fingerprint") or ""
+    ).strip().lower()
+    if not fingerprint:
+        raise AttestationInvalid("attestation_missing_expected_binding_fingerprint")
+    if not SHA256_HEX.match(fingerprint):
+        raise AttestationInvalid(
+            "attestation_expected_binding_fingerprint_must_be_sha256_hex")
     return {
         "stale_order_reconciliation_receipt": receipt,
         "legacy_terminal_verified_at": parsed.isoformat(),
         "attested_by": attested_by,
+        "expected_binding_fingerprint": fingerprint,
     }
 
 
@@ -663,6 +753,23 @@ def plan_activation(
     else:
         attestation_error = "attestation_not_supplied"
 
+    # Server-derived binding fingerprint (zero-write; best-effort). The operator
+    # attests this exact value; the RPC re-derives and is the final authority.
+    derived_fingerprint: Optional[str] = None
+    binding_fingerprint_matches: Optional[bool] = None
+    try:
+        derived_fingerprint = binding_manifest_fingerprint(
+            derive_binding_manifest(fetch_approved_policy_ids(supabase, FLEET_EPOCH))
+        )
+    except Exception as exc:  # fail-closed: unknown fingerprint never executes
+        logger.warning("[SHADOW_FLEET] binding fingerprint derivation failed: %s", exc)
+        derived_fingerprint = None
+    if attestation is not None and derived_fingerprint is not None:
+        supplied = str(
+            (attestation or {}).get("expected_binding_fingerprint") or ""
+        ).strip().lower()
+        binding_fingerprint_matches = bool(supplied) and supplied == derived_fingerprint
+
     return {
         "mode": "dry_run",
         "step": "activate",
@@ -670,8 +777,12 @@ def plan_activation(
         "readiness": readiness.as_dict(),
         "attestation_valid": attestation_valid,
         "attestation_error": attestation_error,
+        "derived_binding_fingerprint": derived_fingerprint,
+        "binding_fingerprint_matches": binding_fingerprint_matches,
         "would_execute": (
-            readiness.outcome == READY_TO_ACTIVATE and attestation_valid
+            readiness.outcome == READY_TO_ACTIVATE
+            and attestation_valid
+            and binding_fingerprint_matches is True
         ),
         "authorization_env": AUTHORIZATION_ENV,
         "authorized": activation_authorized(),
@@ -679,6 +790,8 @@ def plan_activation(
             "rpc": ACTIVATE_RPC,
             "effective_at": "db_now_in_rpc_transaction",
             "legacy_terminal_verified_at": "from_attestation_only",
+            "binding_rule": "server_derived_order_by_policy_registration_id_asc",
+            "expected_binding_fingerprint": derived_fingerprint,
             "slots_to_activate": MICRO_ACCOUNT_COUNT,
         },
         "receipt_spec": build_receipt_spec("activate", user_id, idempotency_key),
@@ -766,6 +879,27 @@ def execute_activation(
         policy_registrations
     )
 
+    # ── Server-authoritative binding + defense-in-depth (SQL RPC is final) ───
+    # Derive the binding from the registry (ORDER BY policy_registration_id ASC)
+    # and cross-check BOTH the operator-attested fingerprint AND the operator's
+    # slot map against it. On any mismatch the RPC is never called (zero writes).
+    # The RPC re-derives inside its own transaction and is the final authority.
+    derived_manifest = derive_binding_manifest(
+        fetch_approved_policy_ids(supabase, FLEET_EPOCH)
+    )
+    derived_fingerprint = binding_manifest_fingerprint(derived_manifest)
+    attested_fingerprint = normalized_attestation["expected_binding_fingerprint"]
+    if attested_fingerprint != derived_fingerprint:
+        raise BindingManifestMismatch(
+            f"binding_fingerprint_mismatch: attested {attested_fingerprint} != "
+            f"server-derived {derived_fingerprint}"
+        )
+    if normalized_registrations != derived_manifest:
+        raise BindingManifestMismatch(
+            "payload_binding_mismatch: operator slot map does not equal the "
+            "server-derived ORDER BY policy_registration_id ASC binding"
+        )
+
     res = supabase.rpc(
         ACTIVATE_RPC,
         {
@@ -776,6 +910,7 @@ def execute_activation(
                 for slot, rid in sorted(normalized_registrations.items())
             },
             "p_attestation": normalized_attestation,
+            "p_expected_binding_fingerprint": attested_fingerprint,
         },
     ).execute()
     logger.info("[SHADOW_FLEET] activation RPC result: %s", res.data)

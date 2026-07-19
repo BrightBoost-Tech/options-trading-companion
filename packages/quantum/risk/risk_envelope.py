@@ -26,6 +26,7 @@ from packages.quantum.risk.position_model import (
     _direction_sign,
     aggregate_greeks,
     analyze_payoff,
+    leg_full_contract_count,
     normalize_position,
 )
 
@@ -313,8 +314,16 @@ def check_greeks(
     same way (a 4-leg condor reported 4×|per-leg greek|). A leg whose side cannot
     be determined (unknown / missing action|side) is UNSIGNABLE and therefore
     typed uncovered (contributes nothing, counts against coverage), never a
-    fabricated unsigned add (H9). Magnitude scaling (``abs(qty) × 100``) is
-    UNCHANGED — leg-ratio (D3) and per-leg multiplier (D4) remain their own lanes.
+    fabricated unsigned add (H9).
+
+    **D3 FIX (leg-ratio-aware scaling):** each covered leg is scaled by its OWN
+    full contract count via the canonical ``position_model.leg_full_contract_count``
+    — the SAME magnitude ``aggregate_greeks`` composes (``signed_ratio ×
+    structure_quantity``) — not the position quantity. A 1×2 ratio's short 2-lot
+    is now counted twice, not once. Byte-identical on a 1:1 full-count book
+    (leg.quantity == abs(pos.quantity)); a malformed / zero leg count is typed
+    uncovered (contributes nothing, counts against coverage), never fabricated.
+    Only the per-leg multiplier (D4) remains its own lane (hardcoded 100 here).
 
     Coverage is reported via ``coverage_out`` (optional out-param, matching the
     ``check_loss_envelopes`` ``degraded_out`` idiom): ``{legs_total,
@@ -375,11 +384,19 @@ def check_greeks(
                 sign = _direction_sign(side_raw)
             except PositionNormalizationError:
                 continue
+            # D3: scale by the LEG's own full contract count (a 1×2 ratio's
+            # 2-lot counts twice), not the position quantity — the same
+            # magnitude aggregate_greeks composes. Byte-identical on a 1:1
+            # full-count book (leg.quantity == abs(pos.quantity)); a malformed
+            # / zero leg count is typed uncovered, never a fabricated add (H9).
+            count = leg_full_contract_count(leg, qty)
+            if count is None:
+                continue
 
-            total_delta += sign * d * abs(qty) * 100
-            total_gamma += sign * g * abs(qty) * 100
-            total_vega += sign * v * abs(qty) * 100
-            total_theta += sign * t * abs(qty) * 100
+            total_delta += sign * d * count * 100
+            total_gamma += sign * g * count * 100
+            total_vega += sign * v * count * 100
+            total_theta += sign * t * count * 100
             legs_with_greeks += 1
 
     greeks = {
@@ -1067,9 +1084,16 @@ def compute_stress_scenarios(
     ``greek * abs(qty)`` add treated a delta-hedged vertical/condor as if every
     leg pointed the same way; the payoff clamp bounded the result but a bounded
     phantom is still a dishonest measurement now that legs can carry real
-    greeks (post-#1259). Magnitude scaling (``abs(qty) × 100``) is UNCHANGED —
-    only the sign is added, applied exactly once. An unsignable side is
-    rejected upstream by ``_pos_risk`` (unrepresentable structure → raise).
+    greeks (post-#1259).
+
+    **D3 FIX (leg-ratio-aware scaling):** each leg's delta/vega is scaled by its
+    OWN full contract count via ``position_model.leg_full_contract_count`` — the
+    same magnitude ``aggregate_greeks`` composes (``signed_ratio ×
+    structure_quantity``) — not the position quantity, so a 1×2 ratio's 2-lot
+    counts twice. Byte-identical on a 1:1 full-count book; only the per-leg
+    multiplier (D4) stays hardcoded 100. The sign is applied exactly once. An
+    unsignable side is rejected upstream by ``_pos_risk`` (unrepresentable
+    structure → raise).
 
     Canonical-position consumer PR-3 (D5 closure): a defined-risk book cannot
     lose more than the sum of its structures' payoff max losses — arithmetic,
@@ -1133,9 +1157,11 @@ def compute_stress_scenarios(
             # 4×). The book was payoff-clamped so the number stayed
             # bounded-safe, but a bounded phantom is still a dishonest
             # measurement now that legs can carry real greeks (post-#1259).
-            # Magnitude scaling is UNCHANGED — the stress lane uses the
-            # hardcoded 100 multiplier and the POSITION quantity (leg-ratio D3
-            # is its own lane); only the sign is new, applied exactly once.
+            # D3 FIX: the magnitude is now each leg's OWN full contract count
+            # via position_model.leg_full_contract_count (the same magnitude
+            # aggregate_greeks composes, signed_ratio × structure_quantity), so
+            # a 1×2 ratio's 2-lot counts twice; only the per-leg multiplier (D4)
+            # stays hardcoded 100. Byte-identical on a 1:1 full-count book.
             #
             # Defense in depth: an unsignable side is already rejected upstream
             # by ``_pos_risk`` (``normalize_position`` calls this exact helper
@@ -1156,17 +1182,27 @@ def compute_stress_scenarios(
                 delta_missing_legs += 1
                 vega_missing_legs += 1
                 continue
+            # D3: the leg's own full contract count (ratio-aware). Defense in
+            # depth — _pos_risk already normalized every leg above, so a
+            # present count is always valid full-count here; a None can only
+            # arise from a degenerate leg, and the greek scenarios then go
+            # typed-missing rather than scale by a fabricated count (H9).
+            count = leg_full_contract_count(leg, qty)
+            if count is None:
+                delta_missing_legs += 1
+                vega_missing_legs += 1
+                continue
             greeks = leg.get("greeks") or pos.get("greeks") or {}
             delta = _finite_greek_value(greeks, "delta")
             vega = _finite_greek_value(greeks, "vega")
             if delta is None:
                 delta_missing_legs += 1
             else:
-                total_delta += sign * delta * abs(qty) * 100
+                total_delta += sign * delta * count * 100
             if vega is None:
                 vega_missing_legs += 1
             else:
-                total_vega += sign * vega * abs(qty) * 100
+                total_vega += sign * vega * count * 100
 
     # Payoff floor: Σ canonical max-loss totals (position-level, already
     # scaled by structure quantity and multiplier — never rescale). _pos_risk

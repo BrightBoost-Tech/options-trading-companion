@@ -2089,6 +2089,7 @@ def _build_cycle_metadata(
     available_envelope_dollars: Optional[float],
     h7_prefilter_dropped: Optional[int] = None,
     h7_prefilter_mode: Optional[str] = None,
+    tier_taper: Optional[dict] = None,
 ) -> dict:
     """Build cycle_metadata payload for job_runs.result.
 
@@ -2113,7 +2114,7 @@ def _build_cycle_metadata(
     H9 silent-decision generalization, "Early-exit observability
     symmetry" subsection.
     """
-    return {
+    _meta = {
         "exit_reason": exit_reason,
         "tier": tier,
         "regime": regime,
@@ -2123,6 +2124,13 @@ def _build_cycle_metadata(
         "h7_prefilter_dropped": h7_prefilter_dropped,
         "h7_prefilter_mode": h7_prefilter_mode,
     }
+    # DARK / observe-only: continuous tier-taper dual-run payload
+    # (tier_taper.observe). Additive — only inserted when supplied, so
+    # existing callers get a byte-identical dict. Never feeds sizing;
+    # see docs/specs/tier_taper_activation_packet.md.
+    if tier_taper is not None:
+        _meta["tier_taper"] = tier_taper
+    return _meta
 
 
 def _build_enriched_counts(
@@ -2371,6 +2379,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     # cycle (which intentionally has NO gate). Asymmetry by design —
     # see CLAUDE.md "Concurrency policy (micro tier)" section.
     _midday_tier = SmallAccountCompounder.get_tier(deployable_capital)
+
     if _midday_tier.max_trades == 1 and len(positions) >= 1:
         print(
             f"[Midday] Skipped: micro tier with {len(positions)} "
@@ -2414,6 +2423,47 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             ),
         }
 
+    # ── DARK dual-run: continuous tier-taper (observe-only) ──────────────
+    # Placed AFTER the micro-tier fast-skip so no taper math runs on the
+    # early-exit path. Computes the raw-cliff vs proposed-tapered sizing
+    # envelope at the tier seam and stashes the comparison for
+    # cycle_metadata. PURE and OBSERVE-ONLY: reads deployable_capital +
+    # regime (immutable primitives), never touches candidates / sizing_vars
+    # / allocation output; emitted to job_runs.result.cycle_metadata only.
+    # The live sizing path is byte-identical with or without this block.
+    # Hysteresis is stateless in DARK (previous_state=None → fail-closed
+    # raw-cliff seed); activation threads real cross-cycle state via
+    # tier_taper.extract_previous_tier_state on the prior job_run. Any
+    # failure is swallowed → payload None. See
+    # docs/specs/tier_taper_activation_packet.md.
+    _tier_taper_obs = None
+    try:
+        from packages.quantum.services.analytics import tier_taper as _tier_taper
+        _tier_taper_obs = _tier_taper.observe(
+            deployable_capital,
+            global_snap.state.value,
+            previous_state=None,
+        )
+        logger.info(
+            "[TIER_TAPER] v=%s equity=%.2f regime=%s raw_tier=%s "
+            "in_band=%s verdict=%s taper_frac=%.4f env$ cur=%s->prop=%s "
+            "state=%s(%s)",
+            _tier_taper_obs.get("engine_version"),
+            deployable_capital,
+            _tier_taper_obs.get("regime"),
+            _tier_taper_obs.get("raw_tier"),
+            _tier_taper_obs.get("in_band"),
+            _tier_taper_obs.get("verdict"),
+            _tier_taper_obs.get("taper_fraction") or 0.0,
+            (_tier_taper_obs.get("current") or {}).get("envelope_dollars"),
+            (_tier_taper_obs.get("proposed") or {}).get("envelope_dollars"),
+            _tier_taper_obs.get("effective_tier_state"),
+            _tier_taper_obs.get("hysteresis_decision"),
+        )
+    except Exception as _tt_err:  # observe-only: never affect the cycle
+        print(f"[TIER_TAPER] dual-run failed (non-fatal): {_tt_err}")
+        _tier_taper_obs = None
+
     analytics_service = AnalyticsService(supabase)
     print("\n=== MIDDAY DEBUG ===")
     print(f"Deployable capital: {deployable_capital}")
@@ -2456,6 +2506,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 deployable_capital=deployable_capital,
                 open_position_count=len(positions),
                 available_envelope_dollars=None,
+                tier_taper=_tier_taper_obs,
             ),
         }
 
@@ -2548,6 +2599,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                  deployable_capital=deployable_capital,
                  open_position_count=len(positions),
                  available_envelope_dollars=remaining_global,
+                 tier_taper=_tier_taper_obs,
              ),
          }
 
@@ -2777,9 +2829,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 # final. Shadow mode drops nothing, so records nothing.
                 if _ctd is not None:
                     for _dc, _dl in zip(_h7_dropped_cands, _h7_drops_log):
+                        # Typed subreason (owner 2026-07-18): the prefilter is
+                        # literally a round-trip BP check
+                        # (collateral + close_bp×safety > deployable_capital).
                         _ctd.record_final(
                             _dc, "h7_dropped",
-                            detail={"reason": "h7_prefilter", **_dl},
+                            detail={"reason": "h7_prefilter",
+                                    "h7_subreason": "roundtrip_bp", **_dl},
                         )
                 # New exit_reason when active-mode filter drops everything:
                 # set a flag so the downstream no_suggestions_after_gates
@@ -3008,6 +3064,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     deployable_capital=deployable_capital,
                     open_position_count=len(positions),
                     available_envelope_dollars=remaining_global,
+                    tier_taper=_tier_taper_obs,
                 ),
                 "debug": rejection_stats.to_dict() if rejection_stats else None,
             }
@@ -3052,6 +3109,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 deployable_capital=deployable_capital,
                 open_position_count=len(positions),
                 available_envelope_dollars=remaining_global,
+                tier_taper=_tier_taper_obs,
             ),
         }
 
@@ -3239,8 +3297,20 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # durable final (capital/priceability-fit family; exact cause in
             # detail.reason).
             if _ctd is not None:
+                # Typed subreason (owner 2026-07-18): suggested_entry<=0 is a
+                # data/priceability death — the same family as the marketdata
+                # quality gate, NOT capital-fit (it never reaches sizing). It
+                # is NOT stamped sizing_outcome='marketdata_quality_gate' (it
+                # did not traverse the gate); reason='unpriceable_candidate'
+                # distinguishes it within the quality_gate family.
+                # Query recipe within h7_subreason='quality_gate':
+                #   real marketdata gate (E4/E5):
+                #     AND detail->>'sizing_outcome' = 'marketdata_quality_gate'
+                #   this unpriceable death (E1):
+                #     AND detail->>'reason' = 'unpriceable_candidate'
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": "unpriceable_candidate",
+                    "h7_subreason": "quality_gate",
                     "suggested_entry": cand.get("suggested_entry"),
                 })
             continue
@@ -3483,6 +3553,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             if _ctd is not None:
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": "risk_budget_exhausted",
+                    "h7_subreason": "risk_budget",
                     "remaining_global": remaining_global,
                 })
             continue
@@ -3720,10 +3791,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e4_fatal",
-                                    # Typed discriminator so capital-fit queries
-                                    # can cleanly exclude marketdata deaths from
-                                    # the overloaded h7_dropped bucket (C2 pkt
-                                    # Option-A) without parsing reason strings.
+                                    # Typed subreason (owner 2026-07-18): the
+                                    # marketdata quality-gate family.
+                                    "h7_subreason": "quality_gate",
+                                    # Existing discriminator kept unchanged so
+                                    # capital-fit queries can cleanly exclude
+                                    # marketdata deaths without parsing reason
+                                    # strings (C2 pkt Option-A).
                                     "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
                                     "quality_gate_mode": quality_gate_mode,
@@ -3773,9 +3847,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                             if _ctd is not None:
                                 _ctd.record_final(cand, "h7_dropped", detail={
                                     "reason": "quality_gate_e5_skip_policy",
-                                    # Typed discriminator (see E4 above): lets
-                                    # capital-fit queries exclude marketdata
-                                    # deaths from the h7_dropped bucket cleanly.
+                                    # Typed subreason (owner 2026-07-18): the
+                                    # marketdata quality-gate family (see E4).
+                                    "h7_subreason": "quality_gate",
+                                    # Existing discriminator kept unchanged.
                                     "sizing_outcome": "marketdata_quality_gate",
                                     "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
                                     "quality_gate_mode": quality_gate_mode,
@@ -4032,8 +4107,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # REAL H7/capital-fit verdict — the dominant selected-then-
             # vanished death (4-of-4 on 2026-05-21). Durable final.
             if _ctd is not None:
+                # Typed subreason (owner 2026-07-18): the sizing engine
+                # returned contracts==0 — the dominant capital-fit death. Its
+                # 6 root causes (no-BP, round-trip, risk<1-contract,
+                # collateral, invalid-max-loss, lifecycle-veto) stay in
+                # detail.reason (sizing.reason), verbatim.
                 _ctd.record_final(cand, "h7_dropped", detail={
                     "reason": sizing.get("reason") or "sized_to_zero",
+                    "h7_subreason": "sizing_zero",
                     "round_trip_required": sizing.get("round_trip_required"),
                     "available_bp": deployable_capital,
                 })
@@ -4139,6 +4220,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 available_envelope_dollars=remaining_global,
                 h7_prefilter_dropped=h7_prefilter_dropped_count,
                 h7_prefilter_mode=h7_prefilter_mode,
+                tier_taper=_tier_taper_obs,
             ),
             "debug": {
                 "quality_gate_mode": quality_gate_mode,
@@ -4575,6 +4657,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 h7_prefilter_mode=(
                     h7_prefilter_mode
                     if "h7_prefilter_mode" in locals()
+                    else None
+                ),
+                tier_taper=(
+                    _tier_taper_obs
+                    if "_tier_taper_obs" in locals()
                     else None
                 ),
             ),

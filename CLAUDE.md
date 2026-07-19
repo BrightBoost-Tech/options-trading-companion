@@ -463,6 +463,37 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   reconciliation Phase 1 = 0 PRESERVE / 4 REJECT (local +281 pure lag);
   operator checkout fast-forwarded to main; the nightly wrapper is now LIVE.
   Zero broker writes; zero fleet activation; entries_paused untouched.
+  **07-19 PARALLEL IMPLEMENTATION run** (`docs/review/
+  parallel-implementation-results-2026-07-19.md`): six merges, adversarial
+  review + per-merge deploy each; serialized
+  #1290→#1289→#1291→#1293→#1294→#1292; final code main `4851ec8d` — #1290
+  89a736807 D3 ratio-blindness FIXED (`leg_full_contract_count` helper;
+  1×2→150; 1:1 byte-identical; check_greeks + stress migrated; §8 D3 line now
+  RESOLVED) · #1289 b3f10031 TCM v2 realized-accrual reporting (no schema;
+  join spine proven; 0/528 v2 stamps yet — accrues post-#1278 cycles) · #1291
+  bd87025f SQL-mirror parity fixtures (6 families / 78 tests / ZERO defects) ·
+  #1293 d60b7ad0 fork/collection sweep (rq fork-context root cause; 6 files +
+  12-file subprocess harness; full-suite collection 0 errors) · #1294
+  21e88e5f seven owner-decision packets (owner-packet-1..7:
+  activation-after-Sunday+Monday · RETAIN h7_dropped · E19 minimum 8/alt 15 ·
+  single-leg opt-in = two NEW draft registry rows · TCM N 15/alt 10 · taper
+  [800,1000] band · greek caps Plan A staged) · #1292 4851ec8d single-leg
+  hard veto at the REAL submit seam (`should_submit_to_broker` at 4 sites;
+  byte-identity vs 100% of live rows; VRP second gate resolves #1287 C1;
+  raw-jsonb registry opt-in lookup 0/50 enabled → DARK). **Fleet DRY-RUN
+  (Phase 1, READ-ONLY; NO writes)**: registry 50/50 approved, hashes
+  recompute-clean; fleet counts BEFORE==AFTER byte-identical (1
+  pending_legacy_terminal / 50 inactive / 0 active / 0 bindings / 50
+  shadow_only / 0 receipts); binding manifest fingerprint
+  6f8d14995ff4371bf940364d90bf82de1faff188823cf3e61280b81740836bad (ORDER BY
+  policy_registration_id ASC; anchors 17/33/50); all 13 replicated checks
+  PASS ⇒ READY_TO_ACTIVATE; **ACTIVATION REMAINS FORBIDDEN** (no un-activate
+  RPC — reversal = retire path; read-only replication, not service
+  invocation). States: single-leg DARK 0-opt-in · TCM v2 observe-only · taper
+  DARK · greek caps 0 · OI no-gate · E19-2B BLOCKED · event-review inert ·
+  operator checkout clean-behind (5c6ae8bf…) · UI still Palette-owned. ZERO
+  broker / production-DB-write / migration / env / fleet mutations this run;
+  ACTIVATE_FLEET=false; entries_paused untouched.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -643,9 +674,13 @@ unscheduled operator-triggered `replay_integrity_check` → `background`
   STILL NOT live protection. The `compute_stress_scenarios` unsigned
   residual was CLOSED 07-18 evening (#1276 — signed via the canonical
   `_direction_sign`; clamp preserved; `worst_case ≡ correlation_one` so the
-  warn surface is byte-identical). Remaining greek defects: D3
-  ratio-blindness (pinned). Arming caps is a separate owner decision and
-  must consume `greeks_coverage`; historical legs remain greeks-less.
+  warn surface is byte-identical). D3 ratio-blindness was RESOLVED 07-19
+  (#1290 `89a736807` — `leg_full_contract_count` owner helper; a 1×2 ratio
+  spread now scales to 150, a 1:1 structure is byte-identical to the pre-fix
+  path; both check_greeks and compute_stress_scenarios migrated to the
+  helper) — no greek defect remains pinned. Arming caps is STILL a separate
+  owner decision and must consume `greeks_coverage`; historical legs remain
+  greeks-less.
 - **Shadow-cohort ledgers are partly fiction** (quantified 07-02,
   `docs/specs/shadow_fill_realism.md`): shadows fill 100% by construction
   at 5–17× live size; live fill rate ≈1/3 (10 of ~54 orders died
@@ -899,7 +934,7 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-19 owner-decisions run)
+## Current overnight standing (2026-07-16; updated through the 07-19 parallel-implementation run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
@@ -911,11 +946,19 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
   INACTIVE** — fleet `b8b1ea1f…` status `pending_legacy_terminal`, 50 inactive
   `$2,000` slots / 50 `shadow_only` portfolios / 0 policy bindings, and **50
   approved policies are registered** (seed receipt `14ca10ab…`; NEVER
-  REAPPLY). **`ACTIVATE_FLEET=false` — the fleet is NOT active; ACTIVATION
-  (with owner attestation, binding the 50 slots to the 50 approved registry
-  ids) is the ONLY remaining owner-gated fleet step.** F-BAN was removed
-  07-19 (#1280) — a phantom feature; do not cite `banned_strategies`
-  enforcement as live.
+  REAPPLY). **07-19 parallel-implementation run: a Phase-1 READ-ONLY fleet
+  dry-run (NO writes) PASSED all 13 replicated checks ⇒ `READY_TO_ACTIVATE`**
+  — registry 50/50 approved with recompute-clean hashes, fleet counts
+  BEFORE==AFTER byte-identical, binding manifest fingerprint
+  `6f8d1499…` (`ORDER BY policy_registration_id ASC`). **`ACTIVATE_FLEET=false`
+  — the fleet is still NOT active; ACTIVATION (with owner attestation, binding
+  the 50 slots to the 50 approved registry ids) is the ONLY remaining
+  owner-gated fleet step, and it is IRREVERSIBLE-in-place (no un-activate RPC
+  — reversal = the retire path).** F-BAN was removed 07-19 (#1280) — a phantom
+  feature; do not cite `banned_strategies` enforcement as live. D3
+  ratio-blindness was RESOLVED 07-19 (#1290) — no greek defect remains
+  pinned, though all four caps still default 0 (arming is a separate owner
+  decision).
 - #1228 is a draft read-only persisted-tape hash/count verifier with an
   operator-triggered job path. It is unscheduled and does not prove full
   deterministic strategy replay.

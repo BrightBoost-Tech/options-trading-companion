@@ -410,14 +410,25 @@ class RiskBudgetEngine:
         # OFF → byte-identical). honest_any flags real max_loss_total coverage.
         from packages.quantum.services.risk_basis_shadow import (
             log_risk_basis_shadow as _rb_log, choose_basis as _rb_choose,
+            record_arm_evidence as _rb_arm,
         )
         _honest_ru = honest_risk_usage if honest_any else None
         # W2 (2026-07-12): pass the DECISION threshold (the capital-mismatch trip at
         # `current_risk_usage > deployable_capital*2` below) so would_flip is REAL,
         # not None — records whether switching premium→max_loss basis crosses it.
+        _rb_threshold = deployable_capital * 2 if deployable_capital > 0 else None
         _rb_log("rbe_open_book", current_risk_usage, _honest_ru,
                 context={"n_positions": len(positions)},
-                threshold_usd=(deployable_capital * 2 if deployable_capital > 0 else None))
+                threshold_usd=_rb_threshold)
+        # F-A4-RISKBASIS-SILENT (2026-07-19): durable arm evidence for the
+        # observe→enforce decision (the log line above is ephemeral). Empty book
+        # → not_applicable_empty_book, never silence; coverage counted off the
+        # real positions; no-op when no arm_evidence_scope is active (api / dev
+        # / morning-cycle callers). OBSERVE-ONLY — decision below is unchanged.
+        _rb_arm("rbe_open_book", current_usd=current_risk_usage,
+                honest_usd=_honest_ru, threshold_usd=_rb_threshold,
+                positions=positions, is_book=True,
+                context={"user_id": user_id, "n_positions": len(positions)})
         current_risk_usage = _rb_choose(current_risk_usage, _honest_ru)
 
         if current_risk_usage > deployable_capital * 2 and deployable_capital > 0:

@@ -74,6 +74,7 @@ audit/cron.log
 # operational, per-run, machine-local; never committed. Reports and
 # ALERT-*-runner.md failure artifacts are NOT ignored (they are the findings
 # the morning ritual sweeps).
+audit/runner-markers.log
 audit/transcripts/
 audit/manifests/
 audit/snapshots/

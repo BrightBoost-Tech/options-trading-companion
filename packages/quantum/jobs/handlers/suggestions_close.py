@@ -16,7 +16,13 @@ from typing import Any, Dict
 
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle
 from packages.quantum.services.strategy_loader import load_strategy_config, ensure_default_strategy_exists
-from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async, is_market_day
+from packages.quantum.jobs.handlers.utils import (
+    get_admin_client,
+    get_active_user_ids,
+    run_async,
+    is_market_day,
+    MarketCalendarUnavailable,
+)
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.db import _to_jsonable
 
@@ -50,8 +56,20 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     notes = []
     counts = {"processed": 0, "failed": 0, "synced": 0, "skipped": 0}
 
-    # === FAST PATH: skip on weekends ===
-    is_trading, market_reason = is_market_day()
+    # === FAST PATH: skip on non-trading days (weekends + exchange holidays) ===
+    # This is a CLOSE / exit-management path, NOT an entry path: a transient
+    # calendar outage must NOT block exit-suggestion generation (the broker
+    # rejects closed-market orders downstream, and the intraday monitor owns
+    # continuous exit protection). So on an UNREADABLE calendar we PRESERVE the
+    # legacy always-ran semantics and proceed; a successfully-determined
+    # holiday/weekend still skips (F-A10-HOLIDAY — now holiday-aware).
+    try:
+        is_trading, market_reason = is_market_day()
+    except MarketCalendarUnavailable as e:
+        is_trading, market_reason = True, f"market_calendar_degraded_proceed: {e}"
+        notes.append(
+            f"[MARKET_SESSION] calendar unreadable — proceeding (exit path): {e}"
+        )
     if not is_trading:
         return {"ok": True, "fast_path": True, "reason": market_reason,
                 "counts": counts, "timing_ms": 0}

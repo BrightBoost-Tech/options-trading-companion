@@ -149,6 +149,162 @@ def leg_fingerprint(legs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
     return hashlib.sha256(";".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+# =====================================================================
+# Lane H — exact-leg OPEN-INTEREST (OI) capture + hypothetical-floor
+# counterfactuals. OBSERVE-FIRST, NO GATE.
+# ---------------------------------------------------------------------
+# OI is captured per EXACT contract and evaluated against several
+# hypothetical floors WITHOUT changing scanning/ranking. There is no
+# live OI gate here — ``ENABLE_LIVE_OI_FLOOR`` is a SEPARATE, unbuilt
+# control and this recorder NEVER consults these floors to admit or
+# reject anything. The counterfactuals live inside the leg-set row's
+# ``details`` jsonb (no migration — the column already exists).
+#
+# H9 DISCIPLINE — the whole point of this lane:
+#   * OI 0 is a REAL value (a listed-but-untraded contract). It is
+#     AVAILABLE and it FAILS a positive floor — never conflated with
+#     "unavailable".
+#   * A missing / unparseable OI is typed UNAVAILABLE with a reason,
+#     never a fabricated zero. A leg set with ANY unavailable OI is
+#     INDETERMINATE at every floor (we cannot honestly pass or fail a
+#     leg we could not price) — never a fabricated pass/fail.
+#
+# FLOOR REFERENCES (counterfactual-only magnitudes — like the greek-cap
+# lane, these are surfaced for calibration against the observation
+# record, NOT asserted correct):
+#   100  — ``guardrails.check_liquidity`` uses ``open_interest > 100``
+#          (packages/quantum/analytics/guardrails.py) — CODE-anchored.
+#   1000 — the ``OI>1000 ATM`` universe-admission convention recorded in
+#          docs/micro_live_config.md (PLTR excluded on it) — DOC-anchored.
+#   250, 500 — interpolations between the two anchors with NO doctrine
+#          anchor; reference-only, for distribution resolution.
+OI_FLOOR_REFERENCES: Dict[int, str] = {
+    100: "guardrails.check_liquidity open_interest>100 (analytics/guardrails.py) — CODE-anchored",
+    250: "counterfactual-only interpolation (no doctrine anchor)",
+    500: "counterfactual-only interpolation (no doctrine anchor)",
+    1000: "micro_live_config OI>1000 ATM universe convention (docs/micro_live_config.md) — DOC-anchored",
+}
+DEFAULT_OI_FLOOR_CANDIDATES: List[int] = [100, 250, 500, 1000]
+
+
+def oi_floor_candidates() -> List[int]:
+    """Hypothetical OI floors for the observe-only counterfactual.
+
+    Env override ``OI_FLOOR_CANDIDATES`` (csv of non-negative ints); else
+    the doctrine-derived defaults. These are COUNTERFACTUAL-ONLY — the
+    separate ``ENABLE_LIVE_OI_FLOOR`` control (unbuilt) would be what ever
+    gates; this recorder only records would_pass/would_fail against them.
+    """
+    raw = os.getenv("OI_FLOOR_CANDIDATES", "").strip()
+    if not raw:
+        return list(DEFAULT_OI_FLOOR_CANDIDATES)
+    out: List[int] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = int(float(tok))
+        except (TypeError, ValueError):
+            continue
+        if v >= 0:
+            out.append(v)
+    return out or list(DEFAULT_OI_FLOOR_CANDIDATES)
+
+
+def coerce_oi(value: Any) -> Optional[int]:
+    """OI/volume as a non-negative int, or None (typed UNAVAILABLE).
+
+    CRITICAL 0-vs-absent distinction: an explicit 0 returns 0 (a real,
+    listed-but-untraded value); None / unparseable / negative returns None
+    (unavailable). This is the H9 seam — a fabricated zero here would make
+    every dark leg silently "fail" a floor instead of abstaining.
+    """
+    if value is None:
+        return None
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
+def resolve_leg_oi(
+    leg: Dict[str, Any],
+    oi_by_contract: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Typed exact-leg OI for ONE leg.
+
+    Source precedence (both exact-leg — never a symbol aggregate): the leg's
+    own stamped ``oi`` if the scanner attached one, else the per-cycle
+    ``oi_by_contract`` map keyed by BARE OCC contract. Missing OI is typed
+    UNAVAILABLE with a reason — NEVER zero.
+    """
+    contract = _bare(leg.get("symbol"))
+    src = (oi_by_contract or {}).get(contract)
+    if not isinstance(src, dict):
+        src = {}
+    raw_oi = leg.get("oi", src.get("oi"))
+    raw_vol = leg.get("oi_volume", leg.get("volume", src.get("volume")))
+    oi_source = leg.get("oi_source", src.get("source")) or "unknown"
+    oi_known_at = leg.get("oi_known_at", src.get("oi_known_at"))
+    oi = coerce_oi(raw_oi)
+    vol = coerce_oi(raw_vol)
+    available = oi is not None
+    return {
+        "contract": contract,
+        "oi": oi,                       # int incl. 0, or None (unavailable)
+        "oi_available": available,
+        "oi_unavailable_reason": None if available else "oi_absent_from_snapshot",
+        "oi_source": str(oi_source),
+        "oi_volume": vol,
+        "oi_known_at": oi_known_at,     # None when the snapshot path carries no OI ts
+        # The snapshot/chain path has no OI-specific timestamp (the
+        # open_interest_date only rides get_option_contracts, not wired
+        # here). Freshness is honestly typed-unknown when known_at is absent.
+        "oi_freshness": "known_at_unavailable" if oi_known_at is None else "known_at_present",
+    }
+
+
+def compute_oi_counterfactuals(
+    leg_oi_rows: List[Dict[str, Any]],
+    floors: List[int],
+) -> List[Dict[str, Any]]:
+    """Per-floor would_pass/would_fail for the leg SET (observe-only).
+
+    A leg set PASSES a floor iff every leg has AVAILABLE OI >= floor. It
+    FAILS iff every leg's OI is available and at least one is < floor. It is
+    INDETERMINATE if ANY leg's OI is unavailable (H9 — we cannot honestly
+    pass or fail a leg we could not price). 0 is a real value and FAILS a
+    positive floor (not indeterminate).
+    """
+    evaluable = [r for r in leg_oi_rows if r.get("oi_available")]
+    unknown = [r for r in leg_oi_rows if not r.get("oi_available")]
+    min_oi = min((r["oi"] for r in evaluable), default=None)
+    out: List[Dict[str, Any]] = []
+    for floor in floors:
+        below = [r for r in evaluable if r["oi"] < floor]
+        if unknown:
+            verdict = "indeterminate"
+        elif below:
+            verdict = "fail"
+        else:
+            verdict = "pass"
+        out.append({
+            "floor": floor,
+            "reference": OI_FLOOR_REFERENCES.get(floor, "custom (env-configured)"),
+            "legs_total": len(leg_oi_rows),
+            "legs_evaluable": len(evaluable),
+            "legs_unknown": len(unknown),
+            "legs_below_floor": len(below),
+            "min_leg_oi": min_oi,
+            "would_pass": verdict == "pass",
+            "would_fail": verdict == "fail",
+            "verdict": verdict,   # pass | fail | indeterminate
+        })
+    return out
+
+
 class QuoteProvenanceRecorder:
     """Per-cycle buffer of quote-provenance evidence, flushed in one
     batched, sampled, capped, scrubbed insert at cycle end.
@@ -197,6 +353,10 @@ class QuoteProvenanceRecorder:
                 str(DEFAULT_MAX_QUOTE_NOTES)))
         except ValueError:
             self._max_notes = DEFAULT_MAX_QUOTE_NOTES
+
+        # Lane H: hypothetical OI-floor candidates, read ONCE at construction
+        # (like the tunables above) so a per-cycle recorder uses one stable set.
+        self._oi_floors = oi_floor_candidates()
 
         # LOUD counters (surfaced via flush() / counts()).
         self._persist_failures = 0
@@ -472,11 +632,17 @@ class QuoteProvenanceRecorder:
         entry_cost_share: Any = None,
         max_loss_share: Any = None,
         legs: Optional[List[Dict[str, Any]]] = None,
+        oi_by_contract: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """One spread-gate evaluation of a candidate leg set.
 
         The verdict/threshold are the gate's OWN values, passed through —
         the recorder computes nothing that could disagree with the gate.
+
+        ``oi_by_contract`` (Lane H, observe-first): per-cycle bare-OCC →
+        {oi, volume, source, oi_known_at} map from the chain, used ONLY to
+        stamp exact-leg OI and hypothetical-floor counterfactuals into the
+        row's ``details`` (no gate — see compute_oi_counterfactuals).
         """
         if not self._enabled:
             return
@@ -491,6 +657,7 @@ class QuoteProvenanceRecorder:
             leg_rows: List[Dict[str, Any]] = []
             leg_sources: List[str] = []
             leg_fallback_reasons: List[str] = []
+            leg_oi_rows: List[Dict[str, Any]] = []   # Lane H OI (observe-only)
             with self._lock:
                 notes = dict(self._quote_notes)
                 chain_note = self._chain_notes.get(str(symbol))
@@ -499,6 +666,8 @@ class QuoteProvenanceRecorder:
                     continue
                 contract = _bare(leg.get("symbol"))
                 b, a = _num(leg.get("bid")), _num(leg.get("ask"))
+                oi_info = resolve_leg_oi(leg, oi_by_contract)
+                leg_oi_rows.append(oi_info)
                 note = notes.get(contract)
                 if note is not None:
                     src = note.get("source", "unknown")
@@ -531,6 +700,15 @@ class QuoteProvenanceRecorder:
                     "crossed": (b is not None and a is not None
                                 and b > 0 and a > 0 and a < b),
                     "zero_bid": (b is None or b <= 0),
+                    # Lane H exact-leg OI (observe-only; 0 is a value, None
+                    # is typed-unavailable — never conflated).
+                    "oi": oi_info["oi"],
+                    "oi_available": oi_info["oi_available"],
+                    "oi_unavailable_reason": oi_info["oi_unavailable_reason"],
+                    "oi_source": oi_info["oi_source"],
+                    "oi_volume": oi_info["oi_volume"],
+                    "oi_known_at": oi_info["oi_known_at"],
+                    "oi_freshness": oi_info["oi_freshness"],
                 })
 
             uniq = set(leg_sources)
@@ -564,6 +742,39 @@ class QuoteProvenanceRecorder:
                 "leg_fingerprint": leg_fingerprint(legs),
                 "crossed": any(l.get("crossed") for l in leg_rows),
                 "zero_bid": any(l.get("zero_bid") for l in leg_rows),
+                # Lane H OI observation + hypothetical-floor counterfactuals.
+                # OBSERVE-ONLY — recorded, never gated on. (details jsonb;
+                # no migration.)
+                "details": {
+                    "oi": {
+                        "floors_evaluated": self._oi_floors,
+                        "legs_total": len(leg_oi_rows),
+                        "legs_oi_available": sum(
+                            1 for r in leg_oi_rows if r["oi_available"]),
+                        "legs_oi_unavailable": sum(
+                            1 for r in leg_oi_rows if not r["oi_available"]),
+                        "any_oi_unavailable": any(
+                            not r["oi_available"] for r in leg_oi_rows),
+                        "min_leg_oi": min(
+                            (r["oi"] for r in leg_oi_rows if r["oi_available"]),
+                            default=None),
+                        "legs": [
+                            {
+                                "contract": r["contract"],
+                                "oi": r["oi"],
+                                "oi_available": r["oi_available"],
+                                "oi_unavailable_reason": r["oi_unavailable_reason"],
+                                "oi_source": r["oi_source"],
+                                "oi_volume": r["oi_volume"],
+                                "oi_known_at": r["oi_known_at"],
+                                "oi_freshness": r["oi_freshness"],
+                            }
+                            for r in leg_oi_rows
+                        ],
+                        "counterfactuals": compute_oi_counterfactuals(
+                            leg_oi_rows, self._oi_floors),
+                    }
+                },
             }
             with self._lock:
                 if len(self._leg_sets) < self._max_rows * 2:

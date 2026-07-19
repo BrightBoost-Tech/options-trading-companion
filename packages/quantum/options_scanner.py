@@ -16,7 +16,6 @@ from bisect import bisect_left
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
-from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev, calculate_condor_ev_tail
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
@@ -2801,7 +2800,6 @@ def scan_for_opportunities(
     supabase_client: Client = None,
     user_id: str = None,
     global_snapshot: GlobalRegimeSnapshot = None,
-    banned_strategies: List[str] = None,
     portfolio_cash: float = None,
     account_tier: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], RejectionStats]:
@@ -2850,7 +2848,6 @@ def scan_for_opportunities(
     # Initialize services
     market_data = PolygonService()
     strategy_selector = StrategySelector()
-    policy = StrategyPolicy(banned_strategies)
     universe_service = UniverseService(supabase_client) if supabase_client else None
     execution_service = ExecutionService(supabase_client) if supabase_client else None
     earnings_service = EarningsCalendarService(market_data)
@@ -3279,7 +3276,6 @@ def scan_for_opportunities(
                     current_price=current_price,
                     iv_rank=iv_rank,
                     effective_regime=effective_regime_state.value,
-                    banned_strategies=banned_strategies,
                     phase_exclusions_out=_phase_exclusions,
                 )
                 for _excl in _phase_exclusions:
@@ -3312,7 +3308,6 @@ def scan_for_opportunities(
                     current_price=current_price,
                     iv_rank=iv_rank,
                     effective_regime=effective_regime_state.value,
-                    banned_strategies=banned_strategies,
                 )
                 candidates = [suggestion]
 
@@ -3327,7 +3322,6 @@ def scan_for_opportunities(
                         "legacy_strategy": suggestion["strategy"],
                         "effective_regime": effective_regime_state.value,
                         "iv_rank": iv_rank,
-                        "banned_strategies": banned_strategies
                     }
                     _, summary = AgentRunner.run_agents(agent_context, design_agents)
                     active_constraints = summary.get("active_constraints", {})
@@ -3353,11 +3347,6 @@ def scan_for_opportunities(
                     "strategy_hold_explicit_verdict",
                     strategy=suggestion["strategy"],
                 )
-                return None
-
-            # Double check policy (redundant but safe)
-            if not policy.is_allowed(suggestion["strategy"]):
-                rej_stats.record("strategy_banned", strategy=suggestion["strategy"])
                 return None
 
             # F. Construct Contract & Calculate EV

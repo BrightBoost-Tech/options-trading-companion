@@ -34,7 +34,12 @@ exact cause):
   - ``h7_dropped`` covers the capital/priceability-fit family between
     selection and persist: the active H7 pre-filter, sized-to-zero
     (the real H7 round-trip verdict), risk-budget exhaustion, and the
-    unpriceable-candidate death.
+    unpriceable-candidate death. Because the value is deliberately
+    overloaded, EVERY ``h7_dropped`` final carries exactly one canonical
+    ``detail['h7_subreason']`` (H7_SUBREASONS) as a queryable sub-taxonomy —
+    writer-enforced (strict raise in dev/test, fail-soft + counted in
+    production; owner decision 2026-07-18). Parent
+    ``WHERE disposition='h7_dropped'`` queries are unchanged.
   - ``rank_blocked`` covers verdict blocks: edge_below_minimum (raev<=-999)
     and the redundant policy final gate.
   - ``persisted_blocked`` / ``persisted_executable`` are the persist-seam
@@ -55,6 +60,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -77,6 +84,81 @@ DISPOSITIONS = frozenset({
     "filled",
     "superseded_retry",
 })
+
+# ── H7 typed-subreason taxonomy (owner decision 2026-07-18,
+# H7_DROPPED_PARENT_PLUS_TYPED_SUBREASON) ────────────────────────────────
+# The parent ``h7_dropped`` value is DELIBERATELY overloaded — it is the
+# capital/priceability-fit family between selection and persist (C2 packet
+# §2). To keep the family queryable without splitting the top-level enum
+# (no new disposition values, backward-compatible ``WHERE disposition=
+# 'h7_dropped'`` queries), every ``h7_dropped`` final MUST carry EXACTLY ONE
+# canonical ``detail['h7_subreason']`` from this set. This is the queryable
+# sub-taxonomy; ``detail.reason`` / ``detail.sizing_outcome`` keep the exact
+# free-text cause underneath it (never removed).
+#
+# Canonical values ↔ orchestrator call sites (workflow_orchestrator.py):
+#   roundtrip_bp     — H7 pre-filter active drop (:~2798) AND the true H7
+#                      round-trip verdict is the sizing engine's own; the
+#                      prefilter check is literally
+#                      collateral + close_bp×safety > deployable_capital.
+#   quality_gate     — marketdata quality-gate HARD-mode E4/E5 drops
+#                      (:~3739 / :~3792, sizing_outcome='marketdata_quality_gate')
+#                      AND the unpriceable-candidate death E1 (:~3260,
+#                      suggested_entry<=0) — a data/priceability death, same
+#                      family as the gate, NOT capital-fit (adjudicated:
+#                      labelling it sizing_zero would falsely imply it reached
+#                      the sizing engine).
+#   sizing_zero      — the dominant death: sizing engine returns contracts==0
+#                      (E3, :~4064). Its 6 root causes (no-BP, round-trip,
+#                      risk<1-contract, collateral, invalid-max-loss,
+#                      lifecycle-veto) stay in detail.reason/sizing_outcome.
+#   risk_budget      — per-candidate risk budget exhausted, final_risk_dollars
+#                      <= 0 (E2, :~3502).
+#   account_capacity — RESERVED: an account/tier capacity death recorded as
+#                      h7_dropped. No current call site maps here (allocator
+#                      caps → allocator_dropped; tier max_trades → pre-selection,
+#                      unrecorded; sizing no-BP → folded into sizing_zero per
+#                      the owner decision). Kept canonical for a future
+#                      account-capacity drop that lands in the h7 family.
+H7_SUBREASONS = frozenset({
+    "roundtrip_bp",
+    "quality_gate",
+    "sizing_zero",
+    "risk_budget",
+    "account_capacity",
+})
+
+# Writer-side sentinel stamped when a production h7_dropped final arrives with
+# a missing/invalid subreason (a CALL-SITE BUG). NOT a canonical value — it is
+# the honest "the call site failed to type this" marker, always paired with
+# detail['h7_subreason_violation']=True and a writer_taxonomy_violation count.
+H7_SUBREASON_UNSPECIFIED = "unspecified"
+
+
+class H7SubreasonViolation(ValueError):
+    """A ``h7_dropped`` final was recorded without a canonical
+    ``detail['h7_subreason']``.
+
+    In STRICT mode (dev/test — see :func:`_taxonomy_strict`) the writer raises
+    this so the offending call site fails CI (the #1126 costume class: a green
+    test must never hide an un-typed h7_dropped). In PRODUCTION the writer's
+    absolute fail-soft doctrine wins: it counts + logs + stamps the
+    ``unspecified`` sentinel and STILL writes the row (never blocks the cycle).
+    """
+
+
+def _taxonomy_strict() -> bool:
+    """Whether a missing/invalid h7_subreason should RAISE (dev/test) or
+    fail-soft (production).
+
+    Explicit override ``CANDIDATE_DISPOSITION_STRICT_TAXONOMY`` wins both ways
+    (1/true/yes/on → strict, else soft); absent → strict under pytest, soft in
+    production. Re-read each call so tests can toggle it.
+    """
+    override = os.environ.get("CANDIDATE_DISPOSITION_STRICT_TAXONOMY")
+    if override is not None and override.strip() != "":
+        return override.strip().lower() in ("1", "true", "yes", "on")
+    return ("PYTEST_CURRENT_TEST" in os.environ) or ("pytest" in sys.modules)
 
 # PostgREST/Postgres signatures for "the table itself is absent" — the
 # designed state until the operator applies the migration. Column-level
@@ -176,11 +258,16 @@ class CandidateDispositionRecorder:
         self._table_missing = False
         self._disabled = supabase is None
         self._warned_write_failure = False
+        self._warned_taxonomy_violation = False
         self.counters: Dict[str, int] = {
             "attempts_recorded": 0,
             "finals_recorded": 0,
             "write_failures": 0,
             "table_missing_noops": 0,
+            # h7_dropped final recorded with a missing/invalid h7_subreason
+            # (a call-site BUG). Always 0 in normal operation — the dev/test
+            # strict raise guarantees every SHIPPED call site is typed.
+            "writer_taxonomy_violation": 0,
         }
 
     # ------------------------------------------------------------------
@@ -426,6 +513,38 @@ class CandidateDispositionRecorder:
                 # the divergence rather than silently switching identity.
                 merged_detail["persisted_fingerprint_mismatch"] = fingerprint
 
+            # --- H7 typed-subreason contract (owner decision 2026-07-18) ---
+            # Every ``h7_dropped`` final MUST carry exactly one canonical
+            # ``detail['h7_subreason']`` (H7_SUBREASONS). A missing/invalid
+            # subreason is a CALL-SITE BUG: raise in dev/test so CI catches it
+            # (the #1126 costume class), fail-SOFT in production — count it,
+            # log loudly ONCE, stamp a queryable ``unspecified`` sentinel, and
+            # STILL write the row. The one-final-per-candidate invariant wins
+            # over a crisp taxonomy value; the violation is never silent.
+            if disposition == "h7_dropped":
+                sub = merged_detail.get("h7_subreason")
+                if sub not in H7_SUBREASONS:
+                    self.counters["writer_taxonomy_violation"] += 1
+                    if not self._warned_taxonomy_violation:
+                        self._warned_taxonomy_violation = True
+                        logger.warning(
+                            "[CANDIDATE_DISPOSITION] h7_dropped final for "
+                            "%s/%s carried %s h7_subreason %r (canonical: %s) "
+                            "— CALL-SITE BUG; row stamped %r (violation "
+                            "counted, invariant preserved)",
+                            ident.get("symbol"), ident.get("strategy"),
+                            "a missing" if sub is None else "an invalid", sub,
+                            sorted(H7_SUBREASONS), H7_SUBREASON_UNSPECIFIED,
+                        )
+                    if _taxonomy_strict():
+                        raise H7SubreasonViolation(
+                            "record_final(disposition='h7_dropped') requires "
+                            "detail['h7_subreason'] in "
+                            f"{sorted(H7_SUBREASONS)}; got {sub!r}"
+                        )
+                    merged_detail["h7_subreason"] = H7_SUBREASON_UNSPECIFIED
+                    merged_detail["h7_subreason_violation"] = True
+
             # Observe-only multi-basis cost reconciliation (Lane 2C, phase-2
             # consumer #1). Computed ONCE per attempt (re-finals of the same
             # attempt inherit it via _final_details); typed 'unavailable' for
@@ -459,6 +578,11 @@ class CandidateDispositionRecorder:
                 self.counters["finals_recorded"] += 1
                 self._finals[fp] = attempt
                 self._final_details[(fp, attempt)] = merged_detail
+        except H7SubreasonViolation:
+            # STRICT (dev/test) taxonomy enforcement — re-raise so the
+            # offending call site fails CI. Production never reaches here
+            # (_taxonomy_strict() is False; the soft path stamps + counts).
+            raise
         except Exception as exc:  # absolute fail-soft
             self.counters["write_failures"] += 1
             logger.warning(

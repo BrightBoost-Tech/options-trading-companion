@@ -369,20 +369,29 @@ the standing safety lane and ①–⑦.
   each producer identifier to exactly one canonical strategy (route-driven,
   not source-string). Falsifier: a morning-cycle loss analysis of a losing
   debit spread using a naked-long payoff. · origin Fable-5 H18.
-- **F-BAN-INTEGRITY (P2 · NEW · VERIFIED-CODE + VERIFIED-RUNTIME).**
-  `settings.banned_strategies` is a phantom feature: NO migration defines the
-  column (repo grep, all of `supabase/migrations/`); the production column
-  exists as untracked drift (ARRAY, `settings` has 0 rows); the sole reader
-  silently degrades to `[]` at `logger.debug`
-  (`workflow_orchestrator.py:2549-2563`); zero write surface (no UI/API/SQL);
-  downstream enforcement (StrategyPolicy → selector → scanner double-check) is
-  real, live-routed, and permanently fed `[]`. OWNER DECISION: build it
-  end-to-end (migration + write surface + typed loud read failure + a route
-  test proving a persisted ban blocks and a failed read never silently
-  authorizes) OR remove the dead read+enforcement. Controls unchanged either
-  way today (no ban has ever existed). Drift facet strengthens the existing
-  migration-drift name-normalized allowlist item. Falsifier: a persisted ban
-  row that fails to block on the scheduled route. · origin Fable-5 H12.
+- **F-BAN-INTEGRITY (P2 · RESOLVED-BY-REMOVAL · Lane C, branch
+  `fix/remove-fban-phantom`).** OWNER DECISION was `REMOVE_PHANTOM_FEATURE`
+  (packet Option B). Removed the entire per-strategy `banned_strategies`
+  capability from the backend: the dead `settings.banned_strategies` read +
+  silent `[]` degradation (`workflow_orchestrator.py`), the redundant
+  final-gate `StrategyPolicy` check, the `StrategyPolicy` module itself
+  (deleted — no real producer anywhere), the parameter threading through
+  `options_scanner.scan_for_opportunities` → `StrategySelector.determine_strategy`/
+  `get_candidates`, the `strategy_banned` scanner recheck, the
+  `StrategyDesignAgent` ban branches + `strategy.banned` output, and the
+  optimizer's dead `agent_constraints["banned_strategies"]` (its
+  `require_defined_risk`/`max_position_pct` controls PRESERVED). Proven
+  decision-equivalent: the selector's zero-ban decisions are byte-identical
+  pre/post across a 2,268-scenario matrix (×2 zero-ban modes). Structural
+  guard test asserts zero non-test `banned_strategies` references in
+  `packages/quantum` (`test_fban_removal.py`). No replacement control added;
+  if per-strategy bans are ever wanted, rebuild end-to-end per the packet
+  (`docs/review/f-ban-integrity-decision-packet-2026-07-16.md`).
+  **DB DRIFT LEFT IN PLACE (deferred cleanup):** `settings.banned_strategies`
+  (`ARRAY`/`_text`, `NOT NULL`, 0 rows, untracked — no migration defines it)
+  is NOT dropped by this change (no migration created/applied). It is now
+  fully unreferenced by code; the column-drop belongs to the existing
+  migration-drift name-normalized-allowlist cleanup item. · origin Fable-5 H12.
 - **F-OPTIONS-LEVEL-PREFLIGHT (P2 · NEW · VERIFIED-CODE; account re-read
   VERIFIED-RUNTIME).** The broker wrapper's curated dict drops
   `options_approved_level`/`options_trading_level`

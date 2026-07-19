@@ -1,12 +1,14 @@
 # packages/quantum/tests/test_strategy_selector_get_candidates.py
 """Route-executes StrategySelector.get_candidates — the production
-multi-strategy path (options_scanner MULTI_STRATEGY_EVAL=1 default) that
-previously had ZERO test coverage (test_strategy_policy.py drives only the
-legacy determine_strategy).
+multi-strategy path (options_scanner MULTI_STRATEGY_EVAL=1 default).
 
 Covers: (d) the emitted pool per sentiment x IV tier, (f) the
-CURRENT_PROGRESSION_PHASE iron-condor gate, (g) banned-strategy filtering
-with no fallback bypass.
+CURRENT_PROGRESSION_PHASE iron-condor gate.
+
+Note: the former (g) banned-strategy filtering tests were removed with the
+F-BAN phantom feature (per-strategy bans had no producer and were always fed
+`[]`). The pool/phase assertions here double as the get_candidates
+decision-equivalence anchor for that removal.
 """
 
 import pytest
@@ -14,7 +16,7 @@ import pytest
 from packages.quantum.analytics.strategy_selector import StrategySelector
 
 
-def _emit(selector, sentiment, iv_rank, regime="normal", banned=None):
+def _emit(selector, sentiment, iv_rank, regime="normal"):
     return [
         c["strategy"]
         for c in selector.get_candidates(
@@ -23,7 +25,6 @@ def _emit(selector, sentiment, iv_rank, regime="normal", banned=None):
             current_price=100.0,
             iv_rank=iv_rank,
             effective_regime=regime,
-            banned_strategies=banned,
         )
     ]
 
@@ -100,43 +101,3 @@ def test_phase_gate_only_affects_iron_condor(selector, monkeypatch):
     monkeypatch.setenv("CURRENT_PROGRESSION_PHASE", "micro_live")
     live = _emit(selector, "BULLISH", 70.0)
     assert paper == live == ["SHORT_PUT_CREDIT_SPREAD", "LONG_CALL_DEBIT_SPREAD"]
-
-
-# ---------------------------------------------------------------------------
-# (g) Banned-strategy filtering through get_candidates — and no fallback
-#     path re-admits a banned ID.
-# ---------------------------------------------------------------------------
-
-def test_direct_ban_filters_credit_spread_debit_survives(selector, live_phase):
-    emitted = _emit(
-        selector, "BULLISH", 70.0, banned=["SHORT_PUT_CREDIT_SPREAD"]
-    )
-    assert "SHORT_PUT_CREDIT_SPREAD" not in emitted
-    # Existing behavior: the debit alternative already in the pool remains.
-    assert emitted == ["LONG_CALL_DEBIT_SPREAD"]
-
-
-def test_category_ban_credit_spreads_filters_all_credit(selector, live_phase):
-    for sentiment, survivor in (
-        ("BULLISH", "LONG_CALL_DEBIT_SPREAD"),
-        ("BEARISH", "LONG_PUT_DEBIT_SPREAD"),
-    ):
-        emitted = _emit(selector, sentiment, 70.0, banned=["credit_spreads"])
-        assert emitted == [survivor]
-
-    # Neutral high-IV pool is condor-only; a category credit ban leaves nothing.
-    assert _emit(selector, "NEUTRAL", 70.0, banned=["credit_spreads"]) == []
-
-
-def test_condor_ban_yields_empty_not_substitute(selector, live_phase):
-    assert _emit(selector, "NEUTRAL", 70.0, banned=["IRON_CONDOR"]) == []
-
-
-def test_no_fallback_bypasses_ban_across_matrix(selector, live_phase):
-    """For every sentiment x IV tier, a banned ID never appears in the
-    emitted list — including via any fallback ordering."""
-    banned_id = "SHORT_CALL_CREDIT_SPREAD"
-    for sentiment in ("BULLISH", "BEARISH", "NEUTRAL", "EARNINGS"):
-        for iv_rank in (10.0, 40.0, 70.0):
-            emitted = _emit(selector, sentiment, iv_rank, banned=[banned_id])
-            assert banned_id not in emitted

@@ -127,9 +127,13 @@ class _BreakerHarness:
         self.scope_raises = scope_raises
         self.captured = {}
 
-    def _fake_check_all(self, positions, equity, daily_pnl, weekly_pnl, config):
+    def _fake_check_all(self, positions, equity, daily_pnl, weekly_pnl, config,
+                        observe_scope=None):
         # Record what the breaker actually fed the envelope, then delegate the
         # daily/weekly verdict to the REAL loss feeder against those values.
+        # observe_scope is the OBSERVE-ONLY greek-cap-counterfactual dedup key
+        # (mirrors the real signature); it never affects the brake verdict.
+        self.captured["observe_scope"] = observe_scope
         self.captured["equity"] = equity
         self.captured["daily_pnl"] = daily_pnl
         self.captured["weekly_pnl"] = weekly_pnl

@@ -779,7 +779,7 @@ def poll_pending_orders(
     # actually filled on a prior attempt. If alpaca_order_id is set, Alpaca's
     # record is authoritative and polling will reconcile the fill.
     orders_res = supabase.table("paper_orders") \
-        .select("id, alpaca_order_id, status, submitted_at, broker_status, position_id, side, order_json") \
+        .select("id, alpaca_order_id, status, submitted_at, broker_status, position_id, side, order_json, suggestion_id") \
         .in_("status", ["submitted", "working", "partial", "needs_manual_review"]) \
         .in_("portfolio_id", p_ids) \
         .not_.is_("alpaca_order_id", "null") \
@@ -1086,6 +1086,37 @@ def poll_pending_orders(
                             f"[ALPACA_HANDLER] Open fill committed: order={order_id} "
                             f"repair_processed={repair_result.get('processed', 0)}"
                         )
+
+                        # A3-LIFECYCLE (v1.6): advance the candidate's lifecycle
+                        # disposition to `filled` at the broker-fill seam — the
+                        # ONLY place a LIVE async entry fill is truthfully known
+                        # (observe-only, fail-soft, cross-job via suggestion_id).
+                        # Entry orders carry a suggestion_id; close orders take
+                        # the pos_id branch above and never touch candidate
+                        # milestones. A blocked/non-executable row can never
+                        # advance (predecessor guarded); monotonic + idempotent;
+                        # a missing row/table is a typed counted no-op. Mirrors
+                        # the adjacent GTC hook: NEVER breaks the poll loop.
+                        try:
+                            from packages.quantum.services.candidate_disposition import (
+                                advance_candidate_milestone as _adv_ms,
+                            )
+                            _fill_sid = order.get("suggestion_id")
+                            if _fill_sid:
+                                _adv_ms(
+                                    supabase, _fill_sid, "filled",
+                                    ids={
+                                        "order_id": order_id,
+                                        "alpaca_order_id": order.get("alpaca_order_id"),
+                                        "filled_qty": filled_qty,
+                                    },
+                                    extra={"fill_source": "broker_poll"},
+                                )
+                        except Exception as _ms_err:
+                            logger.debug(
+                                "[CANDIDATE_DISPOSITION] broker-fill milestone "
+                                "skipped (non-fatal): %s", _ms_err,
+                            )
 
                         # GTC resting profit-limit placement (flag-gated,
                         # default OFF — no-op until GTC_PROFIT_EXIT_ENABLED).

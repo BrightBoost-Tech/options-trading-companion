@@ -97,15 +97,28 @@ def run_pre_submit_checks(
     if not passed and not blocked_reason:
         blocked_reason = f"Order notional ${notional:.0f} exceeds limit ${LIVE_MAX_ORDER_NOTIONAL:.0f}"
 
-    # 6. Market hours check
-    now_chicago = datetime.now(CHICAGO_TZ)
-    market_open = now_chicago.hour >= 8 and now_chicago.hour < 16
-    weekday = now_chicago.weekday() < 5
-    passed = market_open and weekday
-    checks.append({"name": "market_hours", "passed": passed,
-                   "detail": f"chicago_time={now_chicago.strftime('%H:%M')} weekday={weekday}"})
+    # 6. Market hours check — canonical broker-calendar session (F-A10-HOLIDAY).
+    # Replaces the holiday-BLIND weekday + Chicago-hour-8..16 window (which was
+    # loose on both edges: 8:00 CT = 9:00 ET, an hour before the 9:30 open, and
+    # 16:00 CT = 17:00 ET, an hour after the close). The session source is
+    # holiday- AND half-day-aware (an early close is honored by close_at) and
+    # FAILS CLOSED on an unreadable calendar — never submit a live order when
+    # the market cannot be confirmed open.
+    try:
+        from packages.quantum.services.market_session import (
+            get_market_session,
+            MarketCalendarUnavailable,
+        )
+        session = get_market_session(calendar_fn=alpaca_client.get_calendar)
+        passed = session.is_open_at()
+        detail = (f"trading_day={session.is_trading_day} open={session.open_at} "
+                  f"close={session.close_at} early_close={session.is_early_close}")
+    except MarketCalendarUnavailable as e:
+        passed = False
+        detail = f"market_calendar_unavailable: {e}"
+    checks.append({"name": "market_hours", "passed": passed, "detail": detail})
     if not passed and not blocked_reason:
-        blocked_reason = "Market is closed"
+        blocked_reason = "Market is closed or trading calendar unavailable"
 
     # 7. Daily loss limit
     try:

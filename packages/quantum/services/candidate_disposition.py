@@ -597,3 +597,207 @@ class CandidateDispositionRecorder:
             "table_missing": self._table_missing,
             **self.counters,
         }
+
+
+# ── Executor-phase lifecycle milestones (A3-LIFECYCLE, v1.6) ───────────────
+# The three later-lifecycle disposition VALUES (already in the migration CHECK
+# — no migration is needed to write them) form a MONOTONIC forward chain that
+# advances the SINGLE is_final row a candidate already holds. They are set by
+# a DIFFERENT job than the midday recorder (the executor stages; the broker
+# poll fills), so the writer is cross-job and keys on the stable
+# ``suggestion_id`` (the persist seam stamped it; ``idx_ctd_suggestion``
+# serves the lookup), NOT the recorder's in-memory identity.
+#
+# HONESTY CONTRACT (why this needs no migration and loses no history):
+#   - persisted_executable is the funnel entry the midday persist seam writes.
+#     A milestone ADVANCES that row's disposition to the furthest state
+#     reached; ``detail['lifecycle'][milestone]`` is an APPEND-ONLY timeline
+#     (each milestone's timestamp + ``from`` predecessor + stage/order/broker/
+#     fill ids), so no prior disposition history is erased — the disposition
+#     column is the furthest milestone, the lifecycle dict is the full record.
+#   - A candidate that died at ANY other terminal (scanner_rejected,
+#     h7_dropped, allocator_dropped, rank_blocked, persisted_blocked,
+#     superseded_retry) is NOT on this chain, so it can NEVER advance — the
+#     predecessor guard makes a blocked/non-executable candidate un-advanceable
+#     by construction (defense in depth with the executor only staging
+#     executable rows).
+#   - Monotonic + idempotent: a re-run advancing to a state the row already
+#     holds/passed is a typed no-op (no regression, no duplicate row — it is an
+#     UPDATE, never an INSERT).
+#   - A missing table (migration unapplied) is a typed no-op; a missing row
+#     (no persisted_executable predecessor) is a typed ORPHAN no-op — a
+#     milestone NEVER fabricates a final row from the executor. Both are
+#     counted and returned, never silent.
+#
+# OBSERVE-ONLY: this never gates, stages, submits, or fills — it only records.
+MILESTONES = ("staged", "broker_submitted", "filled")
+
+# The forward LIVE lifecycle chain: the persist-seam entry followed by the
+# three executor-phase milestones, in order.
+_LIVE_CHAIN = ("persisted_executable",) + MILESTONES
+_CHAIN_INDEX = {name: i for i, name in enumerate(_LIVE_CHAIN)}
+
+
+def _milestone_predecessors(milestone: str) -> frozenset:
+    """The set of dispositions a row may hold to advance TO ``milestone``
+    (every chain state strictly before it). ``persisted_executable`` is always
+    a valid predecessor; a milestone may skip intermediate states (a live fill
+    observed without a separate staged/submitted stamp) but never regress."""
+    return frozenset(_LIVE_CHAIN[: _CHAIN_INDEX[milestone]])
+
+
+def _ms_bump(counters: Optional[Dict[str, int]], key: str) -> None:
+    if counters is not None:
+        counters[key] = counters.get(key, 0) + 1
+
+
+def advance_candidate_milestone(
+    supabase: Any,
+    suggestion_id: Optional[str],
+    milestone: str,
+    *,
+    ids: Optional[Dict[str, Any]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    counters: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Advance a persisted candidate's lifecycle disposition to a later
+    executor-phase MILESTONE (``staged`` → ``broker_submitted`` → ``filled``),
+    keyed on the stable ``suggestion_id``.
+
+    OBSERVE-ONLY, cross-job, fail-soft, idempotent and monotonic. Returns a
+    typed result ``{"status": ...}``; NEVER raises into the caller. When a
+    ``counters`` dict is supplied, the outcome is tallied into it (prefixed
+    ``milestone_*``) so the caller can surface it in ``job_runs.result``.
+
+    Statuses: ``advanced`` · ``already_at_or_past`` · ``not_advanceable``
+    (blocked/dead terminal — never advances) · ``orphan_no_row`` (no
+    persisted_executable predecessor — never fabricated) · ``table_missing``
+    (migration unapplied — typed no-op) · ``read_failed`` / ``write_failed``
+    (counted, loud) · ``invalid_milestone`` · ``disabled`` (no client / id).
+    """
+    result: Dict[str, Any] = {
+        "status": "error", "milestone": milestone, "suggestion_id": suggestion_id,
+    }
+    try:
+        if milestone not in MILESTONES:
+            result["status"] = "invalid_milestone"
+            _ms_bump(counters, "milestone_invalid")
+            logger.warning(
+                "[CANDIDATE_DISPOSITION] advance_candidate_milestone: invalid "
+                "milestone %r (chain: %s) — write refused",
+                milestone, list(MILESTONES),
+            )
+            return result
+        if supabase is None or not suggestion_id:
+            result["status"] = "disabled"
+            _ms_bump(counters, "milestone_disabled")
+            return result
+
+        # 1) Locate THE one is_final row carrying this suggestion_id.
+        try:
+            res = (
+                supabase.table(TABLE)
+                .select("id, disposition, detail")
+                .eq("suggestion_id", suggestion_id)
+                .eq("is_final", True)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+        except Exception as exc:
+            if _is_table_missing_error(exc):
+                result["status"] = "table_missing"
+                _ms_bump(counters, "milestone_table_missing_noops")
+                logger.warning(
+                    "[CANDIDATE_DISPOSITION] table %s missing — milestone %s is "
+                    "a typed no-op (migration unapplied): %s",
+                    TABLE, milestone, exc,
+                )
+                return result
+            result["status"] = "read_failed"
+            _ms_bump(counters, "milestone_write_failures")
+            logger.warning(
+                "[CANDIDATE_DISPOSITION] milestone %s read failed for "
+                "suggestion %s (non-fatal): %s",
+                milestone, str(suggestion_id)[:8], exc,
+            )
+            return result
+
+        if not rows:
+            # No persisted_executable predecessor row — a milestone can only
+            # ADVANCE a candidate the funnel already recorded; it never
+            # fabricates a final from the executor. Counted + visible.
+            result["status"] = "orphan_no_row"
+            _ms_bump(counters, "milestone_orphan_no_row")
+            return result
+
+        row = rows[0]
+        current = row.get("disposition")
+        preds = _milestone_predecessors(milestone)
+
+        if current not in preds:
+            result["current"] = current
+            if current in _CHAIN_INDEX and _CHAIN_INDEX[current] >= _CHAIN_INDEX[milestone]:
+                # Already at or past this milestone — idempotent no-op, never
+                # a regression.
+                result["status"] = "already_at_or_past"
+                _ms_bump(counters, "milestone_already_at_or_past")
+            else:
+                # A blocked / dead terminal (or NULL) — must NEVER advance.
+                result["status"] = "not_advanceable"
+                _ms_bump(counters, "milestone_not_advanceable")
+            return result
+
+        # 2) Monotonic forward advance — APPEND-ONLY lifecycle timeline so no
+        #    prior disposition history is erased.
+        detail = dict(row.get("detail") or {})
+        lifecycle = dict(detail.get("lifecycle") or {})
+        entry: Dict[str, Any] = {"at": _utcnow_iso(), "from": current}
+        for src in (ids, extra):
+            if src:
+                for k, v in src.items():
+                    if v is not None:
+                        entry[k] = v
+        lifecycle[milestone] = entry
+        detail["lifecycle"] = lifecycle
+
+        try:
+            (
+                supabase.table(TABLE)
+                .update({
+                    "disposition": milestone,
+                    "detail": detail,
+                    "finalized_at": _utcnow_iso(),
+                })
+                .eq("id", row.get("id"))
+                # Optimistic-concurrency guard: a concurrent advance changes
+                # the disposition out from under us → this matches 0 rows and
+                # the write is a harmless no-op (no duplicate, no regression).
+                .eq("disposition", current)
+                .execute()
+            )
+        except Exception as exc:
+            if _is_table_missing_error(exc):
+                result["status"] = "table_missing"
+                _ms_bump(counters, "milestone_table_missing_noops")
+                return result
+            result["status"] = "write_failed"
+            _ms_bump(counters, "milestone_write_failures")
+            logger.warning(
+                "[CANDIDATE_DISPOSITION] milestone %s write failed for "
+                "suggestion %s (non-fatal): %s",
+                milestone, str(suggestion_id)[:8], exc,
+            )
+            return result
+
+        result["status"] = "advanced"
+        result["from"] = current
+        _ms_bump(counters, "milestone_advanced")
+        return result
+    except Exception as exc:  # absolute fail-soft
+        _ms_bump(counters, "milestone_write_failures")
+        logger.warning(
+            "[CANDIDATE_DISPOSITION] advance_candidate_milestone unexpected "
+            "failure (non-fatal): %s", exc,
+        )
+        return result

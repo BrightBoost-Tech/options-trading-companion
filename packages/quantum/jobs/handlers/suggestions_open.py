@@ -16,7 +16,13 @@ from typing import Any, Dict
 
 from packages.quantum.services.workflow_orchestrator import run_midday_cycle
 from packages.quantum.services.strategy_loader import load_strategy_config, ensure_default_strategy_exists
-from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async, is_market_day
+from packages.quantum.jobs.handlers.utils import (
+    get_admin_client,
+    get_active_user_ids,
+    run_async,
+    is_market_day,
+    MarketCalendarUnavailable,
+)
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.db import _to_jsonable
 
@@ -73,8 +79,19 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     notes = []
     counts = {"processed": 0, "failed": 0, "synced": 0, "skipped": 0}
 
-    # === FAST PATH: skip on weekends ===
-    is_trading, market_reason = is_market_day()
+    # === FAST PATH: skip on non-trading days (weekends + exchange holidays) ===
+    # ENTRY path (F-A10-HOLIDAY): an UNREADABLE broker calendar FAILS CLOSED —
+    # never generate live entries when the trading-day cannot be confirmed, and
+    # NEVER silently fall back to weekday logic. A calendar outage surfaces as
+    # typed job truth (counts.errors → runner classifies 'partial'); a
+    # successfully-determined holiday/weekend is the ordinary ok:True fast-path.
+    try:
+        is_trading, market_reason = is_market_day()
+    except MarketCalendarUnavailable as e:
+        counts["errors"] = 1
+        return {"ok": False, "fast_path": True, "blocked": True,
+                "reason": f"market_calendar_unavailable: {e}",
+                "counts": counts, "timing_ms": (time.time() - start_time) * 1000}
     if not is_trading:
         return {"ok": True, "fast_path": True, "reason": market_reason,
                 "counts": counts, "timing_ms": 0}

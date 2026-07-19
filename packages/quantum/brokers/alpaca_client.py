@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import time
+from datetime import date
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -342,6 +343,34 @@ class AlpacaClient:
             "next_close": str(clk.next_close),
             "timestamp": str(clk.timestamp),
         }
+
+    def get_calendar(self, start: date, end: date) -> List[Dict[str, str]]:
+        """Broker-authoritative trading calendar for ``[start, end]`` inclusive
+        — the exchange's own holiday + half-day truth, NOT a hand-maintained
+        list.
+
+        Each row is ``{date, open, close}`` normalized to strings (ET session
+        times, e.g. open ``'09:30'``, close ``'16:00'`` or an early ``'13:00'``).
+        An EMPTY list means the range contains no trading days — a SUCCESSFUL
+        result, not a failure; the canonical session resolver
+        (``services/market_session.get_market_session``) reads a missing date as
+        a non-trading day and a fetch EXCEPTION as fail-closed. The intraday
+        monitor / reentry cooldown keep using ``get_market_clock()`` for the
+        live ``is_open`` bit; this method serves the trading-DAY + session-bounds
+        need that a point-in-time clock cannot.
+        """
+        from alpaca.trading.requests import GetCalendarRequest
+
+        req = GetCalendarRequest(start=start, end=end)
+        rows = self._call_with_retry(self._client.get_calendar, req) or []
+        out: List[Dict[str, str]] = []
+        for c in rows:
+            out.append({
+                "date": str(getattr(c, "date", "") or ""),
+                "open": str(getattr(c, "open", "") or ""),
+                "close": str(getattr(c, "close", "") or ""),
+            })
+        return out
 
     def is_pdt_restricted(self) -> bool:
         """Check if account has PDT flag set."""

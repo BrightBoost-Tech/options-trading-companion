@@ -22,11 +22,13 @@ from packages.quantum.analytics.terminal_distribution.contract import (
     EvalOutcome,
     LegSpec,
     Provenance,
+    SingleLegGeometry,
     StrategyEvaluation,
     StructureSpec,
     TerminalDistribution,
     Unavailable,
     params_hash,
+    validate_single_leg,
 )
 from packages.quantum.analytics.terminal_distribution.baselines import (
     CREDIT_IDENTITY_DEFECT,
@@ -41,6 +43,11 @@ from packages.quantum.analytics.terminal_distribution.challenger_lognormal impor
     LognormalTerminal,
     build_lognormal,
     challenger_lognormal_evaluate,
+)
+from packages.quantum.analytics.terminal_distribution.single_leg import (
+    build_single_leg_structure,
+    evaluate_single_leg,
+    evaluate_single_leg_from_inputs,
 )
 from packages.quantum.analytics.terminal_distribution.evaluator import (
     EvalRecord,
@@ -65,6 +72,7 @@ __all__ = [
     "OutcomeRecord",
     "Provenance",
     "SegmentKey",
+    "SingleLegGeometry",
     "StrategyEvaluation",
     "StructureSpec",
     "TerminalDistribution",
@@ -73,11 +81,15 @@ __all__ = [
     "baseline_credit_vertical",
     "baseline_debit_vertical",
     "build_lognormal",
+    "build_single_leg_structure",
     "challenger_lognormal_evaluate",
     "evaluate_model",
+    "evaluate_single_leg",
+    "evaluate_single_leg_from_inputs",
     "head_to_head",
     "integrate_structure",
     "params_hash",
     "records_from_rows",
+    "validate_single_leg",
     "with_production_multipliers",
 ]

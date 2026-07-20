@@ -256,29 +256,69 @@ FROM (
 """.strip()
 
 
-# --- cohort / fill-realism classification -----------------------------------
-# Live champion is the aggressive cohort (real capital, real broker fills);
-# neutral + conservative are shadow (internal synthetic fills, no real capital).
+# --- cohort / execution-realism classification ------------------------------
+# THREE SEPARATE AXES, never conflated into one aggregate (V17-4). The old code
+# mapped the POLICY cohort aggressive -> "live" and pooled EVERY fill of the
+# aggressive book (reproduced census: 12 alpaca_live + 11 alpaca_paper + 1
+# internal) under a single "LIVE / real capital / authoritative Realized P&L"
+# number — 81% of the magnitude was paper/internal masquerading as live. The fix
+# is to partition the headline economic numbers on EXECUTION realism WITHIN each
+# policy cohort so a paper/internal fill can never reach the broker-live number.
+#   * POLICY cohort      — which strategy book (aggressive champion / shadow =
+#                          neutral+conservative / unattributed). A STRATEGY
+#                          identity, NOT an economic claim.
+#   * EXECUTION realism   — alpaca_live / alpaca_paper / internal, from the
+#                          reliable execution_mode venue signal (NOT fill_source,
+#                          which mislabels 3 alpaca_live rows in the live data).
+#   * ECONOMIC evidence    — broker_live / broker_paper / internal: ONLY
+#                          broker_live (execution_mode alpaca_live) is real
+#                          capital / authoritative (§10 "Routing intent is not
+#                          execution fact"). Paper/internal fills NEVER pool into
+#                          the broker-live headline, even in the champion book.
 _SHADOW_COHORTS = frozenset({"neutral", "conservative"})
+_BROKER_LIVE_EXEC_MODE = "alpaca_live"
+_BROKER_PAPER_EXEC_MODE = "alpaca_paper"
 
 
 def classify_cohort(cohort_name: Optional[str]) -> str:
-    """live | shadow | unattributed — the P&L-comparability partition. Shadow
-    magnitudes NEVER aggregate into live (docs/specs/shadow_fill_realism.md)."""
+    """POLICY cohort: aggressive | shadow | unattributed — the STRATEGY book,
+    NOT an economic claim. 'aggressive' is the live-champion policy; 'shadow'
+    groups neutral+conservative (internal synthetic fills, no real capital);
+    everything else is unattributed. The economic reality of a position is the
+    SEPARATE execution_realism axis — an aggressive-policy position may have
+    filled live, on the paper broker, or internally."""
     name = (cohort_name or "").strip().lower()
     if name == "aggressive":
-        return "live"
+        return "aggressive"
     if name in _SHADOW_COHORTS:
         return "shadow"
     return "unattributed"
 
 
-def fill_realism(fill_source: Optional[str]) -> str:
-    """broker (a real Alpaca fill) | internal (synthetic / evaluator / unknown).
-    Orthogonal to cohort: it flags whether the fill itself is broker-true."""
-    src = (fill_source or "").strip().lower()
-    if src.startswith("alpaca"):
-        return "broker"
+def execution_realism(execution_mode: Optional[str]) -> str:
+    """alpaca_live | alpaca_paper | internal — the ECONOMIC realism of a fill,
+    derived from execution_mode (the reliable venue signal), NEVER fill_source.
+    Orthogonal to the policy cohort. alpaca_live is the ONLY real-capital broker
+    execution; alpaca_paper is broker-routed PAPER money; internal_paper /
+    shadow_blocked / submission_failed / unknown all fold to internal (synthetic
+    fills)."""
+    mode = str(execution_mode or "").strip().lower()
+    if mode == _BROKER_LIVE_EXEC_MODE:
+        return "alpaca_live"
+    if mode == _BROKER_PAPER_EXEC_MODE:
+        return "alpaca_paper"
+    return "internal"
+
+
+def economic_evidence_cohort(realism: str) -> str:
+    """broker_live | broker_paper | internal — the P&L-comparability partition
+    that keys ONLY on execution truth. ONLY 'broker_live' (execution_mode
+    alpaca_live) is real capital / authoritative Realized P&L; a paper or
+    internal fill is NEVER pooled into it."""
+    if realism == "alpaca_live":
+        return "broker_live"
+    if realism == "alpaca_paper":
+        return "broker_paper"
     return "internal"
 
 
@@ -489,8 +529,9 @@ def _tcm_commission_component(tcm: Any) -> CostComponent:
 @dataclass(frozen=True)
 class RowComparison:
     record_id: str
-    cohort: str            # live | shadow | unattributed
-    fill_realism: str      # broker | internal
+    policy_cohort: str             # aggressive | shadow | unattributed (STRATEGY)
+    execution_realism: str         # alpaca_live | alpaca_paper | internal (ECONOMIC)
+    economic_evidence_cohort: str  # broker_live | broker_paper | internal
     symbol: str
     strategy: str
     regime: str
@@ -552,8 +593,11 @@ def _persisted_estimate_context(row: Mapping[str, Any]) -> Dict[str, Any]:
 def build_row(row: Mapping[str, Any]) -> RowComparison:
     """Map ONE db row to its typed realized-vs-persisted-estimate comparison.
     Pure; never raises on a partial row (missing pieces type UNAVAILABLE)."""
-    cohort = classify_cohort(row.get("cohort_name"))
-    realism = fill_realism(row.get("fill_source"))
+    policy_cohort = classify_cohort(row.get("cohort_name"))
+    # Economic realism anchors on the ENTRY (position-creating) execution_mode —
+    # the venue where the capital was actually deployed. NEVER fill_source.
+    realism = execution_realism(row.get("entry_execution_mode"))
+    econ_cohort = economic_evidence_cohort(realism)
     qty = _coerce_float(row.get("quantity"))
 
     entry_side = row.get("entry_side")
@@ -630,8 +674,9 @@ def build_row(row: Mapping[str, Any]) -> RowComparison:
 
     return RowComparison(
         record_id=str(row.get("record_id")),
-        cohort=cohort,
-        fill_realism=realism,
+        policy_cohort=policy_cohort,
+        execution_realism=realism,
+        economic_evidence_cohort=econ_cohort,
         symbol=str(row.get("symbol") or "unknown"),
         strategy=str(row.get("strategy") or "unknown"),
         regime=str(row.get("regime") or "unknown"),
@@ -694,10 +739,13 @@ def _stat(name: str, deltas: List[CostDelta]) -> DeltaStat:
 
 @dataclass(frozen=True)
 class CohortReport:
-    cohort: str
+    # One report per (policy_cohort, execution_realism) — the headline economic
+    # numbers below are partitioned so a paper/internal fill NEVER reaches a
+    # broker-live number (V17-4).
+    policy_cohort: str             # aggressive | shadow | unattributed (STRATEGY)
+    execution_realism: str         # alpaca_live | alpaca_paper | internal (ECONOMIC)
+    economic_evidence_cohort: str  # broker_live | broker_paper | internal
     n_rows: int
-    n_broker_fills: int
-    n_internal_fills: int
     realized_pl_sum: Optional[float]
     realized_wins: int
     realized_losses: int
@@ -711,6 +759,16 @@ class CohortReport:
     entry_commission_internal_unavailable: int
     close_commission_broker_known: int
     entry_commission_vs_tcm: DeltaStat
+
+    @property
+    def is_real_capital(self) -> bool:
+        """True ONLY for the broker-live bucket — the single authoritative,
+        real-capital Realized P&L partition. Paper/internal are always False."""
+        return self.economic_evidence_cohort == "broker_live"
+
+    @property
+    def label(self) -> str:
+        return f"{self.policy_cohort}/{self.execution_realism}"
 
 
 @dataclass(frozen=True)
@@ -727,14 +785,16 @@ class StudyReport:
         default_factory=lambda: TcmV2AccrualReport(total_examples=0, buckets=()))
 
 
-def _build_cohort(cohort: str, rows: List[RowComparison]) -> CohortReport:
+def _build_cohort(
+    policy_cohort: str, realism: str, rows: List[RowComparison]
+) -> CohortReport:
     pls = [r.realized_pl for r in rows if r.realized_pl is not None]
     gaps = [r.close_gap_fraction for r in rows if r.close_gap_fraction is not None]
     return CohortReport(
-        cohort=cohort,
+        policy_cohort=policy_cohort,
+        execution_realism=realism,
+        economic_evidence_cohort=economic_evidence_cohort(realism),
         n_rows=len(rows),
-        n_broker_fills=sum(1 for r in rows if r.fill_realism == "broker"),
-        n_internal_fills=sum(1 for r in rows if r.fill_realism == "internal"),
         realized_pl_sum=(round(sum(pls), 2) if pls else None),
         realized_wins=sum(1 for p in pls if p > 0),
         realized_losses=sum(1 for p in pls if p <= 0),
@@ -761,18 +821,39 @@ def _build_cohort(cohort: str, rows: List[RowComparison]) -> CohortReport:
     )
 
 
-# Deterministic cohort order in the report.
-_COHORT_ORDER = ("live", "shadow", "unattributed")
+# Deterministic ordering: policy cohort precedence, then execution realism.
+_POLICY_ORDER = ("aggressive", "shadow", "unattributed")
+_REALISM_ORDER = ("alpaca_live", "alpaca_paper", "internal")
+
+
+def _policy_rank(p: str) -> int:
+    try:
+        return _POLICY_ORDER.index(p)
+    except ValueError:
+        return len(_POLICY_ORDER)
+
+
+def _realism_rank(r: str) -> int:
+    try:
+        return _REALISM_ORDER.index(r)
+    except ValueError:
+        return len(_REALISM_ORDER)
 
 
 def build_study(payload: Mapping[str, Any]) -> StudyReport:
     rows = [build_row(r) for r in (payload.get("rows") or [])]
-    by_cohort: Dict[str, List[RowComparison]] = {c: [] for c in _COHORT_ORDER}
+    # Partition on (policy_cohort, execution_realism) so the headline economic
+    # numbers of a broker-live bucket can NEVER include a paper/internal fill.
+    by_key: Dict[Tuple[str, str], List[RowComparison]] = {}
     for r in rows:
-        by_cohort.setdefault(r.cohort, []).append(r)
+        by_key.setdefault((r.policy_cohort, r.execution_realism), []).append(r)
+    ordered_keys = sorted(
+        by_key.keys(),
+        key=lambda k: (_policy_rank(k[0]), _realism_rank(k[1]), k[0], k[1]),
+    )
     cohorts = tuple(
-        _build_cohort(c, by_cohort[c])
-        for c in _COHORT_ORDER if by_cohort.get(c)
+        _build_cohort(policy, realism, by_key[(policy, realism)])
+        for (policy, realism) in ordered_keys
     )
     return StudyReport(
         generated_at=str(payload.get("generated_at", "")),
@@ -983,8 +1064,9 @@ class TcmV2AccrualExample:
     example_id: str            # f"{record_id}:{side}" — the dedup key
     record_id: str             # paper_positions.id — the round-trip spine
     suggestion_id: str         # durable identity (entry↔close share it)
-    cohort: str                # live | shadow | unattributed
-    fill_realism: str          # broker | internal
+    cohort: str                # POLICY: aggressive | shadow | unattributed
+    execution_realism: str     # ECONOMIC: alpaca_live | alpaca_paper | internal
+    economic_evidence_cohort: str  # broker_live | broker_paper | internal
     side: str                  # entry | close
     routing: str               # broker_alpaca_options | shadow | internal | ...
     routing_source: str        # stage_stamp | derived_from_realized
@@ -1012,6 +1094,14 @@ class TcmV2AccrualExample:
     position_quantity: Optional[float] = None  # pp.quantity context (never the sum)
     multiplier: float = OPTION_MULTIPLIER      # explicit option multiplier (×100)
     has_credit_sign_correction: bool = False   # any contributing order carried F-CREDIT-SIGN (noted, NOT re-corrected)
+    # STAMP COVERAGE (V17-3 observability polish): first-class fields so a reader
+    # need not re-derive them. contributing_fill_count = the nonzero-qty fills
+    # aggregated into this side (mirrors fill_count); stamped_fill_count = how
+    # many of them carry a tcm_v2_proposal; stamp_complete = every contributing
+    # fill is stamped (the ONLY condition under which the v2 side total can sum).
+    contributing_fill_count: int = 1
+    stamped_fill_count: int = 0
+    stamp_complete: bool = False
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1019,7 +1109,9 @@ class TcmV2AccrualExample:
             "record_id": self.record_id,
             "suggestion_id": self.suggestion_id,
             "cohort": self.cohort,
-            "fill_realism": self.fill_realism,
+            "policy_cohort": self.cohort,         # explicit axis name
+            "execution_realism": self.execution_realism,
+            "economic_evidence_cohort": self.economic_evidence_cohort,
             "side": self.side,
             "entry_or_close": self.side,          # task-named alias
             "routing": self.routing,
@@ -1031,6 +1123,9 @@ class TcmV2AccrualExample:
             "position_quantity": self.position_quantity,
             "multiplier": self.multiplier,
             "fill_count": self.fill_count,
+            "contributing_fill_count": self.contributing_fill_count,
+            "stamped_fill_count": self.stamped_fill_count,
+            "stamp_complete": self.stamp_complete,
             "zero_fill_rows": self.zero_fill_rows,
             "has_credit_sign_correction": self.has_credit_sign_correction,
             "model_version": self.model_version,
@@ -1053,13 +1148,16 @@ class TcmV2AccrualExample:
 
 
 def _accrual_example_for_side(
-    row: Mapping[str, Any], *, side: str, cohort: str, realism: str,
+    row: Mapping[str, Any], *, side: str, cohort: str,
     qty: Optional[float], tcm: Any, exec_mode: Any, has_oid: Any,
     broker_status: Any, fees_usd: Any,
     close_order_json: Optional[Mapping[str, Any]] = None,
     close_fill: Any = None,
 ) -> TcmV2AccrualExample:
     stamp = _v2_stamp(tcm)
+    # ECONOMIC realism from THIS side's execution_mode (never fill_source).
+    realism = execution_realism(exec_mode)
+    econ_cohort = economic_evidence_cohort(realism)
     broker_routed = _broker_routed(exec_mode, has_oid, broker_status)
     routing, routing_source = _accrual_routing(stamp, broker_routed, cohort)
 
@@ -1100,12 +1198,14 @@ def _accrual_example_for_side(
                 leg_count = None
 
     record_id = str(row.get("record_id"))
+    stamp_present = stamp is not None
     return TcmV2AccrualExample(
         example_id=f"{record_id}:{side}",
         record_id=record_id,
         suggestion_id=str(row.get("suggestion_id") or ""),
         cohort=cohort,
-        fill_realism=realism,
+        execution_realism=realism,
+        economic_evidence_cohort=econ_cohort,
         side=side,
         routing=routing,
         routing_source=routing_source,
@@ -1113,9 +1213,9 @@ def _accrual_example_for_side(
         leg_count=leg_count,
         quantity=qty,
         model_version=_v2_model_version(stamp),
-        v2_stamp_present=stamp is not None,
+        v2_stamp_present=stamp_present,
         known_at=str(row.get("closed_at") or ""),
-        source=("tcm_v2_proposal@stage" if stamp is not None else "no_v2_stamp"),
+        source=("tcm_v2_proposal@stage" if stamp_present else "no_v2_stamp"),
         current_model_cost=current_cost,
         tcm_v2_cost=v2_cost,
         realized_commission=realized_commission,
@@ -1125,6 +1225,9 @@ def _accrual_example_for_side(
         v2_minus_realized=v2_minus_realized,
         fill_count=1,
         position_quantity=qty,
+        contributing_fill_count=1,
+        stamped_fill_count=1 if stamp_present else 0,
+        stamp_complete=stamp_present,
     )
 
 
@@ -1150,12 +1253,11 @@ def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
         return _accrual_examples_from_inventory(row, inventory)
 
     cohort = classify_cohort(row.get("cohort_name"))
-    realism = fill_realism(row.get("fill_source"))
     qty = _coerce_float(row.get("quantity"))
 
     examples: List[TcmV2AccrualExample] = [
         _accrual_example_for_side(
-            row, side="entry", cohort=cohort, realism=realism, qty=qty,
+            row, side="entry", cohort=cohort, qty=qty,
             tcm=row.get("entry_tcm"),
             exec_mode=row.get("entry_execution_mode"),
             has_oid=row.get("entry_has_alpaca_oid"),
@@ -1169,7 +1271,7 @@ def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
             if isinstance(row.get("close_order_json"), Mapping) else None
         )
         examples.append(_accrual_example_for_side(
-            row, side="close", cohort=cohort, realism=realism, qty=qty,
+            row, side="close", cohort=cohort, qty=qty,
             tcm=row.get("close_tcm"),
             exec_mode=row.get("close_execution_mode"),
             has_oid=row.get("close_has_alpaca_oid"),
@@ -1223,6 +1325,20 @@ def build_accrual_examples(row: Mapping[str, Any]) -> List[TcmV2AccrualExample]:
 
 def _norm_side(side: Any) -> str:
     return str(side or "").strip().lower()
+
+
+def _side_execution_realism(orders: List[Mapping[str, Any]]) -> str:
+    """The side's ECONOMIC realism from its contributing fills' execution_mode.
+    A side is 'alpaca_live' ONLY when EVERY contributing fill is alpaca_live (a
+    real-capital total needs unanimous live execution); likewise alpaca_paper;
+    any internal fill OR a mix folds to 'internal' — never over-claim broker_live
+    for a side that mixed venues. Empty → internal (no real-capital claim)."""
+    realisms = {execution_realism(o.get("execution_mode")) for o in orders}
+    if realisms == {"alpaca_live"}:
+        return "alpaca_live"
+    if realisms == {"alpaca_paper"}:
+        return "alpaca_paper"
+    return "internal"
 
 
 def _split_fill_inventory(
@@ -1308,7 +1424,7 @@ def _sum_components_total(
 
 def _inventory_side_example(
     row: Mapping[str, Any], side: str, side_orders: List[Mapping[str, Any]],
-    cohort: str, realism: str, pos_qty: Optional[float],
+    cohort: str, pos_qty: Optional[float],
 ) -> TcmV2AccrualExample:
     """Build ONE aggregated accrual example for a side from its fill inventory."""
     cost_side = _side_enum(side)
@@ -1319,9 +1435,19 @@ def _inventory_side_example(
     has_correction = any(
         bool(o.get("has_credit_sign_correction")) for o in side_orders
     )
+    # ECONOMIC realism from the contributing fills' execution_mode (unanimous
+    # live/paper else internal — never over-claim broker_live on a mixed side).
+    realism = _side_execution_realism(contributing)
+    econ_cohort = economic_evidence_cohort(realism)
 
     stamps = [_v2_stamp(o.get("tcm")) for o in contributing]
     stamped = [s for s in stamps if s is not None]
+    # STAMP COVERAGE (V17-3 polish): a side total can sum the v2 commission ONLY
+    # when EVERY contributing fill is stamped. A mixed stamped/unstamped side is
+    # already typed UNAVAILABLE by _sum_components_total (unchanged); these
+    # fields make that coverage first-class instead of derivable.
+    stamped_fill_count = len(stamped)
+    stamp_complete = fill_count > 0 and stamped_fill_count == fill_count
 
     # current model commission — SUM of per-order frozen TCM fees.
     current_cost = _sum_components_total(
@@ -1434,7 +1560,8 @@ def _inventory_side_example(
         record_id=record_id,
         suggestion_id=str(row.get("suggestion_id") or ""),
         cohort=cohort,
-        fill_realism=realism,
+        execution_realism=realism,
+        economic_evidence_cohort=econ_cohort,
         side=side,
         routing=routing,
         routing_source=routing_source,
@@ -1456,6 +1583,9 @@ def _inventory_side_example(
         zero_fill_rows=zero_rows,
         position_quantity=pos_qty,
         has_credit_sign_correction=has_correction,
+        contributing_fill_count=fill_count,
+        stamped_fill_count=stamped_fill_count,
+        stamp_complete=stamp_complete,
     )
 
 
@@ -1465,15 +1595,14 @@ def _accrual_examples_from_inventory(
     """Entry + close aggregated accrual examples from a fill inventory. The
     close example exists only when a side-flip produced a close set."""
     cohort = classify_cohort(row.get("cohort_name"))
-    realism = fill_realism(row.get("fill_source"))
     pos_qty = _coerce_float(row.get("quantity"))
     entry_orders, close_orders = _split_fill_inventory(inventory)
     examples = [
-        _inventory_side_example(row, "entry", entry_orders, cohort, realism, pos_qty)
+        _inventory_side_example(row, "entry", entry_orders, cohort, pos_qty)
     ]
     if close_orders:
         examples.append(
-            _inventory_side_example(row, "close", close_orders, cohort, realism, pos_qty)
+            _inventory_side_example(row, "close", close_orders, cohort, pos_qty)
         )
     return examples
 
@@ -1494,9 +1623,13 @@ def _dedup_examples(
 # --- version-segregated aggregation -----------------------------------------
 @dataclass(frozen=True)
 class TcmV2VersionBucket:
-    """Accrual tally for ONE (cohort, v2 model_version). A version bump lands
+    """Accrual tally for ONE (policy_cohort, execution_realism, v2
+    model_version). Keying on execution_realism means an internal/paper example
+    is NEVER labeled under a broker-live heading (V17-4); a version bump lands
     post-bump examples in a NEW bucket — versions never pool."""
-    cohort: str
+    cohort: str                     # POLICY: aggressive | shadow | unattributed
+    execution_realism: str          # alpaca_live | alpaca_paper | internal
+    economic_evidence_cohort: str   # broker_live | broker_paper | internal
     model_version: str
     n_examples: int
     n_entry: int
@@ -1515,6 +1648,9 @@ class TcmV2VersionBucket:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "cohort": self.cohort,
+            "policy_cohort": self.cohort,
+            "execution_realism": self.execution_realism,
+            "economic_evidence_cohort": self.economic_evidence_cohort,
             "model_version": self.model_version,
             "n_examples": self.n_examples,
             "n_entry": self.n_entry,
@@ -1543,10 +1679,13 @@ class TcmV2AccrualReport:
 
 
 def _build_v2_bucket(
-    cohort: str, model_version: str, examples: List[TcmV2AccrualExample]
+    cohort: str, realism: str, model_version: str,
+    examples: List[TcmV2AccrualExample],
 ) -> TcmV2VersionBucket:
     return TcmV2VersionBucket(
         cohort=cohort,
+        execution_realism=realism,
+        economic_evidence_cohort=economic_evidence_cohort(realism),
         model_version=model_version,
         n_examples=len(examples),
         n_entry=sum(1 for e in examples if e.side == "entry"),
@@ -1570,25 +1709,27 @@ def _build_v2_bucket(
 def build_tcm_v2_accrual(payload: Mapping[str, Any]) -> TcmV2AccrualReport:
     """Pure function of the DB payload → the version-segregated TCM v2
     realized-accrual report. Deduped by (record_id, side); buckets keyed on
-    (cohort, v2 model_version) in deterministic order."""
+    (policy_cohort, execution_realism, v2 model_version) in deterministic order
+    — so a paper/internal example is never pooled under a broker-live heading."""
     examples: List[TcmV2AccrualExample] = []
     for r in (payload.get("rows") or []):
         examples.extend(build_accrual_examples(r))
     examples = _dedup_examples(examples)
 
-    by_key: Dict[Tuple[str, str], List[TcmV2AccrualExample]] = {}
+    by_key: Dict[Tuple[str, str, str], List[TcmV2AccrualExample]] = {}
     for ex in examples:
-        by_key.setdefault((ex.cohort, ex.model_version), []).append(ex)
+        by_key.setdefault(
+            (ex.cohort, ex.execution_realism, ex.model_version), []
+        ).append(ex)
 
-    # Deterministic order: cohort precedence, then model_version ascending.
-    cohort_rank = {c: i for i, c in enumerate(_COHORT_ORDER)}
+    # Deterministic order: policy cohort, then execution realism, then version.
     ordered_keys = sorted(
         by_key.keys(),
-        key=lambda k: (cohort_rank.get(k[0], len(_COHORT_ORDER)), k[0], k[1]),
+        key=lambda k: (_policy_rank(k[0]), _realism_rank(k[1]), k[0], k[1], k[2]),
     )
     buckets = tuple(
-        _build_v2_bucket(cohort, mv, by_key[(cohort, mv)])
-        for (cohort, mv) in ordered_keys
+        _build_v2_bucket(cohort, realism, mv, by_key[(cohort, realism, mv)])
+        for (cohort, realism, mv) in ordered_keys
     )
     return TcmV2AccrualReport(total_examples=len(examples), buckets=buckets)
 
@@ -1638,19 +1779,35 @@ def render_markdown(study: StudyReport) -> str:
              "(TOTAL USD, entry one-way).")
     L.append("")
     for c in study.cohorts:
-        L.append(f"## Cohort: {c.cohort.upper()}")
+        L.append(
+            f"## Cohort: {c.policy_cohort.upper()} / "
+            f"{c.execution_realism.upper()} — economic evidence: "
+            f"{c.economic_evidence_cohort.upper()}")
         L.append("")
-        descriptor = (
-            "live champion cohort (real capital)" if c.cohort == "live"
-            else "shadow cohort (no real capital; internal synthetic fills are "
-                 "partly fiction — docs/specs/shadow_fill_realism.md)"
-            if c.cohort == "shadow"
-            else "no cohort attribution")
-        L.append(f"- {descriptor}")
-        L.append(f"- Rows: **{c.n_rows}** · fill provenance: "
-                 f"{c.n_broker_fills} broker / {c.n_internal_fills} internal "
-                 "(orthogonal to cohort — the actual fill source per row)")
-        L.append(f"- Realized P&L (authoritative): sum **{_fmt(c.realized_pl_sum)}** "
+        if c.economic_evidence_cohort == "broker_live":
+            descriptor = (
+                "broker-LIVE real-capital fills (execution_mode alpaca_live) — "
+                "the ONLY authoritative Realized P&L bucket")
+            pl_label = "AUTHORITATIVE, real capital"
+        elif c.economic_evidence_cohort == "broker_paper":
+            descriptor = (
+                "broker-routed PAPER account (execution_mode alpaca_paper) — NOT "
+                "real capital; NEVER pooled into the broker-live headline")
+            pl_label = "NOT real capital (paper broker)"
+        else:
+            descriptor = (
+                "internal synthetic fills (no broker execution) — NOT real "
+                "capital; NEVER pooled into the broker-live headline")
+            if c.policy_cohort == "shadow":
+                descriptor += (
+                    " [shadow policy book — partly fiction, "
+                    "docs/specs/shadow_fill_realism.md]")
+            pl_label = "NOT real capital (internal fills)"
+        L.append(f"- policy cohort **{c.policy_cohort}** · {descriptor}")
+        L.append(f"- Rows: **{c.n_rows}** (every row's entry execution_mode is "
+                 f"{c.execution_realism} — the partition is homogeneous by "
+                 "construction, so no fill can be miscounted into another bucket)")
+        L.append(f"- Realized P&L ({pl_label}): sum **{_fmt(c.realized_pl_sum)}** "
                  f"· wins {c.realized_wins} / losses {c.realized_losses}")
         L.append(f"- Close-fill-gap (fill between executable cross=0 and mid=1): "
                  f"n={c.gap_fraction_n}, mean={_fmt(c.gap_fraction_mean, 4)}")
@@ -1692,9 +1849,11 @@ def _render_tcm_v2_accrual(report: TcmV2AccrualReport) -> List[str]:
              "they read (frozen 0.65×qty − 0)=+ and (0 − 0)=0 — the accrued "
              "evidence that v2 tracks realized. Slippage/spread are carried "
              "UNCHANGED (surfaced as realized context), never differenced here.")
-    L.append("- Buckets are keyed on (cohort, v2 `model_version`): a version "
-             "bump lands post-bump examples in a NEW bucket — versions never "
-             "pool. IDEMPOTENT: pure function of the DB; re-run = same output.")
+    L.append("- Buckets are keyed on (policy_cohort, execution_realism, v2 "
+             "`model_version`): an internal/paper example is NEVER pooled under "
+             "a broker-live heading, and a version bump lands post-bump examples "
+             "in a NEW bucket. IDEMPOTENT: pure function of the DB; re-run = "
+             "same output.")
     L.append("- MULTI-FILL (Lane B): each example aggregates commission over "
              "ALL contributing fills of its side (split at the first side-flip; "
              "zero-qty replay rows dropped). `fill_count`/`quantity` are "
@@ -1706,7 +1865,10 @@ def _render_tcm_v2_accrual(report: TcmV2AccrualReport) -> List[str]:
         L.append("")
         return L
     for b in report.buckets:
-        L.append(f"### {b.cohort.upper()} · v2 `{b.model_version}`")
+        L.append(
+            f"### {b.cohort.upper()} / {b.execution_realism.upper()} · v2 "
+            f"`{b.model_version}` — economic evidence: "
+            f"{b.economic_evidence_cohort.upper()}")
         L.append("")
         L.append(f"- Examples: **{b.n_examples}** "
                  f"(entry {b.n_entry} / close {b.n_close}) · "
@@ -1766,7 +1928,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             ex for r in (payload.get("rows") or [])
             for ex in build_accrual_examples(r)
         ])
-        examples.sort(key=lambda e: (e.cohort, e.model_version, e.record_id, e.side))
+        examples.sort(key=lambda e: (
+            e.cohort, e.execution_realism, e.model_version, e.record_id, e.side))
         snapshot = {
             "generated_at": str(payload.get("generated_at", "")),
             "source": str(payload.get("source", "")),

@@ -304,7 +304,7 @@ class TestDuplicateDedup:
         acc = build_tcm_v2_accrual({"rows": [row, dict(row)]})
         # 1 entry + 1 close, NOT doubled
         assert acc.total_examples == 2
-        live = [b for b in acc.buckets if b.cohort == "live"][0]
+        live = [b for b in acc.buckets if b.cohort == "aggressive"][0]
         assert live.n_examples == 2 and live.n_entry == 1 and live.n_close == 1
 
     def test_dedup_helper_keys_on_record_id_and_side(self):
@@ -335,7 +335,7 @@ class TestModelVersionDrift:
         v2 = _row("p2", "aggressive", routing="broker",
                   entry_v2_stamp=bumped_entry, close_v2_stamp=bumped_close)
         acc = build_tcm_v2_accrual({"rows": [v1, v2]})
-        live_buckets = {b.model_version: b for b in acc.buckets if b.cohort == "live"}
+        live_buckets = {b.model_version: b for b in acc.buckets if b.cohort == "aggressive"}
         # TWO distinct live buckets — versions never pool
         assert set(live_buckets.keys()) == {
             "tcm_v2_proposal/0.1.0", "tcm_v2_proposal/0.2.0"}
@@ -347,7 +347,7 @@ class TestModelVersionDrift:
         unstamped = _row("p2", "aggressive", routing="broker",
                          entry_v2_stamp=None, close_v2_stamp=None)
         acc = build_tcm_v2_accrual({"rows": [stamped, unstamped]})
-        versions = {b.model_version for b in acc.buckets if b.cohort == "live"}
+        versions = {b.model_version for b in acc.buckets if b.cohort == "aggressive"}
         assert "tcm_v2_proposal/0.1.0" in versions
         assert "unavailable_no_v2_stamp" in versions
 
@@ -361,8 +361,8 @@ class TestCohortSeparationAndJoinIdentity:
             _row("U1", None, routing="internal"),
         ]})
         cohorts = {b.cohort for b in acc.buckets}
-        assert cohorts == {"live", "shadow", "unattributed"}
-        live = [b for b in acc.buckets if b.cohort == "live"]
+        assert cohorts == {"aggressive", "shadow", "unattributed"}
+        live = [b for b in acc.buckets if b.cohort == "aggressive"]
         # only the aggressive round-trip's 2 examples are in live
         assert sum(b.n_examples for b in live) == 2
 
@@ -411,3 +411,54 @@ class TestSqlAndRender:
         # round-trips through json (all typed components serialize)
         assert json.loads(json.dumps(d))["current_minus_realized"]["amount_usd"] == pytest.approx(0.65)
         assert d["model_version"] == "tcm_v2_proposal/0.1.0"
+
+
+# --- 11. legacy-path stamp coverage (V17-3) ---------------------------------
+class TestLegacyStampCoverage:
+    """The single-order (non-inventory) path also emits the coverage fields:
+    contributing_fill_count is 1, and stamp_complete tracks the one stamp."""
+
+    def test_stamped_legacy_side_is_complete(self):
+        e = _by_side(_row("p1", "aggressive", routing="broker"))["entry"]
+        assert e.contributing_fill_count == 1
+        assert e.stamped_fill_count == 1
+        assert e.stamp_complete is True
+
+    def test_unstamped_legacy_side_is_incomplete(self):
+        e = _by_side(_row("p1", "aggressive", routing="broker",
+                          entry_v2_stamp=None, close_v2_stamp=None))["entry"]
+        assert e.contributing_fill_count == 1
+        assert e.stamped_fill_count == 0
+        assert e.stamp_complete is False
+        assert e.tcm_v2_cost.available is False
+
+
+# --- 12. economic-evidence axis (V17-4) -------------------------------------
+class TestLegacyEconomicEvidence:
+    def test_aggressive_broker_example_is_broker_live(self):
+        e = _by_side(_row("p1", "aggressive", routing="broker"))["entry"]
+        assert e.cohort == "aggressive"
+        assert e.execution_realism == "alpaca_live"
+        assert e.economic_evidence_cohort == "broker_live"
+
+    def test_aggressive_internal_example_is_not_broker_live(self):
+        e = _by_side(_row("i1", "aggressive", routing="internal"))["entry"]
+        assert e.cohort == "aggressive"           # policy unchanged...
+        assert e.execution_realism == "internal"  # ...but economics are internal
+        assert e.economic_evidence_cohort == "internal"
+
+    def test_internal_example_never_in_a_broker_live_bucket(self):
+        acc = build_tcm_v2_accrual({"rows": [
+            _row("L1", "aggressive", routing="broker"),
+            _row("I1", "aggressive", routing="internal"),
+        ]})
+        live = [b for b in acc.buckets
+                if b.economic_evidence_cohort == "broker_live"]
+        # every broker-live example is an alpaca_live fill; the internal row's
+        # examples land only in the (aggressive, internal) bucket
+        assert all(b.execution_realism == "alpaca_live" for b in live)
+        assert sum(b.n_examples for b in live) == 2
+        internal = [b for b in acc.buckets
+                    if b.cohort == "aggressive"
+                    and b.economic_evidence_cohort == "internal"]
+        assert sum(b.n_examples for b in internal) == 2

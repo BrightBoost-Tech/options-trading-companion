@@ -3,6 +3,7 @@ import { formatOptionDisplay } from '@/lib/formatters';
 import { Wallet, RefreshCw, Copy, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface PortfolioHoldingsTableProps {
   holdings: any[];
@@ -48,20 +49,26 @@ const PositionRow = React.memo(({ position, isCopied, onCopy }: PositionRowProps
     <tr className="hover:bg-muted/50 transition-colors group">
         <th scope="row" className={`px-6 py-4 font-medium text-left ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
             <div className="flex flex-col items-start gap-1">
-                <Button
-                    variant="ghost"
-                    onClick={() => onCopy(displaySymbol)}
-                    className="flex justify-start items-center gap-2 hover:opacity-80 hover:bg-transparent hover:text-inherit transition-opacity text-left p-0 h-auto font-medium text-inherit"
-                    title="Click to copy symbol"
-                    aria-label={`Copy symbol ${displaySymbol}`}
-                >
-                    <span>{displaySymbol}</span>
-                    {isCopied ? (
-                        <Check className="w-3 h-3 text-green-500 animate-in fade-in zoom-in" aria-hidden="true" />
-                    ) : (
-                        <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
-                    )}
-                </Button>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            variant="ghost"
+                            onClick={() => onCopy(displaySymbol)}
+                            className="flex justify-start items-center gap-2 hover:opacity-80 hover:bg-transparent hover:text-inherit transition-opacity text-left p-0 h-auto font-medium text-inherit"
+                            aria-label={`Copy symbol ${displaySymbol}`}
+                        >
+                            <span>{displaySymbol}</span>
+                            {isCopied ? (
+                                <Check className="w-3 h-3 text-green-500 animate-in fade-in zoom-in" aria-hidden="true" />
+                            ) : (
+                                <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                            )}
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent className="whitespace-nowrap">
+                        <p>{isCopied ? "Copied!" : "Click to copy symbol"}</p>
+                    </TooltipContent>
+                </Tooltip>
                 {position.sector && (
                     <span className="text-[10px] text-muted-foreground uppercase">{position.sector}</span>
                 )}
@@ -129,6 +136,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
   return (
     <div className="overflow-x-auto">
+      <TooltipProvider>
       <table className="w-full" aria-label="Portfolio Holdings">
         <thead className="bg-muted border-b border-border">
           <tr>
@@ -220,6 +228,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
             )}
         </tbody>
       </table>
+      </TooltipProvider>
     </div>
   );
 }

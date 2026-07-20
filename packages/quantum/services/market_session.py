@@ -66,26 +66,98 @@ class MarketSession:
         return self.open_at <= now_et < self.close_at
 
 
+def _time_from_datetime(dt: datetime) -> time:
+    """Reduce a ``datetime`` to its ET wall-clock ``time``.
+
+    A tz-AWARE datetime is converted to America/New_York FIRST, then its
+    time-of-day is taken (DST-correct, no offset arithmetic). A NAIVE datetime
+    is treated as broker-provided ET session wall-time — its clock fields are
+    returned as-is, NEVER reinterpreted as UTC (the alpaca-py Calendar model
+    stringifies ``.open``/``.close`` as space-separated NAIVE ET datetimes,
+    e.g. ``'2026-07-20 09:30:00'``).
+    """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_ET)
+    return dt.time()
+
+
 def _parse_session_time(raw: Any) -> Optional[time]:
-    """Parse an Alpaca calendar open/close ('09:30', '09:30:00', or an ISO
-    datetime) into a naive ``time``. Returns ``None`` when unparseable — the
-    caller treats a trading-day row with unparseable bounds as unreadable
+    """Coerce an Alpaca calendar open/close bound into a naive ET ``time``.
+
+    This is the SINGLE parsing authority for calendar session bounds (the broker
+    wrapper ``AlpacaClient.get_calendar`` normalizes through it too — never a
+    copy). Accepted shapes:
+
+    * ``datetime`` — aware → converted to ET then time; naive → ET wall-time
+      as-is (see :func:`_time_from_datetime`). NB: ``datetime`` is checked
+      before ``date`` because it subclasses ``date``.
+    * ``time`` — returned unchanged (naive ET wall time).
+    * date-time STRING using a ``'T'`` OR a single space separator (the alpaca-py
+      ``str(datetime)`` form) — parsed with :func:`datetime.fromisoformat`
+      (Python 3.11 accepts both separators and offsets), then the aware→ET /
+      naive→ET rule applies. A date-ONLY string (no time component) returns
+      ``None`` — never a fabricated midnight session.
+    * bare ``'HH:MM'`` / ``'HH:MM:SS'`` (optional fractional seconds) — parsed
+      to a ``time``.
+    * a bare ``date`` object or anything malformed/ambiguous → ``None``.
+
+    Returns ``None`` when there is no readable time component — the caller treats
+    a trading-day row with ``None`` bounds as unreadable and fails CLOSED
     (H9: never fabricate a session)."""
-    s = str(raw or "").strip()
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):  # must precede the ``date`` check (subclass)
+        return _time_from_datetime(raw)
+    if isinstance(raw, time):
+        return raw
+    if isinstance(raw, date):  # a bare date has no time-of-day component
+        return None
+
+    s = str(raw).strip()
     if not s:
         return None
-    if "T" in s:  # full ISO datetime → take the time-of-day
+
+    # Date-time string (carries a date component): 'T' or a single space.
+    if "T" in s or " " in s:
         try:
-            return datetime.fromisoformat(s.replace("Z", "+00:00")).time()
+            return _time_from_datetime(datetime.fromisoformat(s.replace("Z", "+00:00")))
         except ValueError:
-            s = s.split("T", 1)[1]
-    s = s.split(".", 1)[0]  # drop any fractional seconds
+            return None
+
+    # No date component: a date-only token like '2026-07-20' has no ':' — it is
+    # NOT a session time, so it must return None (never a midnight session).
+    if ":" not in s:
+        return None
+
+    # Bare time: '09:30', '09:30:00', optional fractional seconds.
+    try:
+        return time.fromisoformat(s)
+    except ValueError:
+        pass
+    s = s.split(".", 1)[0]  # drop any fractional seconds for the strptime fallback
     for fmt in ("%H:%M:%S", "%H:%M"):
         try:
             return datetime.strptime(s, fmt).time()
         except ValueError:
             continue
     return None
+
+
+def normalize_session_bound(raw: Any) -> Optional[str]:
+    """Coerce a calendar open/close bound to a canonical bare ET wall-time
+    string — ``'HH:MM'``, or ``'HH:MM:SS'`` only when the seconds are nonzero —
+    or ``None`` when there is no readable time component.
+
+    This is the broker wrapper's normalizer; it delegates to the ONE parsing
+    authority :func:`_parse_session_time` so the wrapper and the resolver never
+    diverge. A ``None`` return signals an unreadable bound; the wrapper keeps raw
+    diagnostic context and the resolver still fails CLOSED."""
+    t = _parse_session_time(raw)
+    if t is None:
+        return None
+    if t.second or t.microsecond:
+        return t.strftime("%H:%M:%S")
+    return t.strftime("%H:%M")
 
 
 def _default_calendar_fn(start: date, end: date) -> List[Any]:

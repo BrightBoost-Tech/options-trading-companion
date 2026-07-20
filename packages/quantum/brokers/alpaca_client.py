@@ -361,14 +361,31 @@ class AlpacaClient:
         """
         from alpaca.trading.requests import GetCalendarRequest
 
+        # ONE parsing authority: normalize the SDK bounds through the same coercer
+        # the session resolver uses. The alpaca-py Calendar model returns
+        # ``.open``/``.close`` as (naive ET) ``datetime`` objects whose ``str()``
+        # is the space-separated ``'2026-07-20 09:30:00'`` form — the raw
+        # ``str()`` this method used to emit is UNREADABLE to
+        # ``services.market_session._parse_session_time`` (it accepted only
+        # ``HH:MM``/``HH:MM:SS`` or a 'T'-ISO datetime), so a valid trading day
+        # fail-closed at the entry gate. Lazy import avoids a module cycle.
+        from packages.quantum.services.market_session import normalize_session_bound
+
         req = GetCalendarRequest(start=start, end=end)
         rows = self._call_with_retry(self._client.get_calendar, req) or []
         out: List[Dict[str, str]] = []
         for c in rows:
+            o_raw = getattr(c, "open", None)
+            c_raw = getattr(c, "close", None)
+            o_norm = normalize_session_bound(o_raw)
+            c_norm = normalize_session_bound(c_raw)
             out.append({
                 "date": str(getattr(c, "date", "") or ""),
-                "open": str(getattr(c, "open", "") or ""),
-                "close": str(getattr(c, "close", "") or ""),
+                # A bound that cannot be normalized keeps its raw stringified
+                # diagnostic so the resolver still fails CLOSED (H9) with the bad
+                # value visible — never a fabricated time.
+                "open": o_norm if o_norm is not None else str(o_raw or ""),
+                "close": c_norm if c_norm is not None else str(c_raw or ""),
             })
         return out
 

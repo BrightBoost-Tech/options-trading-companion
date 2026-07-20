@@ -23,6 +23,7 @@ from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.quote_provenance import QuoteProvenanceRecorder
+from packages.quantum.services.oi_enrichment import enrich_selected_legs
 from packages.quantum.analytics import option_liquidity as _option_liquidity
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
@@ -4047,6 +4048,22 @@ def scan_for_opportunities(
                         )
                     return None
 
+            # Lane H (B3, DRAFT / observe-only, DEFAULT-OFF): the Alpaca
+            # snapshot carries no OI, so exact-leg OI is unavailable on the
+            # Alpaca-primary path. For a SELECTED (gate-PASSED) candidate — the
+            # narrowest scope at which the observe-only leg-set row is written,
+            # never the whole universe — OPTIONALLY enrich its exact-leg OI from
+            # a secondary provider (narrowly rate-limited; captures source +
+            # observation date + retrieval known-at + typed failure). Feeds ONLY
+            # the recorder below; NEVER gates/ranks/sizes. Flag OFF (default) →
+            # returns _oi_by_contract unchanged (byte-identical no-op).
+            try:
+                _oi_map_passed = enrich_selected_legs(
+                    legs, _oi_by_contract, symbol=symbol)
+            except Exception:
+                logger.debug("oi_enrichment failed (non-fatal)", exc_info=True)
+                _oi_map_passed = _oi_by_contract
+
             # Lane 4C: the leg set PASSED the spread gate — record the same
             # evidence with verdict='passed' (sampled at flush unless the
             # candidate is later emitted → mark_selected persists it).
@@ -4066,7 +4083,7 @@ def scan_for_opportunities(
                     entry_cost_share=entry_cost_share,
                     max_loss_share=max_loss_share,
                     legs=legs,
-                    oi_by_contract=_oi_by_contract,
+                    oi_by_contract=_oi_map_passed,
                 )
             except Exception:
                 logger.debug("quote_provenance spread record failed",

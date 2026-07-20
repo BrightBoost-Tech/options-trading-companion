@@ -27,6 +27,9 @@ closed round-trips. These tests pin, with SYNTHETIC fixtures only (NO live DB):
    present; fees_usd labeled an ESTIMATE.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 from scripts.analytics.realized_cost_study import (
@@ -34,10 +37,18 @@ from scripts.analytics.realized_cost_study import (
     build_row,
     build_study,
     classify_cohort,
-    fill_realism,
+    execution_realism,
+    economic_evidence_cohort,
     render_markdown,
     _entry_adverse_slip_usd,
 )
+
+
+def _broker_live(study):
+    """The single broker-live (real-capital, authoritative) cohort, or None."""
+    live = [c for c in study.cohorts if c.economic_evidence_cohort == "broker_live"]
+    assert len(live) <= 1, "broker_live must be a single partition"
+    return live[0] if live else None
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -48,10 +59,15 @@ def _row(record_id, cohort_name, *, fill_source="alpaca_fill_reconciler",
          entry_tcm=None, close_side="sell", close_fill_price=1.17,
          close_order_json=None, ranking_costs=None, routing="broker",
          entry_fees_usd=None):
-    # routing="broker" => real Alpaca execution ($0 stamped commission);
+    # routing="broker" => real Alpaca LIVE execution ($0 stamped commission);
+    # routing="paper"  => real Alpaca PAPER execution (broker-routed, $0 stamped,
+    #                     but NOT real capital);
     # routing="internal" => internal_paper (fees_usd estimate-or-ambiguous).
     if routing == "broker":
         exec_mode, has_oid, bstatus = "alpaca_live", True, "filled"
+        fees = 0.0 if entry_fees_usd is None else entry_fees_usd
+    elif routing == "paper":
+        exec_mode, has_oid, bstatus = "alpaca_paper", True, "filled"
         fees = 0.0 if entry_fees_usd is None else entry_fees_usd
     else:
         exec_mode, has_oid, bstatus = "internal_paper", False, None
@@ -78,23 +94,49 @@ def _row(record_id, cohort_name, *, fill_source="alpaca_fill_reconciler",
 STAMPED_CLOSE_OJ = {"close_fill_gap_cross": -1.10, "close_fill_gap_mid": -1.20}
 
 
-# --- 1. classification ------------------------------------------------------
+# --- 1. classification (THREE separate axes — V17-4) ------------------------
 class TestClassification:
     @pytest.mark.parametrize("name,expected", [
-        ("aggressive", "live"), ("AGGRESSIVE", "live"),
+        # POLICY cohort is a STRATEGY identity, never an economic claim: an
+        # 'aggressive' policy row is 'aggressive', NOT 'live'.
+        ("aggressive", "aggressive"), ("AGGRESSIVE", "aggressive"),
         ("neutral", "shadow"), ("conservative", "shadow"),
         (None, "unattributed"), ("", "unattributed"), ("weird", "unattributed"),
     ])
-    def test_cohort(self, name, expected):
+    def test_policy_cohort(self, name, expected):
         assert classify_cohort(name) == expected
 
-    @pytest.mark.parametrize("src,expected", [
-        ("alpaca_fill_reconciler", "broker"), ("alpaca", "broker"),
-        ("exit_evaluator", "internal"), ("manual_endpoint", "internal"),
-        (None, "internal"), ("", "internal"),
+    @pytest.mark.parametrize("mode,expected", [
+        # ECONOMIC realism reads execution_mode (the reliable venue), NEVER the
+        # noisy fill_source. Only alpaca_live is real capital.
+        ("alpaca_live", "alpaca_live"), ("ALPACA_LIVE", "alpaca_live"),
+        ("alpaca_paper", "alpaca_paper"),
+        ("internal_paper", "internal"), ("shadow_blocked", "internal"),
+        ("submission_failed", "internal"), (None, "internal"), ("", "internal"),
     ])
-    def test_fill_realism(self, src, expected):
-        assert fill_realism(src) == expected
+    def test_execution_realism(self, mode, expected):
+        assert execution_realism(mode) == expected
+
+    @pytest.mark.parametrize("realism,expected", [
+        ("alpaca_live", "broker_live"), ("alpaca_paper", "broker_paper"),
+        ("internal", "internal"),
+    ])
+    def test_economic_evidence_cohort(self, realism, expected):
+        assert economic_evidence_cohort(realism) == expected
+
+    def test_aggressive_paper_row_is_not_broker_live(self):
+        # THE V17-4 CORE: an aggressive-POLICY row that filled on the paper
+        # broker is economic-evidence broker_PAPER, never broker_live.
+        r = build_row(_row("a", "aggressive", routing="paper"))
+        assert r.policy_cohort == "aggressive"
+        assert r.execution_realism == "alpaca_paper"
+        assert r.economic_evidence_cohort == "broker_paper"
+
+    def test_aggressive_internal_row_is_not_broker_live(self):
+        r = build_row(_row("a", "aggressive", routing="internal"))
+        assert r.policy_cohort == "aggressive"
+        assert r.execution_realism == "internal"
+        assert r.economic_evidence_cohort == "internal"
 
 
 # --- 2. entry sign safety ---------------------------------------------------
@@ -158,14 +200,19 @@ class TestUnavailableCounted:
         assert r.entry_slip_vs_requested.reason == "entry_side_unknown"
 
     def test_fully_empty_row_is_counted_not_scored(self):
+        # No entry_execution_mode → execution_realism 'internal' (never fabricate
+        # a broker route from an absent venue), so this aggressive-policy row
+        # lands in (aggressive, internal), NOT a broker-live bucket.
         empty = {"record_id": "e", "cohort_name": "aggressive"}
         study = build_study({"rows": [empty]})
-        live = next(c for c in study.cohorts if c.cohort == "live")
-        assert live.n_rows == 1
+        agg = next(c for c in study.cohorts if c.policy_cohort == "aggressive")
+        assert agg.execution_realism == "internal"
+        assert agg.economic_evidence_cohort == "internal"
+        assert agg.n_rows == 1
         # every delta abstained (counted), none scored
-        assert live.entry_vs_requested.n_available == 0
-        assert live.entry_vs_requested.n_unavailable == 1
-        assert live.close_vs_executable_cross.n_available == 0
+        assert agg.entry_vs_requested.n_available == 0
+        assert agg.entry_vs_requested.n_unavailable == 1
+        assert agg.close_vs_executable_cross.n_available == 0
 
 
 # --- 4. close reuse of the frozen extractor ---------------------------------
@@ -231,14 +278,26 @@ class TestRealizedCommissionPerRouting:
         assert r.entry_commission_vs_tcm.available is False
 
     def test_cohort_routing_counts(self):
+        # CONTRACT CHANGE (V17-4): an internal fill in the aggressive POLICY book
+        # no longer shares a cohort with the live fills — it partitions into its
+        # OWN (aggressive, internal) bucket, so the broker-live commission counts
+        # can never be polluted by an internal row.
         study = build_study({"rows": [
             _row("L1", "aggressive", routing="broker"),
             _row("L2", "aggressive", routing="broker"),
-            _row("I1", "aggressive", routing="internal"),  # an internal fill in the live book
+            _row("I1", "aggressive", routing="internal"),
         ]})
-        live = next(c for c in study.cohorts if c.cohort == "live")
+        live = _broker_live(study)
+        assert live.n_rows == 2
         assert live.entry_commission_broker_known == 2
-        assert live.entry_commission_internal_unavailable == 1
+        assert live.entry_commission_internal_unavailable == 0
+        internal = next(
+            c for c in study.cohorts
+            if c.policy_cohort == "aggressive" and c.execution_realism == "internal")
+        assert internal.n_rows == 1
+        assert internal.economic_evidence_cohort == "internal"
+        assert internal.entry_commission_broker_known == 0
+        assert internal.entry_commission_internal_unavailable == 1
 
 
 # --- 5. cohort separation ---------------------------------------------------
@@ -247,8 +306,11 @@ class TestCohortSeparation:
         return build_study({
             "generated_at": "2026-07-18", "source": "synthetic",
             "rows": [
-                _row("L1", "aggressive", realized_pl=-45.0),
-                _row("L2", "aggressive", realized_pl=20.0),
+                _row("L1", "aggressive", realized_pl=-45.0),   # alpaca_live
+                _row("L2", "aggressive", realized_pl=20.0),    # alpaca_live
+                # an aggressive PAPER-broker row with a huge magnitude — must NOT
+                # pool into the broker-live headline (V17-4)
+                _row("P1", "aggressive", routing="paper", realized_pl=-9999.0),
                 # shadow with a huge fictional magnitude + internal fill
                 _row("S1", "neutral", fill_source="exit_evaluator", realized_pl=5000.0,
                      routing="internal"),
@@ -258,23 +320,36 @@ class TestCohortSeparation:
 
     def test_split_and_no_leak(self):
         study = self._study()
-        live = next(c for c in study.cohorts if c.cohort == "live")
-        shadow = next(c for c in study.cohorts if c.cohort == "shadow")
-        unattr = next(c for c in study.cohorts if c.cohort == "unattributed")
-        assert live.n_rows == 2 and shadow.n_rows == 1 and unattr.n_rows == 1
-        # the fictional 5000 shadow magnitude NEVER enters the live sum
+        live = _broker_live(study)
+        # broker-live is ONLY the two alpaca_live rows
+        assert live.policy_cohort == "aggressive"
+        assert live.execution_realism == "alpaca_live"
+        assert live.n_rows == 2
         assert live.realized_pl_sum == pytest.approx(-25.0)
+        # neither the -9999 paper magnitude nor the 5000 shadow fiction leaks in
+        paper = next(c for c in study.cohorts
+                     if c.economic_evidence_cohort == "broker_paper")
+        assert paper.policy_cohort == "aggressive" and paper.n_rows == 1
+        assert paper.realized_pl_sum == pytest.approx(-9999.0)
+        shadow = next(c for c in study.cohorts if c.policy_cohort == "shadow")
         assert shadow.realized_pl_sum == pytest.approx(5000.0)
+        assert shadow.economic_evidence_cohort == "internal"
+        unattr = next(c for c in study.cohorts if c.policy_cohort == "unattributed")
+        assert unattr.n_rows == 1 and unattr.realized_pl_sum == pytest.approx(3.0)
 
-    def test_fill_realism_flag_independent_of_cohort(self):
+    def test_realism_partition_is_homogeneous(self):
+        # Every cohort's rows share one execution_realism by construction — so a
+        # fill can never be miscounted into another economic bucket.
         study = self._study()
-        live = next(c for c in study.cohorts if c.cohort == "live")
-        shadow = next(c for c in study.cohorts if c.cohort == "shadow")
-        assert live.n_broker_fills == 2 and live.n_internal_fills == 0
-        assert shadow.n_broker_fills == 0 and shadow.n_internal_fills == 1
+        for c in study.cohorts:
+            assert c.economic_evidence_cohort == economic_evidence_cohort(
+                c.execution_realism)
+        # exactly one real-capital bucket exists
+        assert sum(1 for c in study.cohorts
+                   if c.economic_evidence_cohort == "broker_live") == 1
 
     def test_win_loss_counts(self):
-        live = next(c for c in self._study().cohorts if c.cohort == "live")
+        live = _broker_live(self._study())
         assert live.realized_wins == 1 and live.realized_losses == 1
 
 
@@ -321,13 +396,31 @@ class TestRender:
                             _row("S1", "neutral", fill_source="exit_evaluator",
                                  routing="internal")]}
         md = render_markdown(build_study(payload))
-        assert "Cohort: LIVE" in md and "Cohort: SHADOW" in md
+        # headings now carry the policy cohort, the execution realism, AND the
+        # economic-evidence label — an internal row is never headed "LIVE".
+        assert "Cohort: AGGRESSIVE / ALPACA_LIVE" in md
+        assert "economic evidence: BROKER_LIVE" in md
+        assert "Cohort: SHADOW / INTERNAL" in md
         assert "ENTRY realized fill vs requested limit" in md
         assert "CLOSE realized fill vs executable cross" in md
         assert "ENTRY realized commission vs TCM estimate" in md
         assert "Realized commission routing:" in md
         assert "PER_STRUCTURE_CONTRACT" in md
         assert "COMPARE, never SUM" in md
+
+    def test_only_broker_live_heading_claims_real_capital(self):
+        # An aggressive/internal + aggressive/paper row must NOT get a
+        # "real capital" / "authoritative" line; only the alpaca_live bucket does.
+        payload = {"source": "s", "rows": [
+            _row("L1", "aggressive", routing="broker"),
+            _row("P1", "aggressive", routing="paper"),
+            _row("I1", "aggressive", routing="internal"),
+        ]}
+        md = render_markdown(build_study(payload))
+        # exactly one "AUTHORITATIVE, real capital" label (the broker-live bucket)
+        assert md.count("AUTHORITATIVE, real capital") == 1
+        assert "NOT real capital (paper broker)" in md
+        assert "NOT real capital (internal fills)" in md
 
     def test_empty_payload_renders_without_crash(self):
         md = render_markdown(build_study({"rows": []}))
@@ -364,3 +457,97 @@ class TestStudySql:
         for col in ("execution_mode", "alpaca_order_id IS NOT NULL", "broker_status"):
             assert col in STUDY_SQL
         assert "entry_execution_mode" in STUDY_SQL and "close_execution_mode" in STUDY_SQL
+
+
+# --- 10. census-shape no-conflation (V17-4 reproduced) ----------------------
+class TestCensusShapeNoConflation:
+    """Drives the REPRODUCED live census: the aggressive POLICY book =
+    12 alpaca_live + 11 alpaca_paper + 1 internal_paper. 81% of the magnitude is
+    paper/internal — the old contract pooled it ALL under a single LIVE headline.
+    The broker-live headline must equal ONLY the 12 alpaca_live sum (-$400.00),
+    and a huge paper/internal magnitude must not be able to move it."""
+
+    def _census_study(self):
+        rows = []
+        # 12 alpaca_live rows summing to EXACTLY -400.00
+        live_pls = [-50.0] * 8 + [0.0] * 4
+        for i, pl in enumerate(live_pls):
+            rows.append(_row(f"LV{i}", "aggressive", routing="broker", realized_pl=pl))
+        # 11 alpaca_paper rows carrying most of the magnitude (must NOT pool live)
+        for i in range(11):
+            rows.append(_row(f"PP{i}", "aggressive", routing="paper",
+                             realized_pl=-159.13))
+        # 1 internal_paper row with a HUGE magnitude — must not move live either
+        rows.append(_row("IN0", "aggressive", routing="internal",
+                         realized_pl=-1_000_000.0))
+        return build_study({"source": "census", "rows": rows})
+
+    def test_broker_live_headline_is_only_the_alpaca_live_sum(self):
+        live = _broker_live(self._census_study())
+        assert live.n_rows == 12
+        assert live.execution_realism == "alpaca_live"
+        assert live.economic_evidence_cohort == "broker_live"
+        assert live.realized_pl_sum == pytest.approx(-400.00)
+
+    def test_huge_internal_magnitude_cannot_change_broker_live(self):
+        study = self._census_study()
+        internal = next(
+            c for c in study.cohorts
+            if c.policy_cohort == "aggressive" and c.execution_realism == "internal")
+        assert internal.n_rows == 1
+        assert internal.realized_pl_sum == pytest.approx(-1_000_000.0)
+        # the broker-live sum is exactly the 12 live rows, untouched
+        assert _broker_live(study).realized_pl_sum == pytest.approx(-400.00)
+
+    def test_aggressive_appears_as_three_realism_buckets(self):
+        study = self._census_study()
+        agg = [c for c in study.cohorts if c.policy_cohort == "aggressive"]
+        assert sorted(c.execution_realism for c in agg) == [
+            "alpaca_live", "alpaca_paper", "internal"]
+        paper = next(c for c in agg if c.execution_realism == "alpaca_paper")
+        assert paper.n_rows == 11
+        assert paper.economic_evidence_cohort == "broker_paper"
+
+
+# --- 11. observe-only import lock -------------------------------------------
+_STUDY_IMPORT_RE = re.compile(
+    r"^\s*(?:"
+    r"from\s+[\w\.]*realized_cost_study\s+import"
+    r"|import\s+[\w\.]*realized_cost_study"
+    r"|from\s+[\w\.]+\s+import\s+[^\n]*realized_cost_study"
+    r")",
+    re.MULTILINE,
+)
+
+
+class TestObserveOnlyImportLock:
+    """The realized-cost study is a read-only analytics CLI. NO production
+    module under packages/quantum (scanner / ranker / executor / gate / exit /
+    risk / allocator / scoring) may import it — if a future change wires it into
+    a decision path this test breaks the build, forcing a deliberate review.
+    Tests import it freely."""
+
+    def test_no_live_consumer_imports_the_study(self):
+        quantum = Path(__file__).resolve().parents[1]  # packages/quantum
+        offenders = []
+        for path in sorted(quantum.rglob("*.py")):
+            rel = path.relative_to(quantum)
+            if "tests" in rel.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if _STUDY_IMPORT_RE.search(text):
+                offenders.append(rel.as_posix())
+        assert offenders == [], (
+            "realized_cost_study is observe-only; no production module may "
+            f"import it (offenders: {offenders})")
+
+    def test_import_lock_regex_bites(self):
+        # the lock must actually catch the realistic import shapes...
+        for line in (
+            "from scripts.analytics.realized_cost_study import build_study",
+            "import scripts.analytics.realized_cost_study",
+            "from scripts.analytics import realized_cost_study",
+        ):
+            assert _STUDY_IMPORT_RE.search(line), f"pattern missed: {line!r}"
+        # ...and not false-positive on an unrelated mention.
+        assert _STUDY_IMPORT_RE.search("# realized_cost_study is documented here") is None

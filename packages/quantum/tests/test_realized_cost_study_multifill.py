@@ -284,7 +284,7 @@ class TestVersionDrift:
                    filled_at="2026-07-20T14:00:00.000000Z"),
         ])
         acc = build_tcm_v2_accrual({"rows": [v1, v2]})
-        live = {b.model_version for b in acc.buckets if b.cohort == "live"}
+        live = {b.model_version for b in acc.buckets if b.cohort == "aggressive"}
         assert "tcm_v2_proposal/0.1.0" in live
         assert "tcm_v2_proposal/0.2.0" in live
 
@@ -450,8 +450,8 @@ class TestCohortAndIdentity:
             _credit_roundtrip("U1", None, "internal"),
         ]})
         cohorts = {b.cohort for b in acc.buckets}
-        assert cohorts == {"live", "shadow", "unattributed"}
-        live = [b for b in acc.buckets if b.cohort == "live"]
+        assert cohorts == {"aggressive", "shadow", "unattributed"}
+        live = [b for b in acc.buckets if b.cohort == "aggressive"]
         assert sum(b.n_examples for b in live) == 2
 
     def test_entry_close_share_spine_identity(self):
@@ -473,7 +473,7 @@ class TestBucketFillCoverage:
             _order("c1", "sell", 3, filled_at="2026-07-20T14:00:00.000000Z"),
         ])
         acc = build_tcm_v2_accrual({"rows": [row]})
-        live = [b for b in acc.buckets if b.cohort == "live"][0]
+        live = [b for b in acc.buckets if b.cohort == "aggressive"][0]
         assert live.fills_covered == 3           # 2 (entry) + 1 (close)
         assert live.n_multi_fill == 1            # only the entry example
         assert live.as_dict()["fills_covered"] == 3
@@ -527,7 +527,154 @@ class TestSqlRenderCoexist:
         # task-named output fields all present
         for k in ("current_model", "tcm_v2", "realized", "routing", "strategy",
                   "legs", "quantity", "entry_or_close", "fill_count",
-                  "current_error", "v2_error", "model_version", "known_at"):
+                  "current_error", "v2_error", "model_version", "known_at",
+                  # V17-4 axis + V17-3 coverage fields
+                  "policy_cohort", "execution_realism", "economic_evidence_cohort",
+                  "contributing_fill_count", "stamped_fill_count", "stamp_complete"):
             assert k in d, f"missing task output field {k!r}"
         assert d["current_error"]["amount_usd"] == pytest.approx(0.65)
         assert d["known_at"] == "2026-07-20T14:15:06Z"
+
+
+# --- 14. stamp-coverage fields (V17-3 observability polish) ------------------
+class TestStampCoverageFields:
+    """Adds first-class `contributing_fill_count` / `stamped_fill_count` /
+    `stamp_complete`. The sum/abstention logic is UNCHANGED — a mixed
+    stamped/unstamped side is still typed UNAVAILABLE (no silent undercount);
+    these fields just make that coverage explicit."""
+
+    def test_one_stamped_one_unstamped_side_unavailable_and_counted(self):
+        row = _inv_row("p1", "aggressive", [
+            _order("e1", "buy", 2, v2_stamp="auto",
+                   filled_at="2026-07-20T13:00:00.000000Z"),
+            _order("e2", "buy", 1, v2_stamp=None,
+                   filled_at="2026-07-20T13:05:00.000000Z"),
+            _order("c1", "sell", 3, filled_at="2026-07-20T14:00:00.000000Z"),
+        ])
+        e = _by_side(row)["entry"]
+        assert e.contributing_fill_count == 2
+        assert e.stamped_fill_count == 1
+        assert e.stamp_complete is False
+        # side total is UNAVAILABLE (V17-3 harm already closed — NOT re-fixed)
+        assert e.tcm_v2_cost.available is False
+        assert "incomplete_side" in (e.tcm_v2_cost.unavailable_reason or "")
+        assert e.v2_minus_realized.available is False
+
+    def test_all_stamped_side_sum_complete(self):
+        row = _inv_row("p1", "aggressive", [
+            _order("e1", "buy", 2, filled_at="2026-07-20T13:00:00.000000Z"),
+            _order("e2", "buy", 1, filled_at="2026-07-20T13:05:00.000000Z"),
+            _order("c1", "sell", 3, filled_at="2026-07-20T14:00:00.000000Z"),
+        ])
+        e = _by_side(row)["entry"]
+        assert e.contributing_fill_count == 2 and e.stamped_fill_count == 2
+        assert e.stamp_complete is True
+        assert e.tcm_v2_cost.available is True
+        assert e.tcm_v2_cost.amount_usd == pytest.approx(0.0)
+
+    def test_all_unstamped_side_clean_unavailable(self):
+        row = _inv_row("p1", "aggressive", [
+            _order("e1", "buy", 2, v2_stamp=None,
+                   filled_at="2026-07-20T13:00:00.000000Z"),
+            _order("e2", "buy", 1, v2_stamp=None,
+                   filled_at="2026-07-20T13:05:00.000000Z"),
+            _order("c1", "sell", 3, v2_stamp=None,
+                   filled_at="2026-07-20T14:00:00.000000Z"),
+        ])
+        e = _by_side(row)["entry"]
+        assert e.stamped_fill_count == 0
+        assert e.stamp_complete is False
+        # CLEAN unavailable (pre-#1278), NOT an "incomplete" partial
+        assert e.tcm_v2_cost.unavailable_reason == "no_v2_stamp_pre_1278"
+
+    def test_mixed_fully_stamped_versions_marked_explicit(self):
+        # every contributing fill IS stamped but with DIFFERENT versions: the
+        # side is stamp_complete AND the version is marked `mixed:` (never
+        # silently pooled).
+        row = _inv_row("p1", "aggressive", [
+            _order("e1", "buy", 2, v2_version="tcm_v2_proposal/0.1.0",
+                   filled_at="2026-07-20T13:00:00.000000Z"),
+            _order("e2", "buy", 1, v2_version="tcm_v2_proposal/0.2.0",
+                   filled_at="2026-07-20T13:05:00.000000Z"),
+            _order("c1", "sell", 3, filled_at="2026-07-20T14:00:00.000000Z"),
+        ])
+        e = _by_side(row)["entry"]
+        assert e.contributing_fill_count == 2 and e.stamped_fill_count == 2
+        assert e.stamp_complete is True
+        assert e.model_version == "mixed:tcm_v2_proposal/0.1.0+tcm_v2_proposal/0.2.0"
+        # fully stamped → the v2 sum is available (both stamps priced)
+        assert e.tcm_v2_cost.available is True
+
+    def test_zero_qty_rows_excluded_from_coverage(self):
+        # a zero-qty replay row is dropped-but-counted; it never inflates the
+        # contributing/stamped coverage.
+        row = _inv_row("p1", "aggressive", [
+            _order("e1", "buy", 3, filled_at="2026-07-20T13:00:00.000000Z"),
+            _order("c1", "sell", 3, filled_at="2026-07-20T14:00:00.000000Z"),
+            _order("c2", "sell", 0, filled_at="2026-07-20T14:01:00.000000Z"),
+        ])
+        c = _by_side(row)["close"]
+        assert c.contributing_fill_count == 1
+        assert c.stamped_fill_count == 1
+        assert c.stamp_complete is True
+        assert c.zero_fill_rows == 1
+
+
+# --- 15. economic-evidence bucket keying (V17-4) ----------------------------
+class TestEconomicBucketKeying:
+    """The accrual buckets key on (policy_cohort, execution_realism,
+    model_version) so an internal/paper example is NEVER labeled broker-live."""
+
+    def test_aggressive_broker_lands_in_broker_live(self):
+        acc = build_tcm_v2_accrual(
+            {"rows": [_credit_roundtrip("L1", "aggressive", "broker")]})
+        assert all(b.cohort == "aggressive" for b in acc.buckets)
+        assert all(b.execution_realism == "alpaca_live" for b in acc.buckets)
+        assert all(b.economic_evidence_cohort == "broker_live" for b in acc.buckets)
+
+    def test_aggressive_internal_is_not_broker_live(self):
+        acc = build_tcm_v2_accrual(
+            {"rows": [_credit_roundtrip("I1", "aggressive", "internal")]})
+        assert all(b.execution_realism == "internal" for b in acc.buckets)
+        assert not any(
+            b.economic_evidence_cohort == "broker_live" for b in acc.buckets)
+
+    def test_internal_and_broker_do_not_share_a_bucket(self):
+        acc = build_tcm_v2_accrual({"rows": [
+            _credit_roundtrip("L1", "aggressive", "broker"),
+            _credit_roundtrip("I1", "aggressive", "internal"),
+        ]})
+        aggr = {
+            (b.execution_realism, b.economic_evidence_cohort)
+            for b in acc.buckets if b.cohort == "aggressive"
+        }
+        assert ("alpaca_live", "broker_live") in aggr
+        assert ("internal", "internal") in aggr
+
+    def test_promotion_broker_real_count_keys_on_broker_fill_truth(self):
+        # "promotion N" broker-real evidence = KNOWN broker realized commission
+        # inside the broker-live bucket. An aggressive/internal example must
+        # contribute ZERO broker-real evidence.
+        acc = build_tcm_v2_accrual({"rows": [
+            _credit_roundtrip("L1", "aggressive", "broker"),
+            _credit_roundtrip("I1", "aggressive", "internal"),
+        ]})
+        live = [b for b in acc.buckets
+                if b.economic_evidence_cohort == "broker_live"]
+        internal = [b for b in acc.buckets
+                    if b.economic_evidence_cohort == "internal"]
+        assert sum(b.realized_commission_known for b in live) == 2  # entry+close
+        assert sum(b.realized_commission_known for b in internal) == 0
+        assert sum(b.realized_commission_unavailable for b in internal) == 2
+
+    def test_shadow_never_pools_into_broker_live(self):
+        acc = build_tcm_v2_accrual({"rows": [
+            _credit_roundtrip("L1", "aggressive", "broker"),
+            _credit_roundtrip("S1", "neutral", "internal"),
+        ]})
+        assert not any(
+            b.cohort == "shadow" and b.economic_evidence_cohort == "broker_live"
+            for b in acc.buckets)
+        live = [b for b in acc.buckets
+                if b.economic_evidence_cohort == "broker_live"]
+        assert live and all(b.cohort == "aggressive" for b in live)

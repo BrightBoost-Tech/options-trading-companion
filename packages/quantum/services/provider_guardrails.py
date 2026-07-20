@@ -2,6 +2,7 @@
 Provider Guardrails Service
 Implements Circuit Breaker, Retries, and Rate Limit handling for external providers.
 """
+import re
 import time
 import inspect
 import logging
@@ -15,8 +16,78 @@ from datetime import datetime, timedelta
 # docs/loud_error_doctrine.md anti-pattern 2 (log-only swallow with
 # default return).
 from packages.quantum.observability.alerts import alert, _get_admin_supabase
+# Security v4 masking: catches DSN / sk- / JWT / AWS / Plaid secret shapes.
+from packages.quantum.security.masking import sanitize_message
 
 logger = logging.getLogger(__name__)
+
+# SECURITY (v1.7 V17-5): every @guardrail-wrapped call is a Polygon request
+# whose URL query carries apiKey=<secret> (packages/quantum/market_data.py).
+# On a requests exception, str(exc) embeds that URL verbatim — the same class
+# as the market_data.py:~610 fix. Redact credential-bearing query params AND
+# any known configured provider secret BEFORE the text is logged, stored in an
+# alert, or truncated. Only the logged/stored text changes; control flow and
+# the fallback are untouched.
+#
+# Redacts <secret-param>=<value> up to the next '&' or whitespace. Covers the
+# Polygon apiKey form plus api_key / apikey / token / access_token / secret /
+# password / key. The (?<![A-Za-z0-9_]) guard anchors the param name to a
+# boundary so a benign 'sortkey=' is not caught by the bare 'key' branch,
+# while 'apiKey=' (matched by the api[_-]?key branch) still is.
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r'(?<![A-Za-z0-9_])'
+    r'((?:api[_-]?key|access[_-]?token|api[_-]?secret|token|secret|password|key)=)'
+    r'[^&\s]+',
+    re.IGNORECASE,
+)
+
+# Attribute names a bound provider client commonly stores its secret under, so
+# the exact configured value can be redacted verbatim even outside a query
+# string (best-effort; never raises).
+_COMMON_SECRET_ATTRS = (
+    "api_key", "apikey", "api_secret", "secret_key",
+    "secret", "token", "access_token", "password",
+)
+
+
+def _bound_instance_secrets(args) -> list:
+    """Best-effort: pull configured secret values off the bound provider
+    instance (``args[0]`` for a decorated method, e.g. PolygonService.api_key)
+    so they can be redacted verbatim. Never raises."""
+    secrets: list = []
+    if not args:
+        return secrets
+    inst = args[0]
+    for attr in _COMMON_SECRET_ATTRS:
+        try:
+            val = getattr(inst, attr, None)
+        except Exception:
+            val = None
+        if isinstance(val, str) and val:
+            secrets.append(val)
+    return secrets
+
+
+def _redact_secrets(text, extra_secrets=()) -> Optional[str]:
+    """Redact credential-bearing substrings from provider text BEFORE logging,
+    alert storage, or truncation. Layered defence:
+
+      1. verbatim replacement of any KNOWN configured secret value (catches it
+         wherever it appears, even outside a query string);
+      2. ``<secret-param>=<value>`` query-string redaction (the Polygon
+         ``apiKey=<secret>`` URL shape, plus URL-encoded / rotated values the
+         verbatim pass cannot match);
+      3. ``masking.sanitize_message`` for DSN / sk- / JWT / AWS / Plaid shapes.
+    """
+    if not text:
+        return text
+    out = str(text)
+    for secret in extra_secrets:
+        if isinstance(secret, str) and secret:
+            out = out.replace(secret, "[REDACTED]")
+    out = _SECRET_QUERY_PARAM_RE.sub(r"\1[REDACTED]", out)
+    out = sanitize_message(out)
+    return out
 
 class CircuitState(Enum):
     CLOSED = "CLOSED"     # Normal operation
@@ -167,6 +238,10 @@ def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fa
             if not breaker.allow_request():
                 # Circuit Open -> Fail Fast
                 logger.warning(f"Circuit OPEN for {provider}, using fallback.")
+                safe_args = _redact_secrets(
+                    _repr_args_for_alert(func, args, kwargs),
+                    _bound_instance_secrets(args),
+                )
                 alert(
                     _get_admin_supabase(),
                     alert_type=f"{provider}_circuit_open",
@@ -176,7 +251,7 @@ def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fa
                         "provider": provider,
                         "function_name": func.__qualname__,
                         "circuit_state": breaker.state.value,
-                        "args": _repr_args_for_alert(func, args, kwargs),
+                        "args": safe_args,
                     },
                 )
                 return fallback
@@ -220,20 +295,31 @@ def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fa
                         break
 
             # 3. Final Failure
-            logger.error(f"Provider {provider} failed after retries: {last_exception}")
+            # SECURITY (v1.7 V17-5): str(last_exception) on a Polygon call can
+            # embed the request URL whose query carries apiKey=<secret>. Redact
+            # BEFORE logging / alert-storage / truncation (see _redact_secrets).
+            instance_secrets = _bound_instance_secrets(args)
+            safe_error = (
+                _redact_secrets(str(last_exception), instance_secrets)
+                if last_exception else None
+            )
+            safe_args = _redact_secrets(
+                _repr_args_for_alert(func, args, kwargs), instance_secrets
+            )
+            logger.error(f"Provider {provider} failed after retries: {safe_error}")
             alert(
                 _get_admin_supabase(),
                 alert_type=f"{provider}_retries_exhausted",
                 severity="warning",
-                message=f"Provider {provider} failed after retries for {func.__qualname__}: {last_exception}",
+                message=f"Provider {provider} failed after retries for {func.__qualname__}: {safe_error}",
                 metadata={
                     "provider": provider,
                     "function_name": func.__qualname__,
                     "max_retries": max_retries,
                     "is_rate_limit": is_rate_limit,
                     "error_class": type(last_exception).__name__ if last_exception else None,
-                    "error_message": str(last_exception)[:500] if last_exception else None,
-                    "args": _repr_args_for_alert(func, args, kwargs),
+                    "error_message": safe_error[:500] if safe_error else None,
+                    "args": safe_args,
                 },
             )
             return fallback

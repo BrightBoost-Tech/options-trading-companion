@@ -13,9 +13,16 @@ FIX 2: RejectionStats now surfaces a `persist_failures` counter via
   observability writes. Pre-fix, suggestion_rejections insert failures
   were only logger.warning'd; no programmatic counter.
 
-FIX 3: paper_exit_evaluator's internal-fill path now writes
-  `submitted_at` alongside `filled_at` so target_profit_hit close
-  orders have non-NULL submitted_at for exit-side latency analysis.
+FIX 3: a fresh internal close gets `submitted_at` populated alongside
+  `filled_at` so target_profit_hit close orders have non-NULL submitted_at
+  for exit-side latency analysis. Since V17-1 A2 (2026-07-19) the internal
+  economic commit is the atomic `rpc_commit_internal_close_v1`, so this write
+  lives in that RPC's `UPDATE paper_orders SET submitted_at =
+  COALESCE(submitted_at, v_now), filled_at = v_now`. The migration is the
+  source of truth; the FIX-3 tests below assert that CONTRACT (the prior
+  source-grep tests pinned the REMOVED Python block — the #1126 costume class,
+  doctrine §9). Live-Postgres proof that the RPC actually populates the columns
+  is in packages/quantum/tests/pg/test_rpc_commit_internal_close_pg.py.
 
 Diagnostic reference: 2026-05-18 conversation history Part 5.
 """
@@ -120,9 +127,6 @@ class TestFix2RejectionStatsPersistFailures(unittest.TestCase):
 WORKFLOW_ORCHESTRATOR_PATH = (
     Path(__file__).parent.parent / "services" / "workflow_orchestrator.py"
 )
-PAPER_EXIT_EVALUATOR_PATH = (
-    Path(__file__).parent.parent / "services" / "paper_exit_evaluator.py"
-)
 
 
 class TestFix1RunMiddayCycleReturnShape(unittest.TestCase):
@@ -187,67 +191,113 @@ class TestFix1RunMiddayCycleReturnShape(unittest.TestCase):
         )
 
 
-# ── FIX 3: source-level assertion on close-order timing write ───────
+# ── FIX 3: submitted_at populated alongside filled_at in the atomic close ────
+# The 2026-05-18 write lived in a paper_orders.update() dict inside
+# paper_exit_evaluator._close_position. V17-1 A2 (2026-07-19, Lane 1B) moved the
+# internal economic commit into the atomic rpc_commit_internal_close_v1; the
+# timing write is now `submitted_at = COALESCE(submitted_at, v_now)` /
+# `filled_at = v_now` in that RPC's UPDATE paper_orders. The migration file IS
+# the deployed RPC the route calls, so these assert the CONTRACT there — NOT a
+# removed Python block (the prior source-grep tests were the #1126 costume:
+# they pinned code the switch correctly deleted, and would have stayed green on
+# any stray matching string while the live route walked past). Live-Postgres
+# proof that the RPC actually populates the columns:
+# packages/quantum/tests/pg/test_rpc_commit_internal_close_pg.py.
+
+RPC_COMMIT_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "supabase" / "migrations"
+    / "20260719180000_rpc_commit_internal_close_v1.sql"
+)
 
 
-class TestFix3CloseOrderSubmittedAtWrite(unittest.TestCase):
-    """Source-level assertion on paper_exit_evaluator's internal-fill
-    path. Pre-fix the paper_orders.update() block at ~line 1270 set
-    filled_at but not submitted_at — causing 11 of 11 target_profit_hit
-    closes in 60d to have NULL submitted_at (diagnostic 2026-05-18)."""
+def _coalesce_submitted_at(existing_submitted_at, v_now):
+    """Faithful Python mirror of the RPC's
+    `submitted_at = COALESCE(submitted_at, v_now)`. Used only AFTER the test
+    anchors that this IS the expression the migration uses, so the mirror can
+    never drift into a tautology."""
+    return existing_submitted_at if existing_submitted_at is not None else v_now
+
+
+class TestFix3CloseOrderSubmittedAtInAtomicCommit(unittest.TestCase):
+    """FIX 3 invariant, relocated to the atomic RPC: a fresh internal-close
+    order (submitted_at NULL at stage) must end up with BOTH submitted_at AND
+    filled_at populated. Pre-fix, 11 of 11 target_profit_hit closes in 60d had
+    NULL submitted_at — breaking exit-side latency analysis (diagnostic
+    2026-05-18). Asserts the contract on the actual RPC migration; fails if the
+    UPDATE ever stops writing submitted_at."""
 
     @classmethod
     def setUpClass(cls):
-        cls.src = PAPER_EXIT_EVALUATOR_PATH.read_text(encoding="utf-8")
-
-    def test_internal_fill_update_writes_submitted_at_alongside_filled_at(self):
-        """Defend against accidental revert. The internal-fill update
-        dict must include BOTH submitted_at and filled_at keys for
-        target_profit_hit close-path timing observability."""
-        # Look for an update block that contains both keys.
-        # The update is invoked on paper_orders.update({...}) — the
-        # dict literal contains both timing fields.
-        update_block_pattern = re.compile(
-            r'paper_orders.*?update\(\s*\{[^}]*?"submitted_at"[^}]*?"filled_at"',
-            re.DOTALL,
+        raw = RPC_COMMIT_MIGRATION_PATH.read_text(encoding="utf-8")
+        # comment-stripped SQL so a `--` prose line can never satisfy the
+        # contract (the header comments mention submitted_at in passing).
+        cls.code = "\n".join(
+            (ln if ln.find("--") == -1 else ln[: ln.find("--")])
+            for ln in raw.splitlines()
         )
-        match = update_block_pattern.search(self.src)
-        if match is None:
-            # Try reverse order too — the spec doesn't mandate which
-            # comes first in the literal.
-            update_block_pattern_rev = re.compile(
-                r'paper_orders.*?update\(\s*\{[^}]*?"filled_at"[^}]*?"submitted_at"',
-                re.DOTALL,
-            )
-            match = update_block_pattern_rev.search(self.src)
-
-        self.assertIsNotNone(
-            match,
-            "paper_exit_evaluator's paper_orders.update() block must "
-            "include BOTH 'submitted_at' and 'filled_at' keys. FIX 3 "
-            "(2026-05-18 diagnostic): pre-fix, target_profit_hit "
-            "close orders had filled_at populated but submitted_at "
-            "NULL — broke exit-side latency analysis. See diagnostic "
-            "Part 5 + paper_exit_evaluator.py:~1270.",
+        m = re.search(
+            r"UPDATE\s+paper_orders\s+SET(.*?)WHERE\s+id\s*=\s*p_close_order_id",
+            cls.code, re.S,
         )
+        assert m is not None, (
+            "rpc_commit_internal_close_v1 must have exactly one "
+            "`UPDATE paper_orders SET ... WHERE id = p_close_order_id` block"
+        )
+        cls.update_block = m.group(1)
 
-    def test_fix_3_inline_comment_present(self):
-        """The fix has non-obvious 'why' (submitted_at == filled_at
-        for internal fills is intentional). Inline comment should
-        reference FIX 3 + the 2026-05-18 diagnostic so a future
-        reader doesn't 'fix' the apparent duplication by removing
-        submitted_at."""
-        markers = [
-            "FIX 3" in self.src,
-            "2026-05-18" in self.src,
-            "submitted_at" in self.src and "filled_at" in self.src,
-        ]
+    def test_migration_file_present(self):
         self.assertTrue(
-            all(markers),
-            "Inline comment near the submitted_at write should "
-            "reference FIX 3 + 2026-05-18 + explain the "
-            "submitted_at==filled_at honesty for internal fills.",
+            RPC_COMMIT_MIGRATION_PATH.is_file(), RPC_COMMIT_MIGRATION_PATH
         )
+
+    def test_atomic_rpc_update_sets_both_submitted_at_and_filled_at(self):
+        """The order-fill UPDATE inside the RPC assigns BOTH timing columns.
+        Fails if a future edit drops submitted_at (the exact 2026-05-18 gap)."""
+        self.assertRegex(
+            self.update_block,
+            r"\bsubmitted_at\s*=\s*COALESCE\(\s*submitted_at\s*,\s*v_now\s*\)",
+            "rpc_commit_internal_close_v1's UPDATE paper_orders must set "
+            "submitted_at = COALESCE(submitted_at, v_now) — FIX 3 (2026-05-18): "
+            "a close order with NULL submitted_at breaks exit-side latency "
+            "analysis. See tests/pg/test_rpc_commit_internal_close_pg.py for the "
+            "live-DB proof.",
+        )
+        self.assertRegex(
+            self.update_block,
+            r"\bfilled_at\s*=\s*v_now\b",
+            "the RPC's UPDATE paper_orders must set filled_at = v_now.",
+        )
+
+    def test_submitted_at_equals_filled_at_honesty_for_fresh_close(self):
+        """The submission and fill happen in the SAME atomic commit, so for a
+        fresh internal close (submitted_at NULL at stage) submitted_at ==
+        filled_at is the honest value — and a pre-existing submitted_at is
+        PRESERVED. Anchored to the migration's actual COALESCE expression so
+        the Python mirror can't drift from the SQL."""
+        rhs = re.search(
+            r"\bsubmitted_at\s*=\s*(COALESCE\([^)]*\))", self.update_block
+        )
+        self.assertIsNotNone(rhs, "submitted_at must be assigned a COALESCE(...)")
+        self.assertEqual(
+            re.sub(r"\s+", "", rhs.group(1)), "COALESCE(submitted_at,v_now)"
+        )
+
+        v_now = "2026-07-19T15:00:00+00:00"
+        filled_at = v_now  # the RPC sets filled_at = v_now
+        # Fresh close: submitted_at was NULL → becomes v_now → equals filled_at,
+        # and BOTH are non-NULL (the FIX-3 invariant).
+        submitted_fresh = _coalesce_submitted_at(None, v_now)
+        self.assertIsNotNone(submitted_fresh)
+        self.assertIsNotNone(filled_at)
+        self.assertEqual(submitted_fresh, filled_at)
+        # Pre-existing submitted_at is PRESERVED (COALESCE keeps the non-null
+        # value); filled_at still advances to the commit time — both non-NULL,
+        # and distinct.
+        prior = "2026-07-19T10:00:00+00:00"
+        submitted_kept = _coalesce_submitted_at(prior, v_now)
+        self.assertEqual(submitted_kept, prior)
+        self.assertNotEqual(submitted_kept, filled_at)
 
 
 if __name__ == "__main__":

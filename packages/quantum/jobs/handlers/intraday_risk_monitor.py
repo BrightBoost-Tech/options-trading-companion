@@ -185,6 +185,12 @@ def _fallback_is_market_open_et(now: Optional[datetime] = None) -> bool:
 # a known-failed submit read as a routed success ("Force-closed" + counts + cooldown).
 _NOT_COMPLETED_CLOSE_ROUTES = frozenset({
     "deferred_uncorroborated", "unknown_reconciling", "needs_manual_review",
+    # V17-1 A2 (2026-07-19): the internal/shadow close's atomic economic commit
+    # (rpc_commit_internal_close_v1) failed or lost the CAS race — the
+    # transaction rolled back, so the position is still OPEN with ZERO economic
+    # writes. NOT a completed close: no force_close count, no cooldown bench, no
+    # same-cycle suppression; the monitor re-evaluates it next cycle.
+    "internal_commit_failed",
 })
 
 

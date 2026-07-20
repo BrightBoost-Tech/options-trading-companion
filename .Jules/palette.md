@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-06-21 - WAI-ARIA Disclosure Patterns for Collapsible Custom Lists
+**Learning:** Collapsible sections built with custom React components and generic `<button>` elements (e.g., `StagedList`, `BlockedList`, `Legacy View` toggles) lack intrinsic screen reader support. Keyboard users are also often unable to see their focus position if default outline styles are missing or overridden. In Next.js components, generating IDs dynamically using `useId()` (ensuring it is explicitly imported) is crucial for binding WAI-ARIA `aria-controls` to the content regions without causing ID collisions on the page.
+**Action:** When implementing custom accordion or toggle list patterns, always apply the WAI-ARIA disclosure pattern: `aria-expanded` reflecting the state, `aria-controls` pointing to a dynamically generated `useId()`, and explicit `focus-visible` Tailwind classes (e.g., `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`) to ensure full keyboard and screen reader accessibility.

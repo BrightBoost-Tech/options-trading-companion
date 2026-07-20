@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-07-16 - Prevent Mixed Themes in Empty States
+**Learning:** When integrating theme-aware components like `EmptyState` (which inherits `text-foreground` internally) into existing pages, be cautious of mixing hardcoded background classes (like `bg-white`) with design tokens (like `bg-card`) on the parent container. However, when updating the parent container's background class, ensure you apply the change consistently across the entire page (e.g., all sibling elements and summary cards) to prevent glaring visual regressions where one section renders in a dark mode while the rest of the page remains in light mode.
+**Action:** When swapping raw text/elements for `EmptyState`, keep the parent container's background class consistent with the rest of the page's styling (e.g., if the page uses `bg-white` for all cards, use `bg-white` for the `EmptyState` parent) unless you are explicitly migrating the entire page to design tokens.

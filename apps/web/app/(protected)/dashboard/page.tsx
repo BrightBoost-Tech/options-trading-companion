@@ -519,14 +519,16 @@ export default function DashboardPage() {
                 <div className="mt-8 border-t pt-8">
                   <button
                     onClick={() => setShowLegacy(!showLegacy)}
-                    className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground uppercase tracking-wider transition-colors mb-4"
+                    className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground uppercase tracking-wider transition-colors mb-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+                    aria-expanded={showLegacy}
+                    aria-controls="legacy-view-content"
                   >
                     {showLegacy ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                     Legacy View
                   </button>
 
                   {showLegacy && (
-                    <div className="animate-in slide-in-from-top-4 fade-in duration-300">
+                    <div id="legacy-view-content" className="animate-in slide-in-from-top-4 fade-in duration-300">
                       <SuggestionTabs
                         optimizerSuggestions={rebalanceSuggestions}
                         scoutSuggestions={weeklyScout?.top_picks || []}

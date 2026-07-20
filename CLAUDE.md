@@ -560,6 +560,34 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   freshness only from real dates · F #1308 `d4c083ea` shared divisibility gate
   (non-divisible leg → typed uncovered; byte-identity proven; caps still 0).
   Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md`.
+  **07-19 EXTERNAL AUDIT v1.7 VERIFY+REMEDIATION** (`docs/review/
+  external-full-audit-v1.7-results-2026-07-19.md` + `v1.7-remediation-results-
+  2026-07-19.md`; ledger 07-19 v1.7 entry = exclusion memory): 5 findings
+  re-adjudicated at `f48c298c`, each CONFIRMED Fable-reproduced. **MERGED+
+  DEPLOYED + 2 DDL migrations APPLIED by exact name (NEVER REAPPLY):** #1316
+  `3ec4f766` + #1317 `2b9099d3` — **V17-1 internal-close atomicity FIXED**:
+  atomic `rpc_commit_internal_close_v1` (migration `20260719180000_rpc_commit_
+  internal_close_v1`, MCP ver `20260719215826`, receipt `8cfd7333`) all-or-none
+  economic commit with server-derived cash + write-once marker + live-order +
+  non-finite guards; the internal/shadow close route now makes ONE RPC call, no
+  non-atomic fallback (the pre-commit-side-effects orphan/double-book class is
+  DEAD). Never write the close economics sequentially again — route them through
+  `rpc_commit_internal_close_v1`. · #1315 `390bf3c7` — **V17-2 fleet activation
+  binding FIXED**: hardened `rpc_shadow_fleet_activate` (migration `20260719020000_
+  harden_shadow_fleet_activation_rpc`, MCP ver `20260719231412`, receipt
+  `84687a20`) — old 4-arg overload DROPPED; the 5-arg server-DERIVES the binding
+  from the 50 approved registry rows `ORDER BY policy_registration_id COLLATE "C"
+  ASC` and requires the operator-attested manifest fingerprint == server
+  recompute. **⚠ The reproducible binding fingerprint is now `1cd004b5…`
+  (`6f8d1499…` was an out-of-repo bundle value, NOT reproducible from code) —
+  owner-packet-1's activation attestation must be RE-ISSUED against `1cd004b5…`;
+  fleet UNCHANGED and INACTIVE; scenario-5 receipt-existence OPEN by design.** ·
+  #1314 `d7c2ebd5` — V17-5 credential-safe market-data logging (rotation
+  NOT_PROVEN). · #1318 `d1a7f22b` — V17-3 SUPERSEDED (#1299) coverage-fields +
+  V17-4 TCM cohort conflation FIXED (broker-live keyed on `execution_mode=
+  'alpaca_live'`, never on cohort name). V17-1 census CLEAN (operator packet
+  `docs/review/v17-1-internal-close-anomaly-census-2026-07-19.md`; NO rows
+  corrected). Zero broker/fleet-activation/data-correction/env/control writes.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.

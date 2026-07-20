@@ -408,6 +408,188 @@ def test_spawn_and_monitor_reports_timed_out(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# WAKE LOCK — held on the long-lived main thread across the whole child
+# (the 07-20 silent-death fix). The Windows ctypes API is injected so the
+# win32 path is driven deterministically on Linux CI too.
+# ---------------------------------------------------------------------------
+class _FakeExecState:
+    """Records every SetThreadExecutionState(flags) call; returns ``rc``
+    (0 == the OS refused the request, non-zero == previous state == success)."""
+
+    def __init__(self, rc=1):
+        self.calls = []
+        self.rc = rc
+
+    def __call__(self, flags):
+        self.calls.append(int(flags))
+        return self.rc
+
+
+_ACQUIRE = nr.WakeLock.ACQUIRE_FLAGS  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+_RELEASE = nr.WakeLock.RELEASE_FLAGS  # ES_CONTINUOUS alone
+
+
+def test_wakelock_acquire_before_body_release_after_balanced():
+    events = []
+    api = lambda flags: (events.append(("stes", int(flags))) or 1)
+    wl = nr.WakeLock(log=lambda _m: None, set_execution_state=api, platform="win32")
+    with wl:
+        events.append(("body", None))
+    # acquire (ES_CONTINUOUS|ES_SYSTEM_REQUIRED) BEFORE the body; release
+    # (ES_CONTINUOUS alone) AFTER it — exactly one of each, balanced.
+    assert events == [("stes", _ACQUIRE), ("body", None), ("stes", _RELEASE)]
+    assert wl.acquired is True and wl.status == nr.WAKE_ACQUIRED
+    # never ES_AWAYMODE_REQUIRED (0x40) and never ES_DISPLAY_REQUIRED (0x2)
+    assert all(f & 0x40 == 0 and f & 0x00000002 == 0 for _, f in events if _ == "stes")
+
+
+def test_wakelock_release_runs_on_exception_and_propagates():
+    fake = _FakeExecState()
+    wl = nr.WakeLock(set_execution_state=fake, platform="win32")
+    with pytest.raises(RuntimeError, match="boom"):
+        with wl:
+            raise RuntimeError("boom")
+    # acquire THEN release — release always runs even on an in-flight exception
+    assert fake.calls == [_ACQUIRE, _RELEASE]
+
+
+def test_wakelock_release_runs_on_keyboard_interrupt_and_propagates():
+    # Ctrl-C path: a KeyboardInterrupt raised under the lock must still reset the
+    # execution state to ES_CONTINUOUS and must NOT be suppressed by __exit__.
+    fake = _FakeExecState()
+    wl = nr.WakeLock(set_execution_state=fake, platform="win32")
+    with pytest.raises(KeyboardInterrupt):
+        with wl:
+            raise KeyboardInterrupt()
+    assert fake.calls == [_ACQUIRE, _RELEASE]
+
+
+def test_wakelock_release_runs_on_timeout_style_return():
+    # A timeout does NOT raise through the wake context (spawn_and_monitor handles
+    # it and returns), so the with-block exits normally — release must still run.
+    fake = _FakeExecState()
+    wl = nr.WakeLock(set_execution_state=fake, platform="win32")
+    with wl:
+        pass  # simulate spawn_and_monitor returning after a timeout terminate
+    assert fake.calls == [_ACQUIRE, _RELEASE]
+
+
+def test_wakelock_non_windows_is_a_noop():
+    fake = _FakeExecState()
+    wl = nr.WakeLock(set_execution_state=fake, platform="linux")
+    with wl:
+        pass
+    assert fake.calls == []  # the API is NEVER touched off-Windows
+    assert wl.acquired is False and wl.status == nr.WAKE_NOOP_NON_WINDOWS
+
+
+def test_wakelock_acquire_failure_is_typed_visible_and_not_swallowed():
+    # SetThreadExecutionState returns 0 == the OS refused the request. The failure
+    # must be TYPED (status/detail), VISIBLE (loud log), and NOT swallowed — and
+    # __exit__ must NOT attempt a release (nothing was acquired).
+    logs = []
+    fake = _FakeExecState(rc=0)
+    wl = nr.WakeLock(log=logs.append, set_execution_state=fake, platform="win32")
+    with wl:
+        pass
+    assert wl.acquired is False
+    assert wl.status == nr.WAKE_FAILED
+    assert wl.detail and "returned 0" in wl.detail
+    assert any("WAKE LOCK ACQUIRE FAILED" in m for m in logs)  # loud + visible
+    assert fake.calls == [_ACQUIRE]  # acquire attempted, NO spurious release
+
+
+def test_wakelock_acquire_error_is_typed_and_not_reraised():
+    # The ctypes call raising must not escape __enter__; it is typed + logged.
+    logs = []
+
+    def boom(_flags):
+        raise OSError("SetThreadExecutionState unavailable")
+
+    wl = nr.WakeLock(log=logs.append, set_execution_state=boom, platform="win32")
+    with wl:
+        pass
+    assert wl.acquired is False and wl.status == nr.WAKE_ERROR
+    assert wl.detail and "OSError" in wl.detail
+    assert any("WAKE LOCK ACQUIRE ERROR" in m for m in logs)
+
+
+def test_wakelock_to_dict_is_manifest_ready():
+    wl = nr.WakeLock(set_execution_state=_FakeExecState(), platform="win32")
+    with wl:
+        d = wl.to_dict()
+    assert d["acquired"] is True and d["status"] == nr.WAKE_ACQUIRED
+    assert "SetThreadExecutionState" in d["mechanism"]
+    assert "UNATTENDSLEEP" in d["note"]  # residual documented in the surface
+
+
+# ---- route-driven through the full runner lifecycle -----------------------
+def test_run_acquires_wakelock_before_child_and_releases_after_and_surfaces_it(tmp_path):
+    """The runner holds the wake lock across preflight + child + copy-back on the
+    long-lived main thread: acquire lands BEFORE preflight (hence before the child
+    spawn), release lands AFTER, and the outcome is surfaced in the manifest."""
+    import json
+
+    events = []
+
+    def factory(log):
+        api = lambda flags: (events.append(("stes", int(flags))) or 1)
+        return nr.WakeLock(log=log, set_execution_state=api, platform="win32")
+
+    base_snap = _fake_snapshot_writer()
+
+    def recording_snap(path):
+        events.append(("snapshot", None))
+        return base_snap(path)
+
+    wt_report = tmp_path / "worktree" / "audit" / "reports" / "2026-07-18.md"
+    cfg = _make_config(tmp_path, _child_writes_report(wt_report))
+    cfg.wake_lock_factory = factory
+    cfg.snapshot_writer = recording_snap
+
+    rc = nr.NightlyRunner(cfg).run()
+    assert rc == 0
+
+    # acquire (correct flags) happened, and BEFORE preflight's snapshot -> before
+    # the child spawn; release (ES_CONTINUOUS alone) happened AFTER.
+    assert ("stes", _ACQUIRE) in events and ("stes", _RELEASE) in events
+    snap_i = events.index(("snapshot", None))
+    assert events.index(("stes", _ACQUIRE)) < snap_i
+    assert events.index(("stes", _RELEASE)) > snap_i
+
+    manifest = json.loads((cfg.audit_worktree / "audit" / "preflight-manifest.json").read_text())
+    assert manifest["wake_lock"]["acquired"] is True
+    assert manifest["wake_lock"]["status"] == nr.WAKE_ACQUIRED
+
+
+def test_run_surfaces_wakelock_acquire_failure_without_aborting(tmp_path):
+    """An acquire failure is surfaced in the manifest + a loud marker, but the run
+    is NOT aborted (running without the lock beats not running; the completion
+    contract + dead-man still guard a killed run). So the contract can still be
+    met and the UP ping still fires when the audit itself completes."""
+    import json
+
+    def factory(log):
+        return nr.WakeLock(log=log, set_execution_state=_FakeExecState(rc=0), platform="win32")
+
+    wt_report = tmp_path / "worktree" / "audit" / "reports" / "2026-07-18.md"
+    ping = PingRecorder()
+    cfg = _make_config(tmp_path, _child_writes_report(wt_report), ping=ping)
+    cfg.wake_lock_factory = factory
+
+    rc = nr.NightlyRunner(cfg).run()
+    assert rc == 0  # NOT aborted by the wake-lock failure
+
+    manifest = json.loads((cfg.audit_worktree / "audit" / "preflight-manifest.json").read_text())
+    assert manifest["wake_lock"]["acquired"] is False
+    assert manifest["wake_lock"]["status"] == nr.WAKE_FAILED
+    # loud, operator-visible marker line (surfaced, never swallowed)
+    assert "WAKE LOCK NOT HELD" in _marker_text(cfg)
+    # the audit itself still completed -> UP ping fired
+    assert ping.up_calls(_PING_URL) == [(_PING_URL, None)]
+
+
+# ---------------------------------------------------------------------------
 # stale-checkout detection
 # ---------------------------------------------------------------------------
 def test_fetch_failure_marks_workspace_stale(tmp_path):

@@ -10,7 +10,33 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — v1.7 VERIFICATION + REMEDIATION COMPLETE (authoritative standing; supersedes older queue text)
+## 2026-07-20 — EMERGENCY MARKET-CALENDAR HOTFIX SHIPPED (authoritative standing; supersedes older queue text)
+
+Full record: `docs/review/calendar-space-datetime-hotfix-2026-07-20.md`; ledger 07-20 entry =
+exclusion memory. A Lane C #1304 regression fail-closed ALL entries on valid trading days
+(`market_session._parse_session_time` + `alpaca_client.get_calendar` couldn't read the alpaca-py
+SDK's space-separated datetime bounds). **FIXED mid-session (operator-authorized, broker flat):**
+PR #1320 merge **`2070056f`**, deployed 4/4, adversarial review PASS, 41 route tests. **Natural
+16:00 UTC scan PASSED** (succeeded, full cycle, calendar gate cleared, 163 honest rejections, 0
+suggestions/orders). Zero migration/DB/broker/fleet/env/control change; no manual rerun.
+
+Queue (verified outcomes only):
+1. **Entry scanning is RESTORED** — the natural falsifier confirms it live. No further action on
+   the calendar defect.
+2. **Non-blocking follow-ups (separate, batchable):** async CLI result-follow UX (the signed CLI
+   returns on 202-enqueue and doesn't surface the eventual job result — add a `--wait`/status
+   option; UX, not a scanner change) · `url.txt` secret-at-rest (untracked repo-root Postgres DSN
+   with embedded password — remove/gitignore, adjudicate as a security-hygiene item, do NOT
+   broaden a scanner change into it).
+3. **Carried from v1.7 (unchanged):** fleet activation remains INACTIVE / owner-gated (re-attest
+   `1cd004b5…`, scenario-5 receipt contract, Monday evidence) · align the close RPC accept-gate to
+   `routing_mode<>'live_eligible'` · `provider_guardrails.py` credential-in-exception · RPC
+   non-finite `p_fill_mid_reference` guard.
+4. **Carried from v1.6 (unchanged):** the fixed-runner nightly; P0-B `risk_basis_arm_evidence`
+   first payload; taper band reconciliation; E19 v3 re-freeze; single-leg draft rows; TCM N=15; UI
+   after Palette. #1312 (v1.7 audit prompt): leave DRAFT.
+
+## 2026-07-19 — v1.7 VERIFICATION + REMEDIATION COMPLETE (superseded by the 07-20 hotfix standing above)
 
 Full record: `docs/review/v1.7-remediation-results-2026-07-19.md` + `external-full-audit-v1.7-results-2026-07-19.md`;
 ledger 07-19 v1.7 entry = exclusion memory. Five candidate findings re-adjudicated at base

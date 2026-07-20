@@ -4,6 +4,31 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-20 — EMERGENCY MARKET-CALENDAR HOTFIX (fable + opus; mid-session, operator-authorized) · status:shipped
+
+Full record: `docs/review/calendar-space-datetime-hotfix-2026-07-20.md`. **Regression from Lane C
+#1304 (`54fd978a`), fixed same day mid-session.** Two forced `suggestions_open --skip-time-gate
+--force` runs (`df3c56e9`, `25a96ae6`) fast-path-blocked `partial`/`counts.errors=1` with
+`market_calendar_unavailable` on a VALID trading Monday (2 HIGH `job_succeeded_with_errors`
+alerts) — the flags/idempotency worked; the block was a datetime-PARSE defect. Root cause (two
+layers): the alpaca-py SDK `Calendar.open`/`.close` are naive `datetime`s whose `str()` is
+space-separated `'2026-07-20 09:30:00'`; `brokers/alpaca_client.py::get_calendar` emitted that raw
+(docstring promised bare times — DOC≠BUILT), and `services/market_session.py::_parse_session_time`
+only accepted `HH:MM`/`HH:MM:SS`/`'T'`-ISO → `None` → `MarketCalendarUnavailable` → fail-closed
+block of ALL entries on the deployed SHA. **Fix (PR #1320, merge `2070056f`):** one canonical
+parser authority — `_parse_session_time` branches on SHAPE (datetime aware→ET / naive→ET-wall;
+`time`; `'T'`-or-space ISO via `fromisoformat`; bare; date-only & malformed → None), + a
+`normalize_session_bound` the wrapper delegates to for bare-time output. H9 fail-closed preserved
+(malformed still raises); NO holiday/boundary/time-gate/schedule/threshold/routing/executor change.
+Adversarial review PASS (8/8; alpaca-py Calendar model independently confirmed naive-ET). 41
+route-driven tests. Deployed 4/4 at `2070056f` ~15:28Z. **Post-deploy read-only smoke PASS**
+(space-shape → trading-day 09:30/16:00 ET; malformed → fail-closed; empty → non-trading).
+**Natural falsifier PASSED:** the 16:00 UTC scheduled scan (`c526991f`, apscheduler) succeeded
+(errors=0, 41.6s full cycle), passed the calendar gate, and honestly rejected all 163 candidates
+(0 suggestions, 0 orders) — a REAL zero vs the incident's fake zero. **Zero migration / DB-write /
+broker / fleet / env / control change; no manual rerun.** Follow-ups (separate, non-blocking):
+async CLI result-follow UX; `url.txt` secret-at-rest.
+
 ## 2026-07-19 — EXTERNAL AUDIT v1.7 VERIFICATION + REMEDIATION (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/v1.7-remediation-results-2026-07-19.md` + `external-full-audit-v1.7-results-2026-07-19.md`.

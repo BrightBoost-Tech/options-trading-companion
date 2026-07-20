@@ -588,6 +588,23 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   'alpaca_live'`, never on cohort name). V17-1 census CLEAN (operator packet
   `docs/review/v17-1-internal-close-anomaly-census-2026-07-19.md`; NO rows
   corrected). Zero broker/fleet-activation/data-correction/env/control writes.
+  **07-20 EMERGENCY MARKET-CALENDAR HOTFIX** (`docs/review/
+  calendar-space-datetime-hotfix-2026-07-20.md`; ledger 07-20 entry): a Lane C
+  #1304 regression fail-closed ALL entries on valid trading days — the alpaca-py
+  SDK `Calendar.open`/`.close` are naive datetimes whose `str()` is
+  space-separated `'2026-07-20 09:30:00'`, which `market_session._parse_session_
+  time` (accepted only bare/`'T'`-ISO) rejected → `MarketCalendarUnavailable` →
+  `suggestions_open` blocked pre-scan (two forced runs `df3c56e9`/`25a96ae6`
+  partial + 2 HIGH alerts). **FIXED same-day mid-session (operator-authorized,
+  broker flat):** PR #1320 merge `2070056f` — ONE canonical `_parse_session_time`
+  authority (shape-branching: datetime aware→ET/naive→ET-wall, `time`,
+  `'T'`-or-space ISO via `fromisoformat`, bare; date-only+malformed→None→
+  fail-closed) + `normalize_session_bound` the wrapper delegates to. H9
+  fail-closed preserved; no holiday/boundary/gate/schedule/threshold/routing
+  change. **Natural 16:00 UTC scan PASSED** (succeeded, full cycle, 163 honest
+  rejections, 0 suggestions/orders). When touching `market_session.py` /
+  `alpaca_client.get_calendar`: the SDK yields naive-ET datetime bounds — keep
+  the single parser authority, never re-narrow to a `'T'`-only check.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.

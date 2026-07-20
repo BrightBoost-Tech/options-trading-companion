@@ -10,7 +10,46 @@ Tiers: **GATED** (built/known, awaiting operator go or an explicit trigger) ·
 **P1** (next build slots) · **P2** (real but deferred) · **RESEARCH** (open
 questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
-## 2026-07-19 — v1.6 REMEDIATION COMPLETE (authoritative standing; supersedes older queue text)
+## 2026-07-19 — v1.7 VERIFICATION + REMEDIATION COMPLETE (authoritative standing; supersedes older queue text)
+
+Full record: `docs/review/v1.7-remediation-results-2026-07-19.md` + `external-full-audit-v1.7-results-2026-07-19.md`;
+ledger 07-19 v1.7 entry = exclusion memory. Five candidate findings re-adjudicated at base
+`f48c298c` (each CONFIRMED Fable-reproduced before build). **Five code merges + TWO DDL migrations
+applied by exact name + doctrine receipts; ZERO production-data correction / broker / fleet-
+activation / env / control writes.** All serialized 1A→1B→2→3→4→docs with adversarial review (two
+per DDL lane), per-merge 4/4 deploy SUCCESS + broker-flat/0-crit-high checkpoint.
+
+- **HIGH V17-1 internal-close atomicity — FIXED+MIGRATED:** #1316 `3ec4f766` atomic
+  `rpc_commit_internal_close_v1` (migration `20260719180000…` applied, receipt `8cfd7333`, zero
+  business-row change) + #1317 `2b9099d3` route switch (single RPC call, no non-atomic fallback,
+  RPC-failure holds position OPEN). Census CLEAN; 3 pre-guard historical incidents → operator
+  packet (NO rows corrected).
+- **HIGH V17-2 fleet activation binding — FIXED+MIGRATED:** #1315 `390bf3c7` (migration
+  `20260719020000…` applied, old 4-arg overload DROPPED, receipt `84687a20`; fleet UNCHANGED,
+  INACTIVE). Binding fingerprint reproducible-from-code `1cd004b5…`.
+- **MED V17-5 credential logging — FIXED:** #1314 `d7c2ebd5` (rotation NOT_PROVEN).
+- **MED V17-3 SUPERSEDED (#1299) + V17-4 cohort conflation — FIXED:** #1318 `d1a7f22b` (TCM
+  evidence honesty; broker-live == alpaca_live sum; coverage fields added).
+
+Queue (verified outcomes only):
+1. **Fleet activation is the ONLY remaining owner-gated fleet step, still BLOCKED.** Now the
+   activation transaction is artifact/registry/receipt bound, but activation additionally requires:
+   `FLEET_ACTIVATION_AUTHORIZED=1` + confirm-literal + 50-slot payload + attestation of the
+   **reproducible `1cd004b5…`** fingerprint (⚠ owner-packet-1's ratified token was against the
+   non-reproducible `6f8d1499…` — RE-ISSUE against `1cd004b5…`) + the scenario-5 durable
+   receipt-contract prerequisite (`docs/review/fleet-receipt-contract-prerequisite-2026-07-19.md`)
+   + a natural fixed-runner nightly PASS + Monday evidence. **Do NOT activate.**
+2. **Natural falsifier:** first internal-close through the atomic RPC (auto, no action).
+3. **Small non-gating follow-ups (batchable):** align the close RPC accept-gate to `routing_mode
+   <> 'live_eligible'` (fail-safe today; inert #1003 `paper_shadow`) · `provider_guardrails.py`
+   credential-in-exception (V17-5 sibling) · extend the RPC non-finite guard to
+   `p_fill_mid_reference` (provenance-only) · scenario-5 receipt contract adoption.
+4. **Carried from v1.6 (unchanged):** the tonight fixed-runner nightly; the P0-B
+   `risk_basis_arm_evidence` first payload → ~1-week arm review; Monday evidence reader; taper band
+   reconciliation; E19 v3 re-freeze; single-leg draft rows; TCM promotion N=15; UI after Palette.
+5. **#1312 (v1.7 audit prompt PR): leave DRAFT** — it is the spec, not the results record.
+
+## 2026-07-19 — v1.6 REMEDIATION COMPLETE (superseded by the v1.7 standing above)
 
 Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md` (+ the run doc and
 ledger entries). **LOCAL RUNNER LANDED** — three-way compare `LOCAL_UNIQUE_CONTENT=0`, ff-pull

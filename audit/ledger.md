@@ -4,6 +4,60 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-19 — EXTERNAL AUDIT v1.7 VERIFICATION + REMEDIATION (fable + opus; serialized) · status:shipped
+
+Full record: `docs/review/v1.7-remediation-results-2026-07-19.md` + `external-full-audit-v1.7-results-2026-07-19.md`.
+Five candidate findings re-adjudicated against base `f48c298c` (each CONFIRMED independently
+reproduced by Fable before any build). **Five code merges + TWO DDL migrations applied by exact
+name + doctrine receipts; ZERO production-data correction / broker / fleet-activation / env /
+control writes.** Serialized 1A→1B→2→3→4→docs, each adversarially reviewed (two reviews on each
+DDL lane), per-merge all-services deploy SUCCESS + broker-flat/0-crit-high checkpoint.
+
+- **V17-1 F-A2-INTERNAL-CLOSE-PRECOMMIT-SIDE-EFFECTS (HIGH) — CONFIRMED → FIXED+MIGRATED.** The
+  internal/shadow close wrote order-filled/cash/ledger BEFORE the realized-P&L/reason validation +
+  position-close CAS (orphan/double-book on abort/race). Fix = atomic economic-commit RPC
+  `rpc_commit_internal_close_v1` (one all-or-none txn; server-derived cash; write-once marker;
+  idempotent; live-order + non-finite guards; #1017 provenance) — #1316 `3ec4f766`, migration
+  `20260719180000_rpc_commit_internal_close_v1` APPLIED (receipt `8cfd7333`, zero business-row
+  change) — + route switched to a single RPC call, no non-atomic fallback, RPC-failure holds the
+  position OPEN + typed partial — #1317 `2b9099d3`. Reviews: 1A two-FAIL→repair→PASS, 1B PASS (+ a
+  #1126-costume→behavior test repair). Census: current-state CLEAN; 3 pre-guard historical
+  incidents in the operator packet `docs/review/v17-1-internal-close-anomaly-census-2026-07-19.md`
+  (NO rows corrected).
+- **V17-2 F-A8-FLEET-ACTIVATION-ARTIFACT-UNBOUND (HIGH, activation-gated) — CONFIRMED → FIXED+
+  MIGRATED.** The applied RPC bound no registry/epoch/manifest/receipt (6 bypasses accepted). Fix =
+  server-derive the binding from the 50 approved registry rows `ORDER BY policy_registration_id
+  COLLATE "C" ASC` (== client codepoint sort), bind off the fingerprint-verified `v_derived_map`,
+  require the operator-attested manifest fingerprint == server recomputation — #1315 `390bf3c7`,
+  migration `20260719020000_harden_shadow_fleet_activation_rpc` APPLIED (old 4-arg overload
+  DROPPED; 5-arg service_role-only; receipt `84687a20`; **fleet UNCHANGED and INACTIVE**). Reviews:
+  two PASS + two required-before-apply fixes (collation determinism, bind-off-verified-map)
+  repaired + Fable-verified. Scenario-5 receipt-EXISTENCE OPEN by design (prerequisite packet
+  `docs/review/fleet-receipt-contract-prerequisite-2026-07-19.md`). ⚠ Binding fingerprint is now
+  the reproducible-from-code **`1cd004b5…`** (the old `6f8d1499…` was an out-of-repo bundle value
+  not reproducible from code) — **owner-packet-1's activation attestation must be RE-ISSUED
+  against `1cd004b5…`** (reconciliation note; activation stays blocked).
+- **V17-3 F-A1-TCM-V2-PARTIAL-STAMP-UNDERCOUNT (MED) — SUPERSEDED** by #1299 (undercount closed;
+  mixed side → typed `incomplete_side` UNAVAILABLE, runtime-proven). Coverage fields
+  (`contributing_fill_count`/`stamped_fill_count`/`stamp_complete`) shipped as polish in Lane 4.
+- **V17-4 F-A1-TCM-LIVE-COHORT-CONFLATION (MED) — CONFIRMED → FIXED.** `realized_cost_study.py`
+  pooled aggressive paper/internal fills into a "LIVE/authoritative" headline (census: 12
+  alpaca_live −$400 / 11 alpaca_paper −$1,750.50 / 1 internal). Fix = three axes
+  (`policy_cohort`/`execution_realism`/`economic_evidence_cohort`), broker-live keyed on
+  `execution_mode='alpaca_live'`, headline provably == the alpaca_live sum — #1318 `d1a7f22b`
+  (with V17-3). Rejected-CLEAN (untouched, already execution-truth-keyed): monday reader,
+  tcm_v2_proposal + promotion gate, signal_accuracy view, challenger_study.
+- **V17-5 F-A9-MARKETDATA-CREDENTIAL-PREFIX-LOG (MED) — CONFIRMED → FIXED.** `market_data_truth_
+  layer.py:1417` logged an 8-char Alpaca key-ID prefix (RTH options path); sibling unredacted
+  Polygon exception snippet `market_data.py:605`. Fix = constant message + redact-before-truncate,
+  6 synthetic-secret tests — #1314 `d7c2ebd5`. **Rotation NOT_PROVEN** (nothing rotated/inspected).
+  Follow-up: `provider_guardrails.py` same-class site.
+
+**Follow-ups (non-gating; do not re-find):** align the close RPC accept-gate to `routing_mode<>
+'live_eligible'` (fail-safe today) · `provider_guardrails.py` credential-in-exception · extend the
+RPC non-finite guard to `p_fill_mid_reference` (provenance-only) · scenario-5 durable receipt
+contract. **#1312 disposition: leave DRAFT** (it is the audit prompt/spec, not the results record).
+
 ## 2026-07-19 — v1.6 REMEDIATION MERGE COMPLETION (fable + opus; serialized) · status:shipped
 
 Full record: `docs/review/v1.6-remediation-merge-completion-2026-07-19.md`. Resolves the

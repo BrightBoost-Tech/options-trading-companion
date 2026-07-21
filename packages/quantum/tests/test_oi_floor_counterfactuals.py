@@ -17,12 +17,14 @@ from unittest.mock import patch
 
 from packages.quantum.services.quote_provenance import (
     DEFAULT_OI_FLOOR_CANDIDATES,
+    DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS,
     OI_FLOOR_REFERENCES,
     QuoteProvenanceRecorder,
     TABLE_NAME,
     coerce_oi,
     compute_oi_counterfactuals,
     oi_floor_candidates,
+    oi_observation_max_age_days,
     resolve_leg_oi,
 )
 
@@ -90,6 +92,19 @@ class TestCoerceOI(unittest.TestCase):
         self.assertIsNone(coerce_oi(None))
         self.assertIsNone(coerce_oi("not-a-number"))
         self.assertIsNone(coerce_oi(""))
+
+    def test_overflowing_input_is_typed_unavailable_never_crash(self):
+        # int(float("inf")) / int(float("1e400")) raise OverflowError (NOT
+        # ValueError) — a non-finite/overflowing OI must be typed UNAVAILABLE,
+        # never crash the observe-only recorder, never a fabricated value.
+        self.assertIsNone(coerce_oi("inf"))
+        self.assertIsNone(coerce_oi("-inf"))
+        self.assertIsNone(coerce_oi("1e400"))
+        self.assertIsNone(coerce_oi(float("inf")))
+        self.assertIsNone(coerce_oi(float("-inf")))
+        # NaN is also non-finite (raises ValueError) — still unavailable.
+        self.assertIsNone(coerce_oi(float("nan")))
+        self.assertIsNone(coerce_oi("nan"))
 
     def test_positive_and_negative(self):
         self.assertEqual(coerce_oi(1234), 1234)
@@ -225,10 +240,59 @@ class TestFloorCandidates(unittest.TestCase):
             # All tokens invalid → fall back to defaults (never empty).
             self.assertEqual(oi_floor_candidates(), [100, 250, 500, 1000])
 
+    def test_env_overflowing_token_filtered_never_crash(self):
+        # int(float("inf")) raises OverflowError, not ValueError — the token
+        # must be dropped like any other bad token, never crash the parser.
+        with patch.dict("os.environ", {"OI_FLOOR_CANDIDATES": "100,inf,300"}):
+            self.assertEqual(oi_floor_candidates(), [100, 300])
+        with patch.dict("os.environ", {"OI_FLOOR_CANDIDATES": "inf,1e400,-inf"}):
+            # All tokens overflow/non-finite → fall back to defaults (never empty).
+            self.assertEqual(oi_floor_candidates(), [100, 250, 500, 1000])
+
     def test_references_anchor_100_and_1000(self):
         # The two doctrine-anchored floors carry their provenance.
         self.assertIn("guardrails", OI_FLOOR_REFERENCES[100])
         self.assertIn("micro_live_config", OI_FLOOR_REFERENCES[1000])
+
+
+# ─────────────────────────────────────────────────────────────────
+# oi_observation_max_age_days — freshness knob parse (default fallback)
+# ─────────────────────────────────────────────────────────────────
+class TestObservationMaxAgeDays(unittest.TestCase):
+    def test_default_when_unset(self):
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("OI_OBSERVATION_MAX_AGE_DAYS", None)
+            self.assertEqual(
+                oi_observation_max_age_days(),
+                DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS,
+            )
+
+    def test_env_override_and_negative_fallback(self):
+        with patch.dict("os.environ", {"OI_OBSERVATION_MAX_AGE_DAYS": "7"}):
+            self.assertEqual(oi_observation_max_age_days(), 7)
+        with patch.dict("os.environ", {"OI_OBSERVATION_MAX_AGE_DAYS": "0"}):
+            self.assertEqual(oi_observation_max_age_days(), 0)
+        with patch.dict("os.environ", {"OI_OBSERVATION_MAX_AGE_DAYS": "-3"}):
+            # Negative age is nonsense → default (never a negative horizon).
+            self.assertEqual(
+                oi_observation_max_age_days(),
+                DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS,
+            )
+
+    def test_bad_and_overflowing_input_falls_back_never_crash(self):
+        # int(float("inf")) raises OverflowError (not ValueError); a huge/
+        # overflowing/non-parseable knob value falls back to the default
+        # rather than crashing the observe-only recorder.
+        for bad in ("inf", "-inf", "1e400", "nan", "abc", ""):
+            with patch.dict(
+                "os.environ", {"OI_OBSERVATION_MAX_AGE_DAYS": bad}
+            ):
+                self.assertEqual(
+                    oi_observation_max_age_days(),
+                    DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS,
+                    msg=f"knob={bad!r} should fall back, not crash",
+                )
 
 
 # ─────────────────────────────────────────────────────────────────

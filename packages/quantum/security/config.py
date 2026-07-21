@@ -159,7 +159,11 @@ def audit_production_security():
 
     if os.getenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "1") != "1":
         warnings.append(
-            "TASK_NONCE_FAIL_CLOSED_IN_PROD is disabled — nonce store failures will silently allow requests"
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD is set to a non-'1' value but has NO "
+            "effect in production — a nonce-store outage fails closed "
+            "unconditionally under canonical production (F-A9-1/#1307); this flag "
+            "only relaxes a non-production dev box. It is deprecated in prod and "
+            "can be removed from the environment."
         )
 
     if os.getenv("ALLOW_LEGACY_CRON_SECRET", "0") != "0":

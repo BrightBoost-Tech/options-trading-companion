@@ -70,6 +70,13 @@ class _Query:
     def in_(self, *a, **k):
         return self
 
+    def filter(self, *a, **k):
+        # Filter-IGNORING by design: the durable-dedup identity match is
+        # re-verified in Python inside find_prior_silent_failure_alert, so the
+        # stub can return every seeded row and the production code still keys
+        # correctly on (run_id, detector_version, failure_signature).
+        return self
+
     def order(self, *a, **k):
         return self
 
@@ -85,7 +92,10 @@ class _Client:
         self._tables = tables or {}
 
     def table(self, name):
-        return _Query(self._tables.get(name, []))
+        # NB: the SAME underlying list object is handed to each _Query, so a
+        # test that appends to self._tables["risk_alerts"] (e.g. via a stateful
+        # _alert side-effect) makes that row visible to the next poll's lookup.
+        return _Query(self._tables.setdefault(name, []))
 
 
 def _iso(dt):
@@ -438,6 +448,275 @@ class TestLearningOutputFreshness(unittest.TestCase):
         out = ohs.get_output_freshness(self._client(lfl_age_days=1))
         entry = self._lfl(out)
         self.assertEqual(entry.status, "ok")
+
+
+# =========================================================================
+# Durable A4 re-fire dedup (2026-07-20): first emits, repeats suppressed-typed
+# — driven END-TO-END through the ops_health_check handler with the failure
+# injected at its data source (job_runs) and the prior state in risk_alerts.
+# =========================================================================
+def _patch_ops_health(stack, client):
+    """Patch the heavy ops-health deps so ONLY the silent-failure path runs,
+    returning the mocked observability alert(). Mirrors
+    TestSilentFailureHandlerWiring._patched (the detector itself,
+    get_silent_job_failures + find_prior_silent_failure_alert, is NOT patched —
+    it reads the stub's job_runs / risk_alerts, so the failure is injected at
+    its true origin)."""
+    fresh = SimpleNamespace(
+        is_stale=False, as_of=None, age_seconds=None, universe_size=1,
+        stale_symbols=[], source="MarketDataTruthLayer", reason="ok",
+    )
+    job_fresh = SimpleNamespace(
+        is_stale=False, as_of=None, age_seconds=None, reason=None,
+        source="job_runs",
+    )
+    stack.enter_context(patch(f"{_HANDLER}.get_admin_client", return_value=client))
+    stack.enter_context(
+        patch(f"{_HANDLER}.build_freshness_universe", return_value=["SPY"])
+    )
+    stack.enter_context(
+        patch(f"{_HANDLER}.compute_market_data_freshness", return_value=fresh)
+    )
+    stack.enter_context(
+        patch(f"{_HANDLER}.compute_data_freshness", return_value=job_fresh)
+    )
+    stack.enter_context(patch(f"{_HANDLER}.get_expected_jobs", return_value=[]))
+    stack.enter_context(patch(f"{_HANDLER}.get_output_freshness", return_value=[]))
+    stack.enter_context(patch(f"{_HANDLER}.get_recent_failures", return_value=[]))
+    stack.enter_context(
+        patch(f"{_HANDLER}.should_suppress_alert", return_value=(False, None))
+    )
+    stack.enter_context(patch(f"{_HANDLER}.get_suggestions_stats", return_value={}))
+    stack.enter_context(patch(f"{_HANDLER}.get_integrity_stats", return_value={}))
+    stack.enter_context(patch(f"{_HANDLER}.AuditLogService"))
+    return stack.enter_context(patch(f"{_HANDLER}._alert"))
+
+
+def _job_run(errors, run_id="r1", job_name="paper_learning_ingest"):
+    return {
+        "id": run_id,
+        "job_name": job_name,
+        "status": "succeeded",
+        "finished_at": _iso(datetime.now(timezone.utc)),
+        "result": {"ok": True, "counts": {"errors": errors}},
+    }
+
+
+def _prior_alert_row(
+    *, run_id, job_name="paper_learning_ingest", error_count=1,
+    detector_version=None, failure_signature=None, alert_id="prior-1",
+):
+    """A durable risk_alerts row as it lives in the table. detector_version /
+    failure_signature default to None to model a HISTORICAL row written before
+    those fields existed (the real 6-open-HIGH case)."""
+    meta = {
+        "source": "ops_health_check",
+        "job_name": job_name,
+        "error_count": error_count,
+        "run_id": run_id,
+    }
+    if detector_version is not None:
+        meta["detector_version"] = detector_version
+    if failure_signature is not None:
+        meta["failure_signature"] = failure_signature
+    return {
+        "id": alert_id,
+        "created_at": _iso(datetime.now(timezone.utc)),
+        "metadata": meta,
+    }
+
+
+class TestSilentFailureRefireDedup(unittest.TestCase):
+    def _run_once(self, job_runs, risk_alerts, alert_side_effect=None):
+        from packages.quantum.jobs.handlers import ops_health_check as handler
+
+        client = _Client({"job_runs": job_runs, "risk_alerts": risk_alerts})
+        with ExitStack() as stack:
+            mock_alert = _patch_ops_health(stack, client)
+            if alert_side_effect is not None:
+                mock_alert.side_effect = alert_side_effect
+            result = handler.run({}, ctx=None)
+        return mock_alert, result
+
+    def test_first_valid_alert_still_emits(self):
+        """No prior row for this identity → the FIRST alert emits (req 1)."""
+        mock_alert, result = self._run_once([_job_run(1, run_id="rNEW")], [])
+        mock_alert.assert_called_once()
+        md = mock_alert.call_args.kwargs["metadata"]
+        self.assertEqual(md["run_id"], "rNEW")
+        self.assertEqual(md["detector_version"], "v1")
+        self.assertEqual(md["failure_signature"], "paper_learning_ingest|errors=1")
+        self.assertFalse(result["healthy"])
+
+    def test_repeat_poll_same_identity_suppressed_typed(self):
+        """A prior EXPLICIT-identity row for the same run → suppressed_duplicate
+        (typed), NO new _alert / egress (req 2)."""
+        prior = _prior_alert_row(
+            run_id="r1", error_count=1, detector_version="v1",
+            failure_signature="paper_learning_ingest|errors=1",
+        )
+        mock_alert, result = self._run_once([_job_run(1, run_id="r1")], [prior])
+        mock_alert.assert_not_called()
+        dups = [
+            s for s in result["alerts_suppressed"]
+            if s.get("reason") == "duplicate"
+        ]
+        self.assertEqual(len(dups), 1)
+        self.assertEqual(dups[0]["run_id"], "r1")
+        self.assertEqual(dups[0]["prior_alert_id"], "prior-1")
+        # Still SURFACED as an issue — suppression is anti-noise, not blindness.
+        self.assertTrue(any("Silent failure" in i for i in result["issues_found"]))
+
+    def test_historical_null_version_row_suppresses_known_incident(self):
+        """The REAL 6-open-HIGH case: a prior row with NO detector_version /
+        failure_signature (pre-versioning) is matched by DERIVING them from its
+        own job_name + error_count (stored as a string) → suppressed, ZERO new
+        row (req 2 + no historical mutation)."""
+        prior = _prior_alert_row(
+            run_id="df3c56e9", job_name="suggestions_open", error_count="1",
+        )  # detector_version / failure_signature absent (NULL); error_count str
+        mock_alert, result = self._run_once(
+            [_job_run(1, run_id="df3c56e9", job_name="suggestions_open")],
+            [prior],
+        )
+        mock_alert.assert_not_called()
+        self.assertTrue(
+            any(s.get("reason") == "duplicate" for s in result["alerts_suppressed"])
+        )
+
+    def test_new_incident_different_run_emits(self):
+        """A prior row for a DIFFERENT run must NOT suppress a genuinely new
+        incident (req 3). The stub ignores the SQL run_id filter, so this also
+        proves the Python-side identity match rejects the wrong run."""
+        prior = _prior_alert_row(run_id="rOLD", detector_version="v1")
+        mock_alert, _ = self._run_once([_job_run(1, run_id="rNEW")], [prior])
+        mock_alert.assert_called_once()
+        self.assertEqual(mock_alert.call_args.kwargs["metadata"]["run_id"], "rNEW")
+
+    def test_changed_failure_signature_same_run_emits(self):
+        """Same run_id but a MATERIALLY changed failure (error_count 1 → 3) →
+        different signature → re-emits (req 3)."""
+        prior = _prior_alert_row(
+            run_id="r1", error_count=1, detector_version="v1",
+            failure_signature="paper_learning_ingest|errors=1",
+        )
+        mock_alert, _ = self._run_once([_job_run(3, run_id="r1")], [prior])
+        mock_alert.assert_called_once()
+        self.assertEqual(
+            mock_alert.call_args.kwargs["metadata"]["failure_signature"],
+            "paper_learning_ingest|errors=3",
+        )
+
+    def test_detector_version_bump_emits(self):
+        """A prior v1 row does NOT suppress once the live detector is bumped to
+        v2 — a new detector version is allowed to re-emit exactly once (req 3).
+        The NULL-version baseline stays 'v1' so a legacy row cannot masquerade
+        as v2."""
+        prior = _prior_alert_row(
+            run_id="r1", detector_version="v1",
+            failure_signature="paper_learning_ingest|errors=1",
+        )
+        from packages.quantum.jobs.handlers import ops_health_check as handler
+
+        client = _Client({"job_runs": [_job_run(1, run_id="r1")],
+                          "risk_alerts": [prior]})
+        with ExitStack() as stack:
+            mock_alert = _patch_ops_health(stack, client)
+            stack.enter_context(patch(f"{_HANDLER}.A4_DETECTOR_VERSION", "v2"))
+            handler.run({}, ctx=None)
+        mock_alert.assert_called_once()
+        self.assertEqual(
+            mock_alert.call_args.kwargs["metadata"]["detector_version"], "v2"
+        )
+
+    def test_double_poll_yields_exactly_one_alert(self):
+        """Two sequential detector polls over the SAME durable store (the
+        production model: one otc worker, 30-min cadence) emit EXACTLY ONE alert
+        — the first poll's row makes the second poll a suppressed_duplicate
+        (race requirement, serialized). The _alert side-effect writes the
+        emitted row back into risk_alerts, exactly as the real alert() insert
+        would."""
+        from packages.quantum.jobs.handlers import ops_health_check as handler
+
+        risk_alerts: list = []
+        job_runs = [_job_run(2, run_id="rDP")]
+
+        emitted: list = []
+
+        def _persist(_client, **kwargs):
+            emitted.append(kwargs)
+            risk_alerts.append({
+                "id": f"emitted-{len(emitted)}",
+                "created_at": _iso(datetime.now(timezone.utc)),
+                "metadata": dict(kwargs["metadata"]),
+            })
+
+        total_alert_calls = 0
+        for _poll in range(2):
+            client = _Client({"job_runs": job_runs, "risk_alerts": risk_alerts})
+            with ExitStack() as stack:
+                mock_alert = _patch_ops_health(stack, client)
+                mock_alert.side_effect = _persist
+                handler.run({}, ctx=None)
+                total_alert_calls += mock_alert.call_count
+
+        self.assertEqual(total_alert_calls, 1, "double-poll must emit once")
+        self.assertEqual(len(risk_alerts), 1)
+        self.assertEqual(len(emitted), 1)
+
+
+class TestFindPriorSilentFailureAlert(unittest.TestCase):
+    """Service-level unit coverage for the durable dedup lookup + signature."""
+
+    def test_signature_is_int_string_stable(self):
+        # A historical string error_count hashes identically to a live int.
+        self.assertEqual(
+            ohs.a4_failure_signature("j", "5"), ohs.a4_failure_signature("j", 5)
+        )
+        self.assertNotEqual(
+            ohs.a4_failure_signature("j", 5), ohs.a4_failure_signature("j", 6)
+        )
+        self.assertEqual(ohs.a4_failure_signature(None, None), "unknown|errors=None")
+
+    def test_lookup_matches_historical_null_version_row(self):
+        prior = _prior_alert_row(run_id="r1", job_name="j", error_count="2")
+        client = _Client({"risk_alerts": [prior]})
+        hit = ohs.find_prior_silent_failure_alert(
+            client, run_id="r1", detector_version="v1",
+            failure_signature=ohs.a4_failure_signature("j", 2),
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["id"], "prior-1")
+
+    def test_lookup_rejects_wrong_run_id_in_python(self):
+        prior = _prior_alert_row(run_id="rOLD", job_name="j", error_count="2")
+        client = _Client({"risk_alerts": [prior]})  # stub ignores SQL filter
+        self.assertIsNone(
+            ohs.find_prior_silent_failure_alert(
+                client, run_id="rNEW", detector_version="v1",
+                failure_signature=ohs.a4_failure_signature("j", 2),
+            )
+        )
+
+    def test_lookup_none_run_id_fails_open(self):
+        client = _Client({"risk_alerts": [_prior_alert_row(run_id="r1")]})
+        self.assertIsNone(
+            ohs.find_prior_silent_failure_alert(
+                client, run_id=None, detector_version="v1",
+                failure_signature="x",
+            )
+        )
+
+    def test_lookup_query_error_fails_open_none(self):
+        client = MagicMock()
+        client.table.side_effect = RuntimeError("db down")
+        # Fail-OPEN: a lookup error must return None (emit), never suppress.
+        self.assertIsNone(
+            ohs.find_prior_silent_failure_alert(
+                client, run_id="r1", detector_version="v1",
+                failure_signature="x",
+            )
+        )
 
 
 if __name__ == "__main__":

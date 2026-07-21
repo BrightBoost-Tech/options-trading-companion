@@ -14,10 +14,9 @@ class FakeQuery:
         self.payload = None
         self.filters = []
 
-    def upsert(self, payload, on_conflict=None):
-        self.operation = "upsert"
+    def insert(self, payload):
+        self.operation = "insert"
         self.payload = payload
-        self.on_conflict = on_conflict
         return self
 
     def update(self, payload):
@@ -40,7 +39,7 @@ class FakeQuery:
 
     def execute(self):
         self.client.calls.append(self)
-        if self.table == "single_leg_shadow_runs" and self.operation == "upsert":
+        if self.table == "single_leg_shadow_runs" and self.operation == "insert":
             return SimpleNamespace(data=[{"run_id": "11111111-1111-1111-1111-111111111111"}])
         return SimpleNamespace(data=[])
 

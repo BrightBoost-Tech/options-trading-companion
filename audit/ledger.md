@@ -4,6 +4,42 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-21 — OVERNIGHT PRIORITY SPRINT (fable + ≤7 opus parallel; serialized merges) · status:shipped
+
+Full record: `docs/review/overnight-priority-sprint-results-2026-07-21.md`. Ten serialized merges,
+final main `f28906ff`; each adversarial-reviewed + CI-green + 4-service deploy-verified + safety
+checkpoint. #1335 `8eeb11f4` fleet reconciliation-receipt WRITER RPC + privilege hardening — **2
+migrations APPLIED by exact name** (`20260721010000_rpc_issue_fleet_reconciliation_receipt_v1`
+receipt `a5294476` · `20260721010500_harden_fleet_receipt_privileges` receipt `7e882073`; NEVER
+REAPPLY): server-gen receipt_id (unforgeable), source-marker-validated (kind/user/epoch/full-fp),
+idempotent replay, `orphan_run` RAISEs (job_runs no user_id); privilege REVOKE `arwdDxtm`→`arm`
+(TRUNCATE/UPDATE/DELETE gone) + `BEFORE TRUNCATE` guard closes the receipt erase hole (the OBS-2
+TRUNCATE residual from the 07-20 run — RESOLVED); activation-RPC SELECT non-regression proven;
+residual `MAINTAIN` benign; **0 receipts issued, no producer wired**. · #1325 `f105377b` OI
+default-OFF · #1332 `4a0739f9` alert dedup `(job_run_id,type,detector_version,failure_signature)`
+(kills the 3h re-fire OBS-1 cadence) · #1334 `dd551207` tier-taper DARK `[800,1000]` v2 · #1331
+`76c06c28` E19 v3 min=8 (v2 immutable) · #1330 `ada5ce96` url.txt guard+local-archive · #1336
+`609cae01` single-leg draft manifest · #1333 `3eb85d7e` H7 ratified · #1337 `ad495be3` hygiene +
+`.Jules` dedup · #1338 `f28906ff` runner assert-run_tag+rotation. **40 duplicate Palette PRs closed**
+(5 canonicals kept). **F-REDATE = CORRECT_ALL_CONFIRMED_ROWS (20 rows fp `4f1999db…`), NOT executed.**
+**Findings recorded (EXCLUDE from re-finding):** the receipt-table TRUNCATE erase hole is CLOSED
+(#1335 Lane B); the A4 3h alert re-fire is FIXED (#1332); the `.Jules`/`.jules` case-collision phantom
+is a Windows case-insensitivity artifact (fix in main via #1337; operator-checkout reconcile pending —
+do not re-find). **Natural nightly 2026-07-21 = PASS** (`2026-07-21-25320-45cbf6d9`, report
+`4cc0d77df4f4b8c4dccaa159a5f1d1d1be34d9e147b2b05e4fabcd429e04c110`, contract met=True, UP ping, operator
+checkout unchanged; wake lock held — the 07-20 `0xC000013A` sleep-kill RESOLVED by the desktop
+Sleep-after=Never power state). Swept into this PR: `audit/reports/2026-07-21.md`. Zero broker /
+fleet-activation / policy-registry / control / env / schedule / data-correction writes.
+PENDING VERIFICATIONS (2026-07-21 → next session):
+- **#1327 alternate-disposition coverage** — next natural midday cycle (Tue 07-21): finals ==
+  scanner-emitted count (selected + `rank_blocked` alternates). Monday produced 4 finals (pre-#1327).
+- **Receipt writer first real receipt** — falsifier is a future operator-driven reconciliation calling
+  the writer (0 today, no producer wired).
+- **Runner #1338 runtime** — takes effect only after the operator checkout absorbs main (blocked by the
+  `.Jules` phantom); the wrapper runs `nightly_runner.py` from the operator checkout.
+- **F-RUNNER-BROKER-CREDS** — 2nd consecutive broker-blind nightly (runner-env creds unset); wiring fix.
+- Fleet receipt-table `MAINTAIN` residual — optional micro-hardening (`REVOKE MAINTAIN`).
+
 ## 2026-07-20 — POST-CLOSE MAX-THROUGHPUT ORCHESTRATOR (fable + opus parallel; serialized merges) · status:shipped
 
 Full record: `docs/review/monday-post-close-max-throughput-results-2026-07-20.md`. Six serialized

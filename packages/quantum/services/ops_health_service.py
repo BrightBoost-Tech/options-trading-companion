@@ -753,6 +753,111 @@ def get_silent_job_failures(client, hours: int = 24) -> List[Dict[str, Any]]:
         return []
 
 
+# ── A4 silent-failure re-fire dedup (2026-07-20) ──────────────────────────
+# The A4 detector re-detects the SAME succeeded/partial-with-errors run on
+# EVERY :07/:37 ops_health_check poll across its ~24h lookback. The prior
+# (2026-07-11) fingerprint cooldown read the sent-fingerprint list back out of
+# only the LAST 5 ops_health_check runs (`should_suppress_alert` limit(5) ≈
+# 2.5h) — far shorter than the 24h re-detection window — so a given run
+# re-emitted a fresh HIGH alert roughly every 3h (observed 2026-07-20: run
+# df3c56e9 fired 14:07/17:07/20:07Z; 25a96ae6 likewise → the 6 open HIGHs).
+# The durable fix keys the emit on the APPEND-ONLY risk_alerts rows the
+# detector already writes — identity (run_id, alert_type, detector_version,
+# failure_signature) — which survives process recycle and is visible across
+# both workers. Historical rows written before the detector_version /
+# failure_signature fields existed are matched by DERIVING those fields from
+# their OWN metadata (a missing version is the pre-versioning baseline; the
+# signature is rebuilt from job_name + error_count) so the already-known
+# incident is suppressed WITHOUT deleting, updating, or downgrading any row.
+_A4_ALERT_TYPE = "job_succeeded_with_errors"
+# The version the LIVE detector stamps now. Bump ONLY when the detector's
+# DETECTION semantics materially change (not for this dedup wiring) — a bump
+# lets the SAME historical run re-emit exactly once under the new version.
+A4_DETECTOR_VERSION = "v1"
+# What a pre-versioning historical row (detector_version absent) actually IS.
+# Deliberately a FIXED constant, NOT A4_DETECTOR_VERSION: after a future bump
+# to "v2", a NULL-version legacy row must still read as "v1" so it does not
+# masquerade as the new version and wrongly suppress a v2 re-emit.
+_A4_BASELINE_DETECTOR_VERSION = "v1"
+_A4_PRIOR_LOOKUP_LIMIT = 50
+
+
+def a4_failure_signature(job_name: Any, error_count: Any) -> str:
+    """Stable signature of the FAILURE a silent-failure alert reports.
+
+    A materially-changed failure — a different job, or a different error count
+    on the same run — produces a DIFFERENT signature and is allowed to
+    re-emit; a byte-identical failure produces the SAME signature and dedups.
+    Read defensively so a historical row whose ``error_count`` was persisted as
+    a string hashes identically to a live ``int``.
+    """
+    job = str(job_name if job_name is not None else "unknown")
+    try:
+        ec = str(int(error_count))
+    except (TypeError, ValueError):
+        ec = str(error_count)
+    return f"{job}|errors={ec}"
+
+
+def find_prior_silent_failure_alert(
+    client: Any,
+    *,
+    run_id: Any,
+    detector_version: str,
+    failure_signature: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the newest durable ``risk_alerts`` row that ALREADY reported this
+    exact ``(run_id, job_succeeded_with_errors, detector_version,
+    failure_signature)`` identity, or ``None`` when this is the first emit.
+
+    The dedup store is the append-only alert rows the detector itself writes —
+    so the check is durable across process recycle and visible across workers,
+    unlike the last-5-runs fingerprint read-back it replaces. Candidate rows
+    are fetched by ``alert_type`` + ``metadata->>run_id`` and the full identity
+    is then re-verified in Python (which also derives the version/signature for
+    pre-versioning historical rows), so a jsonb-filter quirk can never widen
+    the match.
+
+    FAIL-OPEN: ``run_id is None`` or a query error returns ``None`` (emit) —
+    A4's job is loudness, so a possible duplicate is strictly preferred over a
+    silently swallowed real failure.
+    """
+    if run_id is None:
+        return None
+    try:
+        res = (
+            client.table("risk_alerts")
+            .select("id, created_at, metadata")
+            .eq("alert_type", _A4_ALERT_TYPE)
+            .filter("metadata->>run_id", "eq", str(run_id))
+            .order("created_at", desc=True)
+            .limit(_A4_PRIOR_LOOKUP_LIMIT)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        logger.warning(
+            f"[A4_DEDUP] prior-alert lookup failed (fail-open, will emit): {e}"
+        )
+        return None
+
+    for row in rows:
+        meta = row.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        # Authoritative identity match in Python (defends against the stub /
+        # any jsonb-filter widening; also the single place the derivation lives).
+        if str(meta.get("run_id")) != str(run_id):
+            continue
+        cand_version = meta.get("detector_version") or _A4_BASELINE_DETECTOR_VERSION
+        cand_sig = meta.get("failure_signature") or a4_failure_signature(
+            meta.get("job_name"), meta.get("error_count")
+        )
+        if cand_version == detector_version and cand_sig == failure_signature:
+            return row
+    return None
+
+
 def get_suggestions_stats(client) -> Dict[str, Any]:
     """
     Get suggestion generation statistics for today.

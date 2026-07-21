@@ -80,9 +80,17 @@ class TestWiring:
         assert "learning_ingest" not in names    # the no-op stub is unwatched
 
     def test_condition_dedup_by_run_id(self):
+        # Durable re-fire dedup (2026-07-20) REPLACED the 2026-07-11 last-5-runs
+        # fingerprint cooldown (its ~2.5h read-back window was far shorter than
+        # the 24h re-detection lookback → the same run re-emitted ~every 3h).
+        # The emit is now keyed on the append-only risk_alerts rows themselves.
+        # AUTHORITATIVE route-driven coverage (first emits, repeat suppressed,
+        # changed signature / bumped version re-emit, double-poll → exactly one,
+        # historical NULL-version row suppresses) lives in
+        # test_alert_resilience_a4_detector.py; this only guards the seam.
         src = self._txt("jobs", "handlers", "ops_health_check.py")
-        assert '"job_succeeded_with_errors", {"run_id": _run_id}' in src
-        assert "should_suppress_alert(\n                client, fingerprint, 1440\n            )" in src
+        assert "find_prior_silent_failure_alert(" in src
+        assert "detector_version=A4_DETECTOR_VERSION" in src
 
     def test_accuracy_dedup_on_value_change_and_daily(self):
         src = self._txt("jobs", "handlers", "ops_health_check.py")

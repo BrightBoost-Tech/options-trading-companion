@@ -41,6 +41,10 @@ HARDEN_MIGRATION = (
     REPO_ROOT / "supabase" / "migrations"
     / "20260721010500_harden_fleet_receipt_privileges.sql"
 )
+REVOKE_MAINTAIN_MIGRATION = (
+    REPO_ROOT / "supabase" / "migrations"
+    / "20260721011000_revoke_fleet_receipt_maintain.sql"
+)
 
 USER = "user-1"
 OTHER = "user-2"
@@ -585,6 +589,65 @@ class TestHardenMigrationDriftLock:
         assert not re.search(r"\bINSERT\s+INTO\b", code, re.I)
         assert not re.search(r"\bUPDATE\s+\w+\s+SET\b", code, re.I)
         assert not re.search(r"\bDELETE\s+FROM\b", code, re.I)
+
+
+# ── C. MAINTAIN-revoke follow-up migration drift-lock (20260721011000) ───────
+
+class TestRevokeMaintainMigrationDriftLock:
+    """Pin the Lane-B follow-up that drops the residual PG17 MAINTAIN grant so
+    service_role lands on EXACTLY {SELECT, INSERT}. This is the always-green CI
+    teeth for the migration TEXT; the behavioural proof (has_table_privilege /
+    relacl on a real PG17) lives in packages/quantum/tests/pg/receipt/."""
+
+    @pytest.fixture(scope="class")
+    def sql(self):
+        return REVOKE_MAINTAIN_MIGRATION.read_text(encoding="utf-8")
+
+    def test_revokes_maintain_from_service_role(self, sql):
+        assert re.search(
+            r"REVOKE\s+MAINTAIN\s+ON\s+TABLE\s+"
+            r"fleet_reconciliation_receipts\s+FROM\s+service_role", sql)
+
+    def test_reasserts_select_insert(self, sql):
+        assert re.search(
+            r"GRANT\s+SELECT,\s*INSERT\s+ON\s+TABLE\s+"
+            r"fleet_reconciliation_receipts\s+TO\s+service_role", sql)
+
+    def test_does_not_grant_or_revoke_anything_beyond_maintain_and_select_insert(self, sql):
+        code = _strip_sql_comments(sql)
+        # The ONLY privilege statements: one REVOKE MAINTAIN + one GRANT
+        # SELECT, INSERT. No stray privilege leaks into or out of the migration.
+        revokes = re.findall(r"REVOKE\s+([A-Z, ]+?)\s+ON\b", code)
+        grants = re.findall(r"GRANT\s+([A-Z, ]+?)\s+ON\b", code)
+        assert [r.strip() for r in revokes] == ["MAINTAIN"]
+        assert [g.strip().replace(" ", "") for g in grants] == ["SELECT,INSERT"]
+
+    def test_no_default_privilege_side_effect(self, sql):
+        # Must NOT touch schema-wide default privileges — ADP is create-time only
+        # and would change every FUTURE table + other migrations (out of scope).
+        assert "ALTER DEFAULT PRIVILEGES" not in _strip_sql_comments(sql)
+
+    def test_additive_only_no_data_change(self, sql):
+        # Privilege change only: no DML, no DDL that alters rows/structure.
+        code = _strip_sql_comments(sql)
+        assert not re.search(r"\bINSERT\s+INTO\b", code, re.I)
+        assert not re.search(r"\bUPDATE\s+\w+\s+SET\b", code, re.I)
+        assert not re.search(r"\bDELETE\s+FROM\b", code, re.I)
+        assert not re.search(r"\bTRUNCATE\b", code, re.I)
+        assert not re.search(r"\b(CREATE|ALTER|DROP)\s+(TABLE|TRIGGER|FUNCTION|INDEX)\b",
+                             code, re.I)
+
+    def test_does_not_touch_immutability_triggers(self, sql):
+        # The row + statement immutability triggers are untouched by a grant change.
+        code = _strip_sql_comments(sql)
+        assert "trg_fleet_recon_receipts_immutable" not in code
+        assert "trg_fleet_recon_receipts_no_truncate" not in code
+
+    def test_filename_sorts_strictly_after_lane_b(self):
+        # Migrations apply in filename order; the revoke must land AFTER the Lane-B
+        # hardening (which is what left MAINTAIN behind).
+        assert REVOKE_MAINTAIN_MIGRATION.name > HARDEN_MIGRATION.name
+        assert REVOKE_MAINTAIN_MIGRATION.name.startswith("20260721")
 
 
 if __name__ == "__main__":

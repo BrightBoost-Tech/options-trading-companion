@@ -33,6 +33,19 @@ Design (see `docs/specs/e19_protocol_supersession_governance.md`):
   DETECTS staleness and DEFINES the execution-refusal gate; it does not author a
   successor and it does not unblock anything (E19 execution stays BLOCKED).
 
+Location — verification tooling, deliberately in the tests tree.
+    This module names the paths of the observe-only terminal_distribution
+    package (to hash them). The import-lock guardrail
+    (`test_terminal_distribution_import_lock.py`) forbids ANY production module
+    under `packages/quantum` from even referencing the string
+    `terminal_distribution`, and excludes the tests tree precisely because
+    preregistration/integrity verification legitimately references it. This
+    registry is that verification tooling — it imports nothing from the package,
+    it only reads bytes — so it lives here, honestly, rather than obfuscating the
+    path in a production module. The execution-refusal gate it defines is a
+    contract for the (unbuilt, BLOCKED) E19 executor, which is itself
+    observe-only experiment tooling, not a live-economics module.
+
 Hash basis — CRLF-normalized, platform-independent (matches §12 exactly).
     The §12 pins were authored on a Windows checkout (core.autocrlf=true), so
     they are the SHA-256 of each module's bytes with CRLF line endings. To be a
@@ -270,7 +283,7 @@ def content_hash(raw: bytes) -> str:
 
 def repo_root() -> Path:
     """Repo root, derived from this module's location.
-    parents: [0]=policy_lab [1]=quantum [2]=packages [3]=repo root."""
+    parents: [0]=tests [1]=quantum [2]=packages [3]=repo root."""
     return Path(__file__).resolve().parents[3]
 
 

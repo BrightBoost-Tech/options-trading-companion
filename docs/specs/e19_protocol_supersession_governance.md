@@ -102,8 +102,20 @@ protocol's execution stays refused (§4).
 
 ## 3. The upstream-hash registry (machine-checkable mirror of §12)
 
-`packages/quantum/policy_lab/e19_upstream_registry.py` is the registry. It is
+`packages/quantum/tests/e19_upstream_registry.py` is the registry. It is
 side-effect free (reads files, hashes bytes; creates/activates/writes nothing).
+
+> **Why it lives in the tests tree.** The registry names the paths of the
+> observe-only `terminal_distribution` package (to hash them). The import-lock
+> guardrail (`test_terminal_distribution_import_lock.py`) forbids ANY production
+> module under `packages/quantum` from even referencing the string
+> `terminal_distribution`, and excludes the tests tree precisely because
+> preregistration/integrity verification legitimately references it. The
+> registry imports nothing from the package — it only reads bytes — so it lives
+> with the verification tooling, honestly, rather than obfuscating the path in a
+> production module. The execution-refusal gate it defines is a contract for the
+> (unbuilt, BLOCKED) E19 executor, which is itself observe-only experiment
+> tooling, not a live-economics module.
 
 - **`E19_2B_V3_UPSTREAM_REGISTRY`** — an ordered tuple of `UpstreamModulePin`
   (`logical_name`, `repo_relative_path`, `freeze_hash`), one per §12 upstream
@@ -213,7 +225,8 @@ run.
 
 ## 7. Files
 
-- Registry + detection + gate: `packages/quantum/policy_lab/e19_upstream_registry.py`
+- Registry + detection + gate: `packages/quantum/tests/e19_upstream_registry.py`
+  (verification tooling — in the tests tree by the import-lock guardrail; see §3)
 - Tests: `packages/quantum/tests/test_e19_upstream_hash_registry.py`
 - Immutable protocols (unchanged): `docs/specs/e19_2b_preregistered_protocol_v3.md`
   (`cfdcfc9e…`), `docs/specs/e19_2b_preregistered_protocol.md` (`50e7e237…`)

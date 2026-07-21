@@ -21,7 +21,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from packages.quantum.policy_lab import e19_upstream_registry as reg
+from packages.quantum.tests import e19_upstream_registry as reg
 
 # repo_root/packages/quantum/tests/<this file> -> parents[3] = repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -44,6 +44,31 @@ FLEET_CONFIG_HASH_SET_FINGERPRINT = (
     "18766a1e882e36a46d708add8d3e5c258ea117607954210a8d142fc8844a9a39"
 )
 
+# ---------------------------------------------------------------------------
+# v3 re-freeze (2026-07-20): the §7 minimum is DEFINED = 8 (owner-ratified
+# 2026-07-19, owner-packet-3). v3 is a NEW versioned artifact ALONGSIDE the
+# immutable v2 file — v2 above is preserved byte-for-byte (its pin, version, and
+# every v2 test are UNCHANGED). Both hashes are pinned; a change to EITHER fails.
+# ---------------------------------------------------------------------------
+PROTOCOL_DOC_V3 = (
+    _REPO_ROOT / "docs" / "specs" / "e19_2b_preregistered_protocol_v3.md"
+)
+
+# The frozen v3 protocol's LF-normalized content hash. THE v3 drift lock.
+FROZEN_PROTOCOL_V3_SHA256 = (
+    "cfdcfc9e7fc7c4d1fd56a5b3ec98d910c5093c2d8e39e4ac7121c51a847903c6"
+)
+
+PROTOCOL_VERSION_V3 = "e19_2b_protocol_v3"
+
+# The one number v3 defines (owner-packet-3, RATIFIED). Nothing else changed.
+MINIMUM_DISTINCT_SOURCE_EVENTS_V3 = 8
+
+# Arm B is UNCHANGED in v3 — the same manifest + fingerprint are carried
+# verbatim. (Re-verified at the v3 authoring base: both reproduce identically.)
+FLEET_MANIFEST_SHA256_V3 = FLEET_MANIFEST_SHA256
+FLEET_CONFIG_HASH_SET_FINGERPRINT_V3 = FLEET_CONFIG_HASH_SET_FINGERPRINT
+
 
 def _normalized_bytes() -> bytes:
     """Read the doc and normalize CRLF/CR -> LF so the hash is EOL-independent
@@ -54,6 +79,16 @@ def _normalized_bytes() -> bytes:
 
 def _text() -> str:
     return _normalized_bytes().decode("utf-8")
+
+
+def _normalized_bytes_v3() -> bytes:
+    """LF-normalized bytes of the frozen v3 protocol (same convention as v2)."""
+    raw = PROTOCOL_DOC_V3.read_bytes()
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _text_v3() -> str:
+    return _normalized_bytes_v3().decode("utf-8")
 
 
 def test_protocol_doc_exists():
@@ -126,3 +161,157 @@ def test_arm_b_pinned_by_content():
     assert FLEET_CONFIG_HASH_SET_FINGERPRINT in text
     assert "fleet_policy_design_50.md" in text
     assert "NOT YET PINNABLE" not in text
+
+
+# ===========================================================================
+# v3 re-freeze — the §7 minimum is DEFINED = 8. v3 is a NEW frozen artifact
+# alongside the immutable v2 file. These are the v3 drift locks + the load-
+# bearing semantic invariants + the cross-version guards proving v2 is
+# preserved. Each mirrors its v2 counterpart so a change to EITHER version's
+# frozen bytes fails.
+# ===========================================================================
+
+
+def test_v3_protocol_doc_exists():
+    assert PROTOCOL_DOC_V3.is_file(), f"missing frozen v3 protocol: {PROTOCOL_DOC_V3}"
+
+
+def test_v3_protocol_doc_frozen_hash():
+    """THE v3 immutability pin. Any byte change to the frozen v3 protocol fails
+    here — the same re-version discipline that governs v2."""
+    actual = hashlib.sha256(_normalized_bytes_v3()).hexdigest()
+    assert actual == FROZEN_PROTOCOL_V3_SHA256, (
+        "E19-2B preregistered protocol v3 changed but its frozen hash was not "
+        "updated. A frozen preregistration may only change via a deliberate "
+        "re-version: bump PROTOCOL_VERSION in the doc AND update "
+        "FROZEN_PROTOCOL_V3_SHA256 in this test, in one reviewed commit.\n"
+        f"  expected {FROZEN_PROTOCOL_V3_SHA256}\n"
+        f"  actual   {actual}"
+    )
+
+
+def test_v3_protocol_version_matches_pin():
+    """The version string in the v3 doc and the test move together."""
+    assert f"PROTOCOL_VERSION:   {PROTOCOL_VERSION_V3}" in _text_v3()
+
+
+def test_v3_execution_remains_blocked():
+    """v3 changes the §7 threshold VALUE only, not the block."""
+    text = _text_v3()
+    assert "EXECUTION_STATUS:   BLOCKED" in text
+    assert "EXECUTE_E19_2B:      false" in text
+
+
+def test_v3_minimum_source_events_defined_at_8():
+    """The single substantive v2 -> v3 change: the minimum is now DEFINED = 8,
+    owner-ratified — NOT invented, and NOT the v2 'UNDEFINED' verdict."""
+    text = _text_v3()
+    assert "MINIMUM_DISTINCT_SOURCE_EVENTS" in text
+    assert f"MINIMUM_DISTINCT_SOURCE_EVENTS = {MINIMUM_DISTINCT_SOURCE_EVENTS_V3}" in text
+    assert "VERDICT: DEFINED = 8" in text
+    # provenance: the number is the owner's recorded decision, not invented here
+    assert "owner-packet-3" in text
+    assert "owner-ratifications-2026-07-19.md" in text
+    # v3 is NOT the v2 'undefined' verdict — the differentiation is crisp
+    assert "UNDEFINED in E19 doctrine" not in text
+
+
+def test_v3_execution_still_blocked_on_fleet_and_threshold():
+    """The block is preserved: fleet-epoch gate (1) + capital parity (3) + the
+    gate-4 threshold-met condition are all still open. Defining the value does
+    not unblock execution."""
+    text = _text_v3()
+    # gate 1 (fleet activation) + gate 3 (capital parity) explicitly not clear
+    assert "NOT YET CLEAR" in text
+    # gate 4: defining the value does not unblock execution
+    assert "does NOT unblock execution" in text
+    assert "stays BLOCKED" in text
+
+
+def test_v3_promotion_prohibition_present():
+    assert "E19-2B NEVER promotes anything by itself." in _text_v3()
+
+
+def test_v3_decision_event_unit_basis_pinned():
+    """The experimental unit is UNCHANGED from v2 — the immutable decision
+    event, not account rows."""
+    text = _text_v3()
+    assert "decision_event_id" in text
+    assert 'DECISION_EVENT_BASIS = "source_suggestion_id"' in text
+
+
+def test_v3_fleet_epoch_identity_pinned():
+    """Cohort/epoch separation is UNCHANGED from v2."""
+    text = _text_v3()
+    assert "small_tier_v1" in text
+    assert "legacy_100k" in text
+
+
+def test_v3_arm_b_pinned_by_content():
+    """Arm B is carried VERBATIM from v2 — same manifest hash + fingerprint,
+    still by CONTENT, never SHAPE."""
+    text = _text_v3()
+    assert FLEET_MANIFEST_SHA256_V3 in text
+    assert FLEET_CONFIG_HASH_SET_FINGERPRINT_V3 in text
+    assert "fleet_policy_design_50.md" in text
+    assert "NOT YET PINNABLE" not in text
+
+
+def test_v3_carries_v2_science_unchanged():
+    """The v2 -> v3 delta is the §7 minimum ONLY. Spot-check that the frozen
+    metric/censoring/stopping vocabulary is carried verbatim (the whole-file
+    hash pins it; these name the load-bearing clauses so a silent science change
+    is visible at review)."""
+    text = _text_v3()
+    # metrics vocabulary (§4)
+    assert "EVALUATOR_VERSION = evaluator@1.0.0" in text
+    assert "Brier score" in text and "EV-RMSE" in text
+    # censoring (§5)
+    assert "abstention is a result" in text.lower() or "Abstained" in text
+    assert "Prequential discipline" in text
+    # stopping rule (§8) — no optional stopping
+    assert "No optional stopping." in text
+    # experiment version (§6 / §12) unchanged
+    assert 'EXPERIMENT_VERSION =\n  "e19_prerejection_v1"' in text or \
+        "e19_prerejection_v1" in text
+    # §12 science-freeze base is UNCHANGED (not re-pinned at the v3 base)
+    assert "science-freeze base" in text
+    assert "79f4ba76" in text
+
+
+def test_v3_references_v2_as_immutable_predecessor():
+    """v3 names v2 as its immutable predecessor and carries the v2 pin — the
+    lineage is explicit and the immutability convention preserved."""
+    text = _text_v3()
+    assert PROTOCOL_VERSION in text  # "e19_2b_protocol_v2"
+    assert FROZEN_PROTOCOL_SHA256 in text  # v2's own pin quoted in the lineage
+    assert "IMMUTABLE" in text
+
+
+# ---- cross-version guards: v2 is PRESERVED and the two are DISTINCT ----
+
+
+def test_v2_still_frozen_and_untouched():
+    """v3 must NOT edit or delete v2. The v2 doc's LF-normalized hash still
+    equals its original pin — proof v2 is byte-for-byte preserved."""
+    actual = hashlib.sha256(_normalized_bytes()).hexdigest()
+    assert actual == FROZEN_PROTOCOL_SHA256, (
+        "v2 frozen protocol was modified — v2 must remain immutable when v3 is "
+        "added alongside it."
+    )
+    assert PROTOCOL_DOC.is_file() and PROTOCOL_DOC != PROTOCOL_DOC_V3
+
+
+def test_v2_and_v3_are_distinct_files_and_hashes():
+    """Two versioned artifacts, two distinct pins. Neither collapses onto the
+    other."""
+    assert PROTOCOL_DOC != PROTOCOL_DOC_V3
+    assert FROZEN_PROTOCOL_SHA256 != FROZEN_PROTOCOL_V3_SHA256
+    assert PROTOCOL_VERSION != PROTOCOL_VERSION_V3
+    assert _normalized_bytes() != _normalized_bytes_v3()
+
+
+def test_v2_minimum_still_undefined_v3_minimum_defined():
+    """The versions differ on exactly the §7 minimum: v2 UNDEFINED, v3 = 8."""
+    assert "UNDEFINED in E19 doctrine" in _text()          # v2 unchanged
+    assert "VERDICT: DEFINED = 8" in _text_v3()            # v3 defined

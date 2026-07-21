@@ -267,7 +267,10 @@ class TestAllReturnPathsEmitCycleMetadata(unittest.TestCase):
     def test_no_candidates_emits_cycle_metadata(self):
         body = self._slice_function()
         idx = body.index('"reason": "no_candidates"')
-        window = body[idx:idx + 2000]
+        # window widened 2000→2300 for the additive #1327 H9-errors +
+        # candidate_disposition counts keys; asserts cycle_metadata PRESENCE,
+        # not byte offset.
+        window = body[idx:idx + 2300]
         self.assertIn('"cycle_metadata":', window)
         self.assertIn('exit_reason="no_candidates"', window)
 
@@ -312,7 +315,10 @@ class TestAllReturnPathsEmitCycleMetadata(unittest.TestCase):
     def test_happy_path_emits_cycle_metadata_with_none_exit_reason(self):
         body = self._slice_function()
         idx = body.index('"reason": None')
-        window = body[idx:idx + 2500]
+        # window widened 2500→2700 for the additive #1327 H9-errors +
+        # candidate_disposition counts keys; asserts cycle_metadata PRESENCE,
+        # not byte offset.
+        window = body[idx:idx + 2700]
         self.assertIn('"cycle_metadata":', window)
         self.assertIn("exit_reason=None", window)
 

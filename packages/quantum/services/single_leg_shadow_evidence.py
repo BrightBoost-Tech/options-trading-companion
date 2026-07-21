@@ -45,6 +45,11 @@ def _is_table_missing_error(exc: BaseException, table: str) -> bool:
     return "does not exist" in msg and table.lower() in msg
 
 
+def _is_unique_violation(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "23505" in msg or "duplicate key" in msg or "already exists" in msg
+
+
 def _jsonable(value: Any) -> Any:
     """Return a deterministic JSON-compatible value without fabricating data."""
     try:
@@ -108,10 +113,18 @@ class SingleLegShadowEvidenceWriter:
             "table_missing_noops": 0,
         }
 
-    def _execute(self, table: str, operation) -> Optional[Any]:
+    def _execute(
+        self,
+        table: str,
+        operation,
+        *,
+        allow_unique: bool = False,
+    ) -> Optional[Any]:
         try:
             return operation().execute()
         except Exception as exc:
+            if allow_unique and _is_unique_violation(exc):
+                return "duplicate"
             if _is_table_missing_error(exc, table):
                 self._counters["table_missing_noops"] += 1
                 logger.error(
@@ -140,12 +153,10 @@ class SingleLegShadowEvidenceWriter:
         }
         result = self._execute(
             RUNS_TABLE,
-            lambda: self._sb.table(RUNS_TABLE).upsert(
-                payload,
-                on_conflict="source_decision_id,policy_registration_id",
-            ),
+            lambda: self._sb.table(RUNS_TABLE).insert(payload),
+            allow_unique=True,
         )
-        rows = getattr(result, "data", None) if result is not None else None
+        rows = getattr(result, "data", None) if result not in (None, "duplicate") else None
         if rows:
             self.run_id = str(rows[0]["run_id"])
         else:
@@ -184,7 +195,7 @@ class SingleLegShadowEvidenceWriter:
             return False
         candidate_dict: Dict[str, Any] = dict(candidate or {})
         candidate_dict.setdefault("policy_registration_id", self.policy_registration_id)
-        fp = candidate_fingerprint(candidate_dict) if candidate_dict else None
+        fp = candidate_fingerprint(candidate_dict) if candidate_dict else ""
         payload = {
             "run_id": self.run_id,
             "policy_registration_id": self.policy_registration_id,
@@ -212,14 +223,13 @@ class SingleLegShadowEvidenceWriter:
         }
         result = self._execute(
             ATTEMPTS_TABLE,
-            lambda: self._sb.table(ATTEMPTS_TABLE).upsert(
-                payload,
-                on_conflict="run_id,policy_registration_id,symbol,stage,candidate_fingerprint",
-            ),
+            lambda: self._sb.table(ATTEMPTS_TABLE).insert(payload),
+            allow_unique=True,
         )
         if result is None:
             return False
-        self._counters["attempts_written"] += 1
+        if result != "duplicate":
+            self._counters["attempts_written"] += 1
         return True
 
     def record_event(
@@ -247,14 +257,13 @@ class SingleLegShadowEvidenceWriter:
         }
         result = self._execute(
             EVENTS_TABLE,
-            lambda: self._sb.table(EVENTS_TABLE).upsert(
-                row,
-                on_conflict="run_id,event_type,entity_type,entity_id",
-            ),
+            lambda: self._sb.table(EVENTS_TABLE).insert(row),
+            allow_unique=True,
         )
         if result is None:
             return False
-        self._counters["events_written"] += 1
+        if result != "duplicate":
+            self._counters["events_written"] += 1
         return True
 
     def finish_run(

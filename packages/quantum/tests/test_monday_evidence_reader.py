@@ -299,6 +299,39 @@ class TestTierTaper(unittest.TestCase):
         self.assertEqual(o["proposed_tier"], "micro")
         self.assertEqual(o["difference_envelope_pct"], -0.1)
 
+    def test_engine_versions_never_pooled(self):
+        # v1-era and v2-era samples MUST be partitioned by engine_version — a
+        # reader must never pool [900,1100]-era with [800,1000]-era evidence.
+        report = build_report(_payload(tier_taper=_ok(rows=[
+            {"engine_version": "tier_taper.v1", "verdict": "would_loosen",
+             "current": {"tier": "small"}, "proposed": {"tier": "small"},
+             "difference": {"envelope_pct": 0.01}},
+            {"engine_version": "tier_taper.v2", "verdict": "would_tighten",
+             "current": {"tier": "micro"}, "proposed": {"tier": "micro"},
+             "difference": {"envelope_pct": -0.02}},
+            {"engine_version": "tier_taper.v2", "verdict": "identical",
+             "current": {"tier": "micro"}, "proposed": {"tier": "micro"},
+             "difference": {"envelope_pct": 0.0}},
+        ])))
+        sec = _section(report, "tier_taper")
+        bev = sec.summary["by_engine_version"]
+        self.assertEqual(sec.summary["engine_versions"],
+                         ["tier_taper.v1", "tier_taper.v2"])
+        # v1 bucket holds ONLY the v1 sample; v2 bucket ONLY the v2 samples.
+        self.assertEqual(bev["tier_taper.v1"],
+                         {"n_observations": 1, "by_verdict": {"would_loosen": 1}})
+        self.assertEqual(bev["tier_taper.v2"]["n_observations"], 2)
+        self.assertEqual(bev["tier_taper.v2"]["by_verdict"],
+                         {"identical": 1, "would_tighten": 1})
+        # would_loosen (a v1-only verdict) NEVER leaks into the v2 bucket.
+        self.assertNotIn("would_loosen", bev["tier_taper.v2"]["by_verdict"])
+        # Every observation is version-tagged.
+        self.assertTrue(all(o.get("engine_version") in
+                            ("tier_taper.v1", "tier_taper.v2")
+                            for o in sec.summary["observations"]))
+        # The rendered report flags the multi-version split explicitly.
+        self.assertIn("NEVER pooled", render_markdown(report))
+
 
 # --- 3g. greek_cap ----------------------------------------------------------
 class TestGreekCap(unittest.TestCase):

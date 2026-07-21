@@ -46,16 +46,20 @@ class TestDriftGuards:
         assert SmallAccountCompounder.get_tier(999.99).name == "micro"
         assert SmallAccountCompounder.get_tier(1000.0).name == "small"
         assert tt.BOUNDARY == 1000.0
-        assert tt.BAND_LO == 900.0 and tt.BAND_HI == 1100.0
-        assert tt.HYST_LO == 950.0 and tt.HYST_HI == 1050.0
+        # v2 conservative never-loosen band [800, 1000]: the taper lies
+        # entirely below the boundary; the upper edge IS the boundary.
+        assert tt.BAND_LO == 800.0 and tt.BAND_HI == 1000.0
+        assert tt.HYST_LO == 950.0 and tt.HYST_HI == 1000.0
+        assert tt.BAND_HI == tt.BOUNDARY and tt.HYST_HI == tt.BOUNDARY
+        assert tt.ENGINE_VERSION == "tier_taper.v2"
 
 
 # ── Interpolation continuity ─────────────────────────────────────────────
 class TestInterpolationContinuity:
     def test_taper_fraction_edges(self):
-        assert tt.taper_fraction(900.0) == 0.0
-        assert tt.taper_fraction(1100.0) == 1.0
-        assert tt.taper_fraction(1000.0) == pytest.approx(0.5)
+        assert tt.taper_fraction(800.0) == 0.0     # BAND_LO
+        assert tt.taper_fraction(1000.0) == 1.0    # BAND_HI == boundary
+        assert tt.taper_fraction(900.0) == pytest.approx(0.5)  # band midpoint
 
     def test_taper_fraction_monotone_and_bounded(self):
         prev = -1.0
@@ -66,14 +70,14 @@ class TestInterpolationContinuity:
             prev = t
 
     def test_envelope_pct_continuous_at_band_edges(self):
-        # Approaching 900 from inside → micro 0.90; approaching 1100 → 0.85.
-        lo = tt.decide(900.0 + 1e-6).proposed.envelope_pct
+        # Approaching 800 from inside → micro 0.90; approaching 1000 → 0.85.
+        lo = tt.decide(800.0 + 1e-6).proposed.envelope_pct
         assert lo == pytest.approx(0.90, abs=1e-4)
-        hi = tt.decide(1100.0 - 1e-6).proposed.envelope_pct
+        hi = tt.decide(1000.0 - 1e-6).proposed.envelope_pct
         assert hi == pytest.approx(0.85, abs=1e-4)
         # Exact edges resolve to the raw anchors (no jump).
-        assert tt.decide(900.0).proposed.envelope_pct == pytest.approx(0.90)
-        assert tt.decide(1100.0).proposed.envelope_pct == pytest.approx(0.85)
+        assert tt.decide(800.0).proposed.envelope_pct == pytest.approx(0.90)
+        assert tt.decide(1000.0).proposed.envelope_pct == pytest.approx(0.85)
 
     def test_proposed_envelope_no_discontinuity_across_boundary(self):
         # The RAW cliff jumps 0.90→0.85 at $1000; the taper must not.
@@ -85,14 +89,14 @@ class TestInterpolationContinuity:
 # ── Band edges + in_band flag ────────────────────────────────────────────
 class TestBandEdges:
     def test_in_band_strict_interior(self):
-        assert tt.decide(900.0).in_band is False   # edge = outside (identity)
-        assert tt.decide(1100.0).in_band is False
-        assert tt.decide(901.0).in_band is True
-        assert tt.decide(1099.0).in_band is True
-        assert tt.decide(1000.0).in_band is True
+        assert tt.decide(800.0).in_band is False   # edge = outside (identity)
+        assert tt.decide(1000.0).in_band is False  # upper edge == boundary
+        assert tt.decide(801.0).in_band is True
+        assert tt.decide(999.0).in_band is True
+        assert tt.decide(900.0).in_band is True
 
     def test_edge_params_equal_raw(self):
-        for e in (900.0, 1100.0):
+        for e in (800.0, 1000.0):
             d = tt.decide(e)
             assert d.current == d.proposed
             assert d.verdict == "identical"
@@ -100,8 +104,8 @@ class TestBandEdges:
 
 # ── Outside-band identity (preserve current behavior exactly) ────────────
 class TestOutsideBandIdentity:
-    @pytest.mark.parametrize("e", [1.0, 500.0, 800.0, 899.99, 900.0,
-                                    1100.0, 1100.01, 1200.0, 2500.0, 4999.0])
+    @pytest.mark.parametrize("e", [1.0, 500.0, 700.0, 799.99, 800.0,
+                                    1000.0, 1000.01, 1200.0, 2500.0, 4999.0])
     def test_proposed_equals_current_outside_band(self, e):
         d = tt.decide(e, "normal")
         assert d.proposed == d.current
@@ -210,11 +214,13 @@ class TestHysteresis:
         assert state == "small"
 
     def test_hold_micro_until_upper_threshold(self):
-        # From micro, stays micro through the band until equity >= 1050.
-        for e in (960.0, 1000.0, 1049.999):
+        # v2: from micro, hold micro through the WHOLE band until the raw
+        # cliff — flip to small only at equity >= $1,000 (never enters the
+        # looser small state below the cliff).
+        for e in (850.0, 960.0, 999.999):
             assert tt.resolve_tier_state(e, "micro") == (
                 "micro", "hold_micro")
-        assert tt.resolve_tier_state(1050.0, "micro") == (
+        assert tt.resolve_tier_state(1000.0, "micro") == (
             "small", "flip_to_small")
 
     def test_hold_small_until_lower_threshold(self):
@@ -226,21 +232,32 @@ class TestHysteresis:
             "micro", "flip_to_micro")
 
     def test_hysteresis_gap_prevents_thrash(self):
-        # $999↔$1001 oscillation with memory never flips (both inside the
-        # inner hold band).
+        # v2 one-sided gap: a $999↔$1,001 oscillation flips micro→small ONCE
+        # on first crossing of the $1,000 cliff, then STICKS small (999 >
+        # HYST_LO $950) — no 1↔4 thrash on subsequent wobbles.
         state = "micro"
+        seen = []
         for e in (1001.0, 999.0, 1001.0, 999.0, 1001.0):
             state, _ = tt.resolve_tier_state(e, state)
-            assert state == "micro"  # held — no thrash
+            seen.append(state)
+        assert seen == ["small", "small", "small", "small", "small"]
+        # From small, the same $999↔$1,001 wobble never flips (both > $950).
         state = "small"
         for e in (999.0, 1001.0, 999.0, 1001.0):
             state, _ = tt.resolve_tier_state(e, state)
             assert state == "small"  # held — no thrash
+        # A sub-boundary wobble ($940↔$960) from micro never flips UP — the
+        # taper never enters small below the cliff (never-loosen).
+        state = "micro"
+        for e in (960.0, 940.0, 999.0, 940.0):
+            state, _ = tt.resolve_tier_state(e, state)
+            assert state == "micro"  # held micro — never loosened
 
     def test_rising_walkthrough(self):
-        # Seed micro at $920, ramp up: holds micro until $1050, then small.
+        # v2: seed micro at $820, ramp up — holds micro across the whole band
+        # until the raw cliff $1,000, then small.
         state = None
-        seq = [920.0, 980.0, 1010.0, 1049.0, 1050.0, 1080.0]
+        seq = [820.0, 900.0, 980.0, 999.0, 1000.0, 1080.0]
         results = []
         for e in seq:
             state, dec = tt.resolve_tier_state(e, state)
@@ -259,6 +276,30 @@ class TestHysteresis:
         assert results == ["small", "small", "small", "small",
                            "micro", "micro"]
 
+    def test_hysteresis_at_both_band_edges(self):
+        # Requirement 6: explicit, deterministic behaviour AT the band edges.
+        # LOWER edge ($800 = BAND_LO): below HYST_LO ($950), so ANY prior
+        # resolves to micro (from small it flips down; from micro it holds).
+        assert tt.resolve_tier_state(tt.BAND_LO, "small") == (
+            "micro", "flip_to_micro")
+        assert tt.resolve_tier_state(tt.BAND_LO, "micro") == (
+            "micro", "hold_micro")
+        assert tt.resolve_tier_state(tt.BAND_LO, None) == (
+            "micro", "cold_start_raw_seed")
+        # UPPER edge ($1,000 = BAND_HI = BOUNDARY = HYST_HI): at the cliff,
+        # ANY prior resolves to small (from micro it flips up; from small it
+        # holds). The flip is AT the cliff, never below it (never-loosen).
+        assert tt.resolve_tier_state(tt.BAND_HI, "micro") == (
+            "small", "flip_to_small")
+        assert tt.resolve_tier_state(tt.BAND_HI, "small") == (
+            "small", "hold_small")
+        assert tt.resolve_tier_state(tt.BAND_HI, None) == (
+            "small", "cold_start_raw_seed")
+        # One tick BELOW the upper edge still holds micro from a micro prior
+        # (the never-loosen guarantee — no small state below the cliff).
+        assert tt.resolve_tier_state(tt.BAND_HI - 1e-6, "micro") == (
+            "micro", "hold_micro")
+
 
 # ── Verdict semantics ────────────────────────────────────────────────────
 class TestVerdict:
@@ -268,16 +309,21 @@ class TestVerdict:
         assert d.verdict == "would_tighten"
         assert d.proposed_envelope_dollars < d.current_envelope_dollars
 
-    def test_loosens_above_boundary(self):
-        # Above $1000 in-band: raw=small 0.85, proposed>0.85 → loosen,
-        # bounded by micro's own 0.90 cap.
-        d = tt.decide(1040.0)
-        assert d.verdict == "would_loosen"
-        assert d.proposed.envelope_pct <= 0.90 + 1e-9
+    def test_never_loosens_anywhere(self):
+        # v2 conservative band: proposed envelope_pct <= raw everywhere, so
+        # NO equity yields a would_loosen verdict (the ratified never-loosen
+        # property; v1's [900,1100] band DID loosen just above $1,000).
+        for cents in range(60000, 130001, 25):  # $600.00 .. $1,300.00
+            d = tt.decide(cents / 100.0)
+            assert d.verdict in ("identical", "would_tighten",
+                                 "not_applicable"), (
+                f"unexpected verdict {d.verdict} at equity={d.equity}")
+            if d.current is not None:
+                assert d.proposed.envelope_pct <= d.current.envelope_pct + 1e-9
 
     def test_identical_outside_band(self):
-        assert tt.decide(880.0).verdict == "identical"
-        assert tt.decide(1120.0).verdict == "identical"
+        assert tt.decide(700.0).verdict == "identical"   # below BAND_LO 800
+        assert tt.decide(1120.0).verdict == "identical"  # above boundary
 
 
 # ── Standard tier out of scope ───────────────────────────────────────────
@@ -339,6 +385,65 @@ class TestPurity:
                   "previous_tier_state", "hysteresis_decision",
                   "engine_version"):
             assert k in p
+
+
+# ── v2 conservative never-loosen band [800, 1000] ────────────────────────
+class TestConservativeBand:
+    def test_band_lies_entirely_below_or_at_boundary(self):
+        # The taper never extends ABOVE the boundary (that was v1's would_loosen
+        # region). Upper edge is exactly the boundary.
+        assert tt.BAND_HI == tt.BOUNDARY
+        assert tt.BAND_LO < tt.BOUNDARY
+
+    def test_endpoints_720_to_850_monotone(self):
+        # Ratified endpoints: D(800)=800·0.90=720 up to D(1000)=1000·0.85=850.
+        assert tt.decide(800.0).proposed_envelope_dollars == pytest.approx(720.0)
+        assert tt.decide(1000.0).proposed_envelope_dollars == pytest.approx(850.0)
+        assert (tt.decide(1000.0).proposed_envelope_dollars
+                >= tt.decide(800.0).proposed_envelope_dollars)
+
+    def test_lands_exactly_on_small_at_boundary(self):
+        # At $1,000 the proposed envelope == small's raw 0.85 (continuous join).
+        d = tt.decide(1000.0)
+        assert d.proposed.envelope_pct == pytest.approx(tt.SMALL_ENVELOPE_PCT)
+        assert d.proposed == d.current  # identity at the edge
+
+    @pytest.mark.parametrize("regime", ["normal", "shock", "elevated",
+                                         "suppressed"])
+    def test_proposed_never_exceeds_current_dollars(self, regime):
+        # Never-loosen on the TOTAL deployable dollars too, all regimes.
+        for cents in range(60000, 130001, 25):
+            d = tt.decide(cents / 100.0, regime)
+            if d.current is not None:
+                assert (d.proposed_envelope_dollars
+                        <= d.current_envelope_dollars + 1e-9), (
+                    f"loosened at equity={d.equity} regime={regime}")
+
+
+# ── Version-partitioned evidence (v1/v2 must never pool) ──────────────────
+class TestVersionPartitioning:
+    def test_payload_carries_v2(self):
+        p = tt.observe(950.0, "normal")
+        assert p["engine_version"] == "tier_taper.v2"
+        assert tt.ENGINE_VERSION == "tier_taper.v2"
+
+    def test_engine_version_is_the_partition_key(self):
+        # A reader grouping observations by engine_version must place a v1-era
+        # sample and a v2-era sample in DISTINCT buckets — never pooled.
+        v2_sample = tt.observe(950.0, "normal")
+        v1_sample = dict(v2_sample)          # same shape, prior-era label
+        v1_sample["engine_version"] = "tier_taper.v1"
+
+        buckets = {}
+        for s in (v1_sample, v2_sample, tt.observe(999.0, "normal")):
+            buckets.setdefault(s["engine_version"], []).append(s)
+
+        assert set(buckets) == {"tier_taper.v1", "tier_taper.v2"}
+        assert len(buckets["tier_taper.v1"]) == 1
+        assert len(buckets["tier_taper.v2"]) == 2   # both live-engine samples
+        # No bucket mixes eras.
+        for ver, rows in buckets.items():
+            assert all(r["engine_version"] == ver for r in rows)
 
 
 if __name__ == "__main__":

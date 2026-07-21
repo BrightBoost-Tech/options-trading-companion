@@ -66,6 +66,13 @@ RUNNER_VERSION = "1"
 DEFAULT_TIMEOUT_SEC = 90 * 60  # 90 minutes — recent runs took 11-18 min; wide margin.
 DEFAULT_HEARTBEAT_SEC = 60
 DEFAULT_GRACE_SEC = 20  # graceful-terminate window before forced kill
+# Marker-sink (audit/runner-markers.log) rotation. The sink is APPEND-ONLY and
+# shared across nights, and the completion contract re-reads the WHOLE file each
+# run — so without a bound it leaks disk and makes every night's re-read slower.
+# Rotation is size-based, run at start BEFORE tonight's markers land, keeping a
+# few generations for post-mortem debugging.
+DEFAULT_MARKER_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB — hundreds of nights of markers
+DEFAULT_MARKER_LOG_KEEP = 3  # rotated generations retained (.1 / .2 / .3)
 REPORT_HEADER_PREFIX = "# AUDIT"
 MARK_START = "nightly-audit start"
 MARK_END = "nightly-audit end"
@@ -205,6 +212,53 @@ def copy_atomic(src: Path, dst: Path) -> None:
     with open(tmp, "wb") as fh:
         fh.write(data)
     os.replace(tmp, dst)
+
+
+def rotate_marker_log(
+    path: Path,
+    max_bytes: int = DEFAULT_MARKER_LOG_MAX_BYTES,
+    keep: int = DEFAULT_MARKER_LOG_KEEP,
+) -> Optional[str]:
+    """Size-based rotation of the APPEND-ONLY marker sink.
+
+    Must be called at run START, BEFORE any of tonight's markers land, so the
+    live file starts FRESH for this run — tonight's markers (and therefore the
+    run-tag-scoped completion check) are never dropped by rotation.
+
+    When the live file is at/under ``max_bytes`` this is a no-op (returns None).
+    Otherwise it performs a standard numbered rotation: the oldest generation
+    beyond ``keep`` is dropped, ``.<n>`` shifts to ``.<n+1>``, and the live file
+    moves to ``.1`` — bounding the sink at ~``keep+1`` generations. Best-effort:
+    a stat/rename failure never raises and never blocks the run (returns None or
+    a typed ``rotation_failed:`` marker string). Returns a typed action string
+    when it rotated, else None.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return None
+    except OSError:
+        return None
+    keep = max(1, int(keep))
+    # Drop the oldest retained generation, then shift .n -> .n+1, then live -> .1.
+    oldest = path.with_name(path.name + f".{keep}")
+    try:
+        if oldest.exists():
+            oldest.unlink()
+    except OSError:
+        pass
+    for i in range(keep - 1, 0, -1):
+        src = path.with_name(path.name + f".{i}")
+        dst = path.with_name(path.name + f".{i + 1}")
+        if src.exists():
+            try:
+                os.replace(src, dst)
+            except OSError:
+                pass
+    try:
+        os.replace(path, path.with_name(path.name + ".1"))
+    except OSError as exc:  # noqa: BLE001 — rotation is best-effort, never fatal
+        return f"rotation_failed: {type(exc).__name__}: {exc}"
+    return f"rotated {path.name} -> {path.name}.1 (>{max_bytes} bytes; keep={keep})"
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +955,18 @@ def evaluate_completion_contract(
     the accumulated file would report every subsequent night as complete even
     when tonight's appends all failed.
     """
+    # FAIL-LOUD: an empty/whitespace run_tag would make ``run_tag in ln`` match
+    # EVERY marker line (incl. prior nights') — collapsing the run-scoped start/
+    # end check into the exact bare-substring match the scoping was built to
+    # prevent, i.e. a false green. Refuse to evaluate rather than silently
+    # degrade; upstream (run()'s finally) maps a raise here to a DOWN ping,
+    # never an UP one.
+    if not isinstance(run_tag, str) or not run_tag.strip():
+        raise ValueError(
+            "run_tag must be a non-empty per-run identifier — an empty tag turns "
+            "the run-scoped start/end marker check into a bare substring match "
+            "that a prior night's markers would satisfy (false green)."
+        )
     marker_lines = _read_text_safe(marker_log).splitlines()
     start_present = any(MARK_START in ln and run_tag in ln for ln in marker_lines)
     end_present = any(MARK_END in ln and run_tag in ln for ln in marker_lines)
@@ -1056,6 +1122,9 @@ class RunnerConfig:
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
     heartbeat_sec: int = DEFAULT_HEARTBEAT_SEC
     grace_sec: int = DEFAULT_GRACE_SEC
+    # Marker-sink rotation bounds (item e). Rotated at run start, before markers.
+    marker_log_max_bytes: int = DEFAULT_MARKER_LOG_MAX_BYTES
+    marker_log_keep: int = DEFAULT_MARKER_LOG_KEEP
     ping_url: Optional[str] = None
     selftest: bool = False
     # injectable seams (tests / self-test)
@@ -1114,6 +1183,29 @@ class NightlyRunner:
 
     def _log(self, msg: str) -> AppendResult:
         return self._emit_raw(f"==== {_utc_ts()} runner: {msg} ====")
+
+    def _rotate_marker_log(self) -> None:
+        """Bound the append-only marker sink BEFORE tonight's markers land.
+
+        Best-effort: rotation NEVER blocks the run. A rotation error is recorded
+        as a typed marker-failure (surfaced in the failure artifact) rather than
+        raised — the sink may be mid-rotate so we cannot rely on _log() yet.
+        """
+        try:
+            action = rotate_marker_log(
+                self._marker_log(),
+                self.cfg.marker_log_max_bytes,
+                self.cfg.marker_log_keep,
+            )
+        except Exception as exc:  # noqa: BLE001 — rotation must never abort the run
+            self._marker_failures.append(
+                {"line": "marker-log rotation", "status": "rotate_error",
+                 "error": f"{type(exc).__name__}: {exc}"}
+            )
+            return
+        if action:
+            # Safe now: the live sink is fresh, so this becomes its first line.
+            self._log(f"marker sink rotated: {action}")
 
     def _worktree_audit_dir(self) -> Path:
         return self.cfg.audit_worktree / "audit"
@@ -1337,6 +1429,11 @@ class NightlyRunner:
                 f"the lock ({self.cfg.lock_path}) {self._run_tag()} ===="
             )
             return 3  # duplicate run
+
+        # Bound the append-only marker sink BEFORE tonight's markers land (item e)
+        # so the contract's per-run whole-file re-read stays bounded and this
+        # run's markers all write to a fresh generation.
+        self._rotate_marker_log()
 
         transcript_path = self.cfg.transcript_dir / f"{self.cfg.report_date}-{self.pid}.log"
         exit_code = 1

@@ -899,6 +899,106 @@ def test_contract_scoped_to_run_tag_ignores_prior_run_markers(tmp_path):
     assert nr.ARTIFACT_END_MARKER in c.missing_artifacts
 
 
+@pytest.mark.parametrize("bad_tag", ["", "   ", "\t\n", None])
+def test_contract_empty_run_tag_raises_fail_loud(tmp_path, bad_tag):
+    # item (d): an empty/whitespace/None run_tag would make `run_tag in ln` match
+    # EVERY marker line (a bare substring match) and report a false green — the
+    # runner must FAIL LOUD instead of silently degrading the run-scoped check.
+    mf, rep, ml, tr = _write_contract_fixture(tmp_path, tag="[run=NIGHT1]")
+    with pytest.raises(ValueError):
+        nr.evaluate_completion_contract(
+            mf, rep, ml, tr, "abcdef1234", _good_child(), bad_tag
+        )
+
+
+def test_contract_nonempty_run_tag_is_accepted(tmp_path):
+    # The guard must not reject a legitimate non-empty tag.
+    mf, rep, ml, tr = _write_contract_fixture(tmp_path, tag=_TEST_RUN_TAG)
+    c = nr.evaluate_completion_contract(
+        mf, rep, ml, tr, "abcdef1234", _good_child(), _TEST_RUN_TAG
+    )
+    assert c.met
+
+
+# ---------------------------------------------------------------------------
+# item (e) — marker-sink rotation (bound the append-only night-shared log)
+# ---------------------------------------------------------------------------
+def _write_bytes(path: Path, n: int) -> None:
+    path.write_bytes(b"x" * n)
+
+
+def test_rotate_marker_log_noop_under_threshold(tmp_path):
+    ml = tmp_path / "runner-markers.log"
+    _write_bytes(ml, 100)
+    action = nr.rotate_marker_log(ml, max_bytes=1000, keep=3)
+    assert action is None
+    assert ml.exists() and ml.stat().st_size == 100  # untouched
+    assert not (tmp_path / "runner-markers.log.1").exists()
+
+
+def test_rotate_marker_log_missing_file_is_noop(tmp_path):
+    ml = tmp_path / "runner-markers.log"
+    assert nr.rotate_marker_log(ml, max_bytes=1000, keep=3) is None
+    assert not ml.exists()
+
+
+def test_rotate_marker_log_over_threshold_moves_to_dot1_and_frees_live(tmp_path):
+    ml = tmp_path / "runner-markers.log"
+    _write_bytes(ml, 2000)
+    action = nr.rotate_marker_log(ml, max_bytes=1000, keep=3)
+    assert action and "rotated" in action
+    # Live file freed so tonight's markers start fresh; old content preserved as .1
+    assert not ml.exists()
+    dot1 = tmp_path / "runner-markers.log.1"
+    assert dot1.exists() and dot1.stat().st_size == 2000
+
+
+def test_rotate_marker_log_shifts_generations_and_caps_keep(tmp_path):
+    ml = tmp_path / "runner-markers.log"
+    # Pre-seed distinguishable generations .1 (newest) .2 .3 (oldest).
+    (tmp_path / "runner-markers.log.1").write_text("gen1", encoding="utf-8")
+    (tmp_path / "runner-markers.log.2").write_text("gen2", encoding="utf-8")
+    (tmp_path / "runner-markers.log.3").write_text("gen3", encoding="utf-8")
+    ml.write_text("LIVE-OVERSIZE-CONTENT", encoding="utf-8")
+    action = nr.rotate_marker_log(ml, max_bytes=1, keep=3)
+    assert action and "rotated" in action
+    # live -> .1 ; old .1 -> .2 ; old .2 -> .3 ; old .3 (oldest, beyond keep) dropped
+    assert (tmp_path / "runner-markers.log.1").read_text(encoding="utf-8") == "LIVE-OVERSIZE-CONTENT"
+    assert (tmp_path / "runner-markers.log.2").read_text(encoding="utf-8") == "gen1"
+    assert (tmp_path / "runner-markers.log.3").read_text(encoding="utf-8") == "gen2"
+    assert not ml.exists()
+    # keep=3 → no .4 ever created (oldest gen3 dropped).
+    assert not (tmp_path / "runner-markers.log.4").exists()
+
+
+def test_runner_rotates_marker_sink_at_run_start(tmp_path):
+    # End-to-end: an oversize pre-existing sink is rotated before this run's
+    # markers land, and the completion contract (which re-reads the live sink)
+    # still passes because tonight's markers went to the fresh live file.
+    wt_report = tmp_path / "worktree" / "audit" / "reports" / "2026-07-20.md"
+    ping = PingRecorder(rc=0)
+    cfg = _make_config(
+        tmp_path,
+        _child_writes_report(wt_report, sha_prefix="abcdef12", exit_code=0),
+        git=FakeGit(sha="abcdef1234567890"),
+        report_date="2026-07-20",
+        ping=ping,
+    )
+    # Oversize the shared sink and force a tiny rotation threshold via direct
+    # field assignment (RunnerConfig is a mutable dataclass).
+    cfg.marker_log.parent.mkdir(parents=True, exist_ok=True)
+    cfg.marker_log.write_bytes(b"OLD-NIGHTS-CONTENT " * 200)
+    cfg.marker_log_max_bytes = 10
+    cfg.marker_log_keep = 2
+    rc = nr.NightlyRunner(cfg).run()
+    assert rc == 0
+    # Old content was rotated out to .1; the live sink holds only THIS run.
+    assert (cfg.marker_log.parent / (cfg.marker_log.name + ".1")).exists()
+    live = cfg.marker_log.read_text(encoding="utf-8")
+    assert "OLD-NIGHTS-CONTENT" not in live
+    assert nr.MARK_START in live and "nightly-audit end (exit 0)" in live
+
+
 def test_contract_missing_run_sha_is_a_reason(tmp_path):
     # reviewer finding 2: a None run_sha (workspace rev-parse failed) must FAIL
     # report_ok, not silently skip the SHA-grounding check.

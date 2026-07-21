@@ -60,9 +60,12 @@ def _pg_reachable() -> bool:
         return False
 
 
-# Remove the real-pg module from collection when infra is absent (NOT a skip).
+# Remove the real-pg modules from collection when infra is absent (NOT a skip).
 if not _pg_reachable():
-    collect_ignore = ["test_rpc_commit_internal_close_pg.py"]
+    collect_ignore = [
+        "test_rpc_commit_internal_close_pg.py",
+        "test_rpc_commit_internal_close_v17_pg.py",
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

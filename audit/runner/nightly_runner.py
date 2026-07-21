@@ -13,13 +13,16 @@ re-engages and suspends/kills the whole process tree partway through. In
 point leaves ZERO transcript — exactly the empty cron.log signature observed.
 
 WHAT THIS WRAPPER ADDS (defense in depth):
-  1. WAKE LOCK — SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED
-     [|ES_AWAYMODE_REQUIRED]) held for the whole run so the machine cannot
-     sleep under it. This is `powercfg /requests`-visible (EXECUTION). This is
-     the PRIMARY fix for the observed death mode. (Chosen over
-     `powercfg /requestsoverride` because that needs an elevated one-time
-     config and is per-app-name, not per-run; the P/Invoke is scoped to the
-     process and self-clears on exit.)
+  1. WAKE LOCK — SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)
+     held on the LONG-LIVED main thread for the whole run so the host cannot
+     IDLE-sleep under it. This is `powercfg /requests`-visible (EXECUTION).
+     (Chosen over `powercfg /requestsoverride` because that needs an elevated
+     one-time config and is per-app-name, not per-run; the P/Invoke is scoped
+     to the process and self-clears on exit.) NOTE (07-20): this defeats only
+     the IDLE sleep timer. A Task-Scheduler WakeToRun launch runs in an
+     *unattended* session whose separate System-unattended-sleep-timeout
+     (SUB_SLEEP\\UNATTENDSLEEP) no user-mode call resets — that residual is an
+     operator-side power-plan setting, documented on WakeLock. See §wake lock.
   2. FRESH-CODE WORKSPACE — `git fetch --prune origin main` + a DEDICATED audit
      worktree forced to origin/main, so the audit reads the RUNNING code, not
      whatever stale SHA the operator checkout happens to sit at. The operator
@@ -296,57 +299,153 @@ class SingleInstanceLock:
 # ---------------------------------------------------------------------------
 # wake lock (Windows execution-state)
 # ---------------------------------------------------------------------------
-class WakeLock:
-    """Hold the machine awake for the duration of the run.
+# Typed wake-lock statuses (surfaced in the preflight manifest; NEVER swallowed).
+WAKE_ACQUIRED = "acquired"
+WAKE_FAILED = "failed"            # SetThreadExecutionState returned 0
+WAKE_ERROR = "error"             # the ctypes call raised
+WAKE_NOOP_NON_WINDOWS = "noop_non_windows"
+WAKE_UNINITIALIZED = "uninitialized"
 
-    On Windows: SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-    [| ES_AWAYMODE_REQUIRED]). ES_CONTINUOUS makes the request persist until
-    cleared; ES_SYSTEM_REQUIRED forbids system sleep; ES_AWAYMODE_REQUIRED (best
-    effort) keeps it running through connected-standby where supported. On any
-    other platform this is a logged no-op (CI/tests).
+
+class WakeLock:
+    """Hold the host in the full working state for the WHOLE child run.
+
+    Mechanism (Windows): ``SetThreadExecutionState(ES_CONTINUOUS |
+    ES_SYSTEM_REQUIRED)`` on ENTER, reset to ``ES_CONTINUOUS`` alone on EXIT.
+    ``ES_CONTINUOUS`` makes the request persist until cleared; ``ES_SYSTEM_REQUIRED``
+    forbids the *idle* system-sleep transition. On any non-Windows platform this
+    is a logged no-op (CI/tests).
+
+    THREAD DISCIPLINE (the 07-20 lesson): the execution-state request is
+    **per-thread** and ``ES_CONTINUOUS`` clears the instant the setting thread
+    exits (or re-calls without ``ES_CONTINUOUS``). This context is therefore
+    entered on the runner's LONG-LIVED main thread, which then blocks inside
+    ``spawn_and_monitor`` (``proc.wait``) for the entire child run — the setting
+    thread never exits under the lock. It is acquired BEFORE the child spawn and
+    released in the ``with``-block's ``__exit__`` on EVERY exit path (success,
+    exception, timeout-driven terminate, KeyboardInterrupt).
+
+    WHY ``ES_AWAYMODE_REQUIRED`` WAS REMOVED (07-20): away mode is a *pseudo*
+    sleep — the system appears asleep and may suspend work rather than staying in
+    the full working state we need for a headless audit; it is unsupported on
+    non-media SKUs (this host has no S0 low-power-idle, ``powercfg /a``), and its
+    ``res == 0`` retry added a fragile branch for no benefit. ``ES_SYSTEM_REQUIRED``
+    is the correct "stay fully awake" request. ``ES_DISPLAY_REQUIRED`` is NOT set:
+    the run is headless, waking the panel is unnecessary.
+
+    RESIDUAL (NOT-PROVEN, OPERATOR-SIDE — this is NOT a code gap): a host woken by
+    a Task-Scheduler ``WakeToRun`` trigger runs in an *unattended* session, and
+    Windows applies the SEPARATE *System unattended sleep timeout*
+    (``SUB_SLEEP\\UNATTENDSLEEP``, hidden, default ~2 min). That timer is NOT the
+    idle timer and is NOT reset by ``SetThreadExecutionState`` — no user-mode call
+    defeats it. On this host the idle *Sleep-after* is already ``Never`` on AC yet
+    the 07-20 run still died ~2 min in, which points squarely at UNATTENDSLEEP.
+    Defeating it is an OS setting
+    (``powercfg /SETACVALUEINDEX SCHEME_CURRENT SUB_SLEEP UNATTENDSLEEP 0`` and the
+    DC index) that this runner deliberately does NOT mutate (no global power-plan
+    changes). See the PR body.
+
+    ACQUIRE FAILURE IS TYPED AND VISIBLE: ``acquired`` / ``status`` / ``detail``
+    are set and a loud line is logged; the runner surfaces them in the preflight
+    manifest ``wake_lock`` block. The run is NOT aborted on failure — running
+    without the lock while the completion contract + dead-man catch any killed run
+    beats not running at all — but the failure is never silently ignored.
+
+    Testability: ``set_execution_state`` (a ``(flags:int) -> int`` callable, 0 ==
+    failure) and ``platform`` are injectable so the Windows path can be driven
+    with a fake API on Linux CI without touching real ctypes.
     """
 
     ES_CONTINUOUS = 0x80000000
     ES_SYSTEM_REQUIRED = 0x00000001
-    ES_AWAYMODE_REQUIRED = 0x00000040
+    ACQUIRE_FLAGS = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    RELEASE_FLAGS = ES_CONTINUOUS
 
-    def __init__(self, log: Optional[Callable[[str], None]] = None) -> None:
+    def __init__(
+        self,
+        log: Optional[Callable[[str], None]] = None,
+        *,
+        set_execution_state: Optional[Callable[[int], int]] = None,
+        platform: Optional[str] = None,
+    ) -> None:
         self._log = log or (lambda _m: None)
-        self._active = False
+        self._platform = platform if platform is not None else sys.platform
+        self._set_execution_state = set_execution_state  # injectable seam (tests)
+        self.acquired = False
+        self.status = WAKE_UNINITIALIZED
+        self.mechanism = "SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)"
+        self.detail: Optional[str] = None
+
+    def _resolve_api(self) -> Callable[[int], int]:
+        if self._set_execution_state is not None:
+            return self._set_execution_state
+        import ctypes  # noqa: PLC0415 — Windows-only, deferred to call time
+
+        return ctypes.windll.kernel32.SetThreadExecutionState
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Manifest-friendly snapshot — the durable, operator-visible surface."""
+        return {
+            "acquired": self.acquired,
+            "status": self.status,
+            "mechanism": self.mechanism,
+            "detail": self.detail,
+            "note": (
+                "Held on the long-lived main runner thread for the whole child "
+                "run; prevents IDLE system sleep only. The unattended-wake sleep "
+                "timeout (SUB_SLEEP\\UNATTENDSLEEP) is a separate OS timer no "
+                "user-mode call resets — an operator-side prerequisite, not a "
+                "code gap."
+            ),
+        }
 
     def __enter__(self) -> "WakeLock":
-        if sys.platform != "win32":
-            self._log("wake lock: non-Windows platform — no-op (host cannot sleep in tests/CI)")
+        if self._platform != "win32":
+            self.status = WAKE_NOOP_NON_WINDOWS
+            self._log("wake lock: non-Windows platform — no-op (host cannot idle-sleep in tests/CI)")
             return self
         try:
-            import ctypes  # noqa: PLC0415 — Windows-only, deferred to call time
-
-            kernel32 = ctypes.windll.kernel32
-            flags = self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED | self.ES_AWAYMODE_REQUIRED
-            res = kernel32.SetThreadExecutionState(flags)
-            if res == 0:
-                # AWAYMODE unsupported on this SKU — retry without it.
-                flags = self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED
-                res = kernel32.SetThreadExecutionState(flags)
-            self._active = res != 0
-            if self._active:
-                self._log("wake lock ACQUIRED (SetThreadExecutionState; powercfg /requests-visible)")
+            res = self._resolve_api()(self.ACQUIRE_FLAGS)
+            self.acquired = res != 0
+            if self.acquired:
+                self.status = WAKE_ACQUIRED
+                self._log(
+                    "wake lock ACQUIRED (SetThreadExecutionState ES_CONTINUOUS|"
+                    "ES_SYSTEM_REQUIRED on the main runner thread; powercfg "
+                    "/requests-visible as EXECUTION)"
+                )
             else:
-                self._log("wake lock FAILED to acquire (SetThreadExecutionState returned 0)")
+                self.status = WAKE_FAILED
+                self.detail = "SetThreadExecutionState returned 0 (request not honored)"
+                self._log(
+                    "WAKE LOCK ACQUIRE FAILED — SetThreadExecutionState returned 0; "
+                    "the host may sleep and kill this run mid-flight (NOT swallowed; "
+                    "surfaced in the preflight manifest wake_lock block)"
+                )
         except Exception as exc:  # noqa: BLE001
-            self._log(f"wake lock error (continuing without it): {exc}")
+            self.acquired = False
+            self.status = WAKE_ERROR
+            self.detail = f"{type(exc).__name__}: {exc}"
+            self._log(
+                f"WAKE LOCK ACQUIRE ERROR — {type(exc).__name__}: {exc}; the host may "
+                "sleep and kill this run mid-flight (NOT swallowed; surfaced in the "
+                "preflight manifest wake_lock block)"
+            )
         return self
 
-    def __exit__(self, *exc: Any) -> None:
-        if sys.platform != "win32" or not self._active:
-            return
+    def __exit__(self, *exc: Any) -> bool:
+        # Reset to ES_CONTINUOUS alone on EVERY exit path — but only if we
+        # actually acquired (nothing to release otherwise). Returns False so an
+        # in-flight exception (timeout terminate / KeyboardInterrupt) is never
+        # suppressed.
+        if self._platform != "win32" or not self.acquired:
+            return False
         try:
-            import ctypes  # noqa: PLC0415
-
-            ctypes.windll.kernel32.SetThreadExecutionState(self.ES_CONTINUOUS)
-            self._log("wake lock released")
+            self._resolve_api()(self.RELEASE_FLAGS)
+            self._log("wake lock released (reset to ES_CONTINUOUS)")
         except Exception as exc:  # noqa: BLE001
             self._log(f"wake lock release error: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -974,6 +1073,10 @@ class NightlyRunner:
         self._end_marker_written = False
         self._marker_failures: List[Dict[str, Any]] = []
         self._fatal_error: Optional[str] = None
+        # The active wake lock (bound at run() time). Read into the preflight
+        # manifest so an acquire failure is durable + operator-visible, never
+        # a mere log line. None until the with-block is entered.
+        self._wake: Any = None
         # Serializes marker-sink appends: the heartbeat thread and the main
         # thread both emit through _emit_raw; independent `ab` handles race and
         # interleave (Windows has no atomic-append guarantee across handles).
@@ -1053,6 +1156,21 @@ class NightlyRunner:
         res = self._emit_raw(f"==== {_utc_ts()} {MARK_END} (exit {exit_code}) {self._run_tag()} ====")
         self._end_marker_written = res.ok
 
+    def _wake_lock_status(self) -> Dict[str, Any]:
+        """Typed wake-lock snapshot for the preflight manifest. getattr-guarded so
+        a test stub context manager (no wake attributes) degrades to 'unknown'
+        rather than raising."""
+        wl = self._wake
+        to_dict = getattr(wl, "to_dict", None)
+        if callable(to_dict):
+            return to_dict()
+        return {
+            "acquired": bool(getattr(wl, "acquired", False)),
+            "status": getattr(wl, "status", "unknown"),
+            "mechanism": getattr(wl, "mechanism", "unknown"),
+            "detail": getattr(wl, "detail", None),
+        }
+
     # -- phases -----------------------------------------------------------
     def _preflight(self) -> Tuple[WorkspaceInfo, Dict[str, Any]]:
         # 1. Fresh-code worktree
@@ -1096,6 +1214,9 @@ class NightlyRunner:
             "run_date": self.cfg.report_date,
             "selftest": self.cfg.selftest,
             "workspace": workspace.to_dict(),
+            # Durable, operator-visible wake-lock outcome. An acquire FAILURE is
+            # surfaced here (typed) rather than swallowed as a bare log line.
+            "wake_lock": self._wake_lock_status(),
             "broker_snapshot": {
                 "present": self._snapshot_worktree().exists(),
                 "path": self.cfg.settings_subpath.rsplit("/", 1)[0] + "/broker-snapshot.json",
@@ -1228,7 +1349,17 @@ class NightlyRunner:
             )
 
             wake_factory = self.cfg.wake_lock_factory or (lambda log: WakeLock(log))
-            with wake_factory(self._log):
+            with wake_factory(self._log) as wl:
+                # Bind BEFORE preflight so the manifest records the wake-lock
+                # outcome, and the child spawns strictly AFTER the acquire.
+                self._wake = wl
+                if getattr(wl, "status", None) in (WAKE_FAILED, WAKE_ERROR):
+                    self._log(
+                        "WAKE LOCK NOT HELD — the host may sleep and kill this run "
+                        f"mid-flight; status={getattr(wl, 'status', 'unknown')} "
+                        f"detail={getattr(wl, 'detail', None)} "
+                        "(surfaced in the preflight manifest wake_lock block)"
+                    )
                 workspace, _manifest = self._preflight()
 
                 child_env = self.cfg.child_env if self.cfg.child_env is not None else os.environ.copy()

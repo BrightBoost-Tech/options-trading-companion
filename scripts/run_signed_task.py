@@ -385,12 +385,22 @@ CHICAGO_TZ = ZoneInfo("America/Chicago")
 
 
 def is_market_day() -> bool:
-    """Check if today is a market day (Mon-Fri, excluding holidays)."""
+    """Coarse client-side WEEKDAY pre-filter (Mon-Fri, Chicago time).
+
+    This is a weekend guard ONLY — it does NOT exclude market holidays. Holiday
+    (and half-day) awareness is deliberately DELEGATED to the authoritative
+    server-side market-session guard (the broker-calendar ``MarketSession`` the
+    task endpoints consult), which fails closed on a calendar outage. Duplicating
+    a holiday calendar here would be a second, drift-prone source of truth; this
+    CLI gate only avoids obviously-pointless weekend enqueues, and the server
+    makes the real market-open decision on the trading day.
+    """
     now_chicago = datetime.now(CHICAGO_TZ)
     # Monday=0, Sunday=6
     if now_chicago.weekday() >= 5:
         return False
-    # TODO: Add holiday calendar check if needed
+    # No holiday check here BY DESIGN — see docstring: the server-side
+    # market-session guard is the authoritative holiday/half-day gate.
     return True
 
 

@@ -197,14 +197,17 @@ def oi_observation_max_age_days() -> int:
 
     Env override ``OI_OBSERVATION_MAX_AGE_DAYS`` (non-negative int); else the
     default. Bad/negative values fall back to the default (never crash the
-    observe-only recorder).
+    observe-only recorder). ``OverflowError`` is caught alongside
+    TypeError/ValueError because ``int(float("inf"))`` / ``int(float("1e400"))``
+    raise OverflowError (not ValueError) — a huge/overflowing knob value falls
+    back to the default rather than crashing.
     """
     raw = os.getenv("OI_OBSERVATION_MAX_AGE_DAYS", "").strip()
     if not raw:
         return DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
     try:
         v = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
     return v if v >= 0 else DEFAULT_OI_OBSERVATION_MAX_AGE_DAYS
 
@@ -309,7 +312,9 @@ def oi_floor_candidates() -> List[int]:
             continue
         try:
             v = int(float(tok))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError guards a huge/overflowing token: int(float("inf"))
+            # raises OverflowError, not ValueError — drop the token, never crash.
             continue
         if v >= 0:
             out.append(v)
@@ -328,7 +333,9 @@ def coerce_oi(value: Any) -> Optional[int]:
         return None
     try:
         v = int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # A non-finite value (inf via int(float("inf"))) raises OverflowError,
+        # not ValueError — treat it as typed UNAVAILABLE, never crash.
         return None
     return v if v >= 0 else None
 

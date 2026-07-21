@@ -58,34 +58,70 @@ Invariants (see the activation packet for the full proof)
    / unreadable) the effective tier state seeds from the RAW cliff
    (equity ≥ $1,000 → small, else micro) — the current behavior, never a
    loosened default.
+6. **Never-loosen (v2 conservative band):** ``proposed envelope_pct ≤ raw
+   envelope_pct`` for ALL equity — the taper lies entirely below the
+   boundary and lands on small's 0.85 exactly at $1,000, so the ``verdict``
+   is only ever ``would_tighten`` / ``identical`` / ``not_applicable``,
+   NEVER ``would_loosen``. (v1's symmetric [$900, $1,100] band had a bounded
+   would_loosen region just above $1,000, ≤ micro's own 0.90 cap; v2 removes
+   it — this is the ratified reconciliation, owner-packet-6.)
+7. **Version-partitioned evidence:** v1 and v2 are different band/state
+   semantics; every emitted payload carries ``engine_version`` and a reader
+   MUST partition observe aggregates by it (never pool a [$900, $1,100]-era
+   sample with a [$800, $1,000]-era sample). See ``ENGINE_VERSION`` below
+   and ``scripts/analytics/monday_evidence_reader.build_tier_taper``.
 
-Band derivation
----------------
-Band = ±``BAND_PCT`` around the $1,000 boundary → [$900, $1,100]. Rationale:
-10% of $1,000 ($100) is roughly one good-day / bad-day P&L swing for an
-account at this size, so an equity oscillation contained within a single
-session's range should not see a discontinuous change in deployable risk.
-The band is a module constant so the activation review (and any future
-owner decision, e.g. a conservative band positioned entirely below $1,000)
-is a one-line, version-bumped change.
+Band derivation (v2 — conservative never-loosen, ratified 2026-07-19)
+--------------------------------------------------------------------
+Band = **[$800, $1,000]** — ``BAND_PCT`` (0.20) is the reach BELOW the
+$1,000 boundary (``BAND_LO = BOUNDARY·(1 − BAND_PCT) = 800``,
+``BAND_HI = BOUNDARY = 1,000``). The taper lies ENTIRELY below the boundary
+and lands exactly on small's 0.85 at $1,000, so it is **proposed ≤ current
+everywhere** (no ``would_loosen`` region — invariant 6). The owner ratified
+this conservative band (owner-packet-6, owner-ratifications-2026-07-19 §6)
+over the original symmetric ±10% [$900, $1,100] band (v1, #1283): in
+learning-mode (correctness > deployment) the symmetric band's small
+above-boundary ``would_loosen`` region buys nothing the owner asked for.
+The endpoints move 720 → 850 (``D(800)=800·0.90=720`` up to
+``D(1,000)=1,000·0.85=850``) and stay monotone (§ invariant 1). The band
+edges are module constants so any future owner decision is a one-line,
+version-bumped change — this v2 IS that change relative to v1.
 
-Hysteresis derivation
----------------------
+Hysteresis derivation (v2 — one-sided gap below the boundary)
+-------------------------------------------------------------
 The continuous fraction taper is a pure function of equity (no path
 dependence → no dollar thrash). Only the DISCRETE tier state (concurrent
-count 1↔4, tier label) is hysteretic, via a Schmitt trigger with an inner
-band [$950, $1,050] (±``HYST_PCT``). Once ``small`` is entered (equity ≥
-$1,050) it holds until equity ≤ $950; once ``micro`` it holds until equity
-≥ $1,050. The inner band sits strictly inside the taper band
-($950 > $900, $1,050 < $1,100) so outside the taper band the discrete
-state matches the raw cliff exactly (invariant 3).
+count 1↔4, tier label) is hysteretic, via a Schmitt trigger. For the
+conservative band the boundary IS the band's upper edge, so the Schmitt
+gap is ONE-SIDED and sits entirely BELOW the boundary — inner band
+[$950, $1,000] (``HYST_LO = BOUNDARY·(1 − HYST_PCT) = 950``,
+``HYST_HI = BOUNDARY = 1,000``):
+
+  • From ``micro``: flip to ``small`` only at equity ≥ $1,000 — the taper
+    NEVER enters the looser ``small`` state (4 concurrent) BELOW the raw
+    cliff, so hysteresis introduces no downward-risk loosening (invariant
+    6). This is stricter than v1, whose symmetric gap flipped at $1,050.
+  • From ``small``: hold ``small`` down to $950 before reverting to
+    ``micro`` — a $50 (5%) anti-thrash gap so a $999↔$1,001 oscillation
+    flips at most ONCE (on first crossing of the $1,000 cliff) then STICKS,
+    never thrashing 1↔4 each wobble.
+
+``HYST_LO`` ($950) sits strictly inside the taper band ($950 > $800); the
+upper edge equals the boundary ($1,000 = ``BAND_HI``), so OUTSIDE the taper
+band the discrete state matches the raw cliff exactly (invariant 3) — from
+any prior, equity < $800 resolves ``micro`` and equity ≥ $1,000 resolves
+``small``.
 
 Versioning
 ----------
 ``ENGINE_VERSION`` bumps on ANY change to a band edge, hysteresis edge,
 tier anchor, or the interpolation/state-machine semantics. The emitted
 payload always carries it so a downstream reader can attribute an
-observation to an exact engine build.
+observation to an exact engine build. **v2 (this build) moved the band from
+the symmetric [$900, $1,100] to the conservative [$800, $1,000] and moved
+``HYST_HI`` from $1,050 to the boundary $1,000 — a band + state-machine
+semantics change. Evidence gathered under v1 and v2 MUST NOT be pooled;
+partition every observe aggregate by ``engine_version`` (invariant 7).**
 """
 from __future__ import annotations
 
@@ -93,22 +129,32 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional
 
 # ── Version ──────────────────────────────────────────────────────────────
-ENGINE_VERSION = "tier_taper.v1"
+# v2: conservative never-loosen band [800, 1000] (ratified 2026-07-19,
+# owner-packet-6); v1 was the symmetric [900, 1100]. Bumped because the band
+# edges AND the hysteresis upper edge moved — v1/v2 evidence must not pool
+# (invariant 7).
+ENGINE_VERSION = "tier_taper.v2"
 
 # ── Boundary + band (see "Band derivation") ──────────────────────────────
+# Conservative band: the taper lies ENTIRELY below the boundary and lands on
+# small's 0.85 exactly at $1,000, so proposed <= current everywhere (no
+# would_loosen). BAND_PCT is the reach BELOW the boundary; the upper edge IS
+# the boundary (not boundary·(1+pct) as in the v1 symmetric band).
 BOUNDARY = 1000.0            # the micro↔small cliff in get_tier
-BAND_PCT = 0.10             # ±10% of the boundary
-BAND_LO = BOUNDARY * (1.0 - BAND_PCT)   # 900.0
-BAND_HI = BOUNDARY * (1.0 + BAND_PCT)   # 1100.0
+BAND_PCT = 0.20             # below-boundary reach as a fraction of BOUNDARY
+BAND_LO = BOUNDARY * (1.0 - BAND_PCT)   # 800.0  (fully micro at/below)
+BAND_HI = BOUNDARY                      # 1000.0 (== boundary; taper top edge)
 
 # Upper cliff (micro↔small is Lane D's scope; the standard cliff at $5,000
 # is explicitly OUT of scope and the taper never activates there).
 STANDARD_BOUNDARY = 5000.0
 
 # ── Hysteresis inner band (see "Hysteresis derivation") ──────────────────
-HYST_PCT = 0.05
+# One-sided gap BELOW the boundary: flip to small only at the cliff (>=
+# BOUNDARY, never loosens below it), hold small down to HYST_LO (anti-thrash).
+HYST_PCT = 0.05             # below-boundary hysteresis reach
 HYST_LO = BOUNDARY * (1.0 - HYST_PCT)   # 950.0
-HYST_HI = BOUNDARY * (1.0 + HYST_PCT)   # 1050.0
+HYST_HI = BOUNDARY                      # 1000.0 (== boundary; one-sided gap)
 
 # ── Tier anchors ─────────────────────────────────────────────────────────
 # MICRO: a single position consumes the whole 0.90×regime slot (RBE micro
@@ -231,12 +277,16 @@ def resolve_tier_state(equity: float,
     Returns ``(effective_state, decision)`` where ``effective_state`` is
     ``"micro"`` or ``"small"`` and ``decision`` names the transition taken.
 
-    State machine (inner band [HYST_LO, HYST_HI] = [$950, $1,050]):
+    State machine (v2 one-sided gap [HYST_LO, HYST_HI] = [$950, $1,000],
+    HYST_HI == BOUNDARY):
 
-        previous ``micro`` : flip to ``small`` iff equity ≥ HYST_HI,
-                             else hold ``micro``.
-        previous ``small`` : flip to ``micro`` iff equity ≤ HYST_LO,
-                             else hold ``small``.
+        previous ``micro`` : flip to ``small`` iff equity ≥ HYST_HI
+                             ($1,000 = the raw cliff — never enters the
+                             looser small state below it), else hold
+                             ``micro``.
+        previous ``small`` : flip to ``micro`` iff equity ≤ HYST_LO ($950 —
+                             a $50 anti-thrash gap below the cliff), else
+                             hold ``small``.
         no/invalid prior   : FAIL-CLOSED seed from the raw cliff
                              (equity ≥ BOUNDARY → small, else micro).
 

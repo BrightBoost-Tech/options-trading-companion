@@ -10,7 +10,15 @@ Usage:
     python scripts/run_signed_task.py suggestions_open --user-id <uuid>
     python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
     python scripts/run_signed_task.py suggestions_open --force-rerun
+    python scripts/run_signed_task.py suggestions_open --wait
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
+
+--wait (optional): after the 202 enqueue, follow the returned job_run_id to a
+    terminal state via the signed read-only status route (scope
+    'tasks:job_status') and print its REDACTED reason. Tune with --poll-seconds
+    (default 3) and --max-wait (default 120). Exit 0 only on 'succeeded';
+    nonzero on partial/failed/cancelled/timeout. Without --wait the CLI returns
+    immediately after the 202 (unchanged).
 
 Environment Variables:
     TASK_SIGNING_SECRET  - Single signing secret (simple setup)
@@ -47,6 +55,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -77,6 +86,24 @@ VERBOSE_RESPONSE_TASKS = {
 
 # Fields that should be redacted if present in response (safety measure)
 REDACT_FIELDS = {"secret", "password", "token", "api_key", "apikey", "credential"}
+
+# --- Optional --wait / status-follow (surfaces the eventual terminal reason) ---
+# Terminal job_runs states surfaced by --wait. Mirrors the server-side
+# TERMINAL_STATES set in packages/quantum/public_tasks.py. Only 'succeeded'
+# is a zero exit; every other terminal (and a timeout) exits nonzero.
+WAIT_TERMINAL_STATES = frozenset({
+    "succeeded",
+    "partial",
+    "failed",
+    "failed_retryable",
+    "dead_lettered",
+    "cancelled",
+})
+
+# Scope + path of the signed read-only status route. Signed with the SAME
+# secret used to enqueue — a read is strictly less privileged than an enqueue.
+JOB_STATUS_SCOPE = "tasks:job_status"
+JOB_STATUS_PATH_TEMPLATE = "/tasks/status/{job_run_id}"
 
 
 def _should_print_response_json(task_name: str) -> bool:
@@ -847,6 +874,140 @@ def build_payload(
     return payload
 
 
+def _print_status_summary(data: dict) -> None:
+    """Print a compact, REDACTED job-status summary.
+
+    ``data`` MUST already be passed through ``_redact_sensitive_fields`` by
+    the caller. Prints only curated, non-secret fields (status, duration,
+    counts, typed reason) — never a raw payload, error internals, or signing
+    headers.
+    """
+    status = data.get("status")
+    duration_ms = data.get("duration_ms")
+    reason = data.get("reason")
+    cancelled_detail = data.get("cancelled_detail")
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    counts = result.get("counts")
+    errors_count = result.get("errors_count")
+
+    print(f"[WAIT] Final status: {status}")
+    if duration_ms is not None:
+        print(f"[WAIT] Duration: {duration_ms} ms")
+    if counts:
+        print(f"[WAIT] Counts: {json.dumps(counts, sort_keys=True)}")
+    if errors_count:
+        print(f"[WAIT] Errors: {errors_count}")
+    if reason:
+        print(f"[WAIT] Reason: {sanitize_snippet(str(reason))}")
+    if cancelled_detail:
+        print(f"[WAIT] Detail: {sanitize_snippet(str(cancelled_detail))}")
+
+
+def _follow_job_status(
+    base_url: str,
+    job_run_id: str,
+    secret: str,
+    key_id: Optional[str],
+    poll_seconds: int = 3,
+    max_wait: int = 120,
+    timeout: int = 30,
+    sleep_fn=None,
+    monotonic_fn=None,
+) -> int:
+    """
+    Poll the signed read-only status route until the job reaches a terminal
+    state or ``max_wait`` seconds elapse.
+
+    PURE POLLING — this NEVER enqueues, retries, or mutates anything. Each
+    poll is an independently v4-signed GET (fresh ts + nonce) against
+    ``/tasks/status/{job_run_id}`` using the SAME secret the enqueue used.
+
+    Returns:
+        0  iff the terminal status is 'succeeded'.
+        1  for any other terminal state (partial / failed / failed_retryable /
+           dead_lettered / cancelled), a timeout, a 404 (unknown id), or a
+           status-route auth/HTTP/parse error.
+
+    Prints only a REDACTED summary (never secrets or signing headers).
+    """
+    sleep_fn = sleep_fn or time.sleep
+    monotonic_fn = monotonic_fn or time.monotonic
+
+    poll_seconds = max(1, int(poll_seconds))
+    max_wait = max(0, int(max_wait))
+    poll_timeout = max(5, min(30, int(timeout)))
+
+    path = JOB_STATUS_PATH_TEMPLATE.format(job_run_id=job_run_id)
+    url = f"{base_url.rstrip('/')}{path}"
+    start = monotonic_fn()
+
+    print(
+        f"[WAIT] Following job_run {job_run_id} "
+        f"(poll={poll_seconds}s, max_wait={max_wait}s)"
+    )
+
+    last_status = None
+    while True:
+        # Sign a GET with an empty body — the server signs over method + path +
+        # sha256(b"") + scope, so this verifies exactly like the enqueue POST.
+        headers = sign_task_request(
+            method="GET",
+            path=path,
+            body=b"",
+            scope=JOB_STATUS_SCOPE,
+            secret=secret,
+            key_id=key_id,
+        )
+        headers.update(_origin_headers())
+
+        try:
+            response = requests.get(url, headers=headers, timeout=poll_timeout)
+        except requests.exceptions.RequestException as e:
+            # Transient network error — keep trying until the deadline.
+            print(f"[WAIT] Status poll error: {e}")
+            if (monotonic_fn() - start) >= max_wait:
+                print(f"[WAIT] Timed out after {max_wait}s (last error above)")
+                return 1
+            sleep_fn(poll_seconds)
+            continue
+
+        if response.status_code == 404:
+            print(f"[WAIT] job_run {job_run_id} not found (404)")
+            return 1
+        if response.status_code in (401, 403):
+            print(
+                f"[WAIT] Status route auth failed ({response.status_code}) — "
+                f"scope '{JOB_STATUS_SCOPE}' may be unrecognized by the server"
+            )
+            return 1
+        if not (200 <= response.status_code < 300):
+            print(f"[WAIT] Status route HTTP {response.status_code}")
+            return 1
+
+        try:
+            data = _redact_sensitive_fields(response.json())
+        except Exception:
+            print("[WAIT] Status route returned non-JSON")
+            return 1
+
+        status = data.get("status")
+        if status != last_status:
+            print(f"[WAIT] status={status}")
+            last_status = status
+
+        if status in WAIT_TERMINAL_STATES:
+            _print_status_summary(data)
+            return 0 if status == "succeeded" else 1
+
+        # Not terminal yet — respect the deadline BEFORE sleeping again.
+        if (monotonic_fn() - start) >= max_wait:
+            print(f"[WAIT] Timed out after {max_wait}s; last status={status}")
+            _print_status_summary(data)
+            return 1
+
+        sleep_fn(poll_seconds)
+
+
 def run_task(
     task_name: str,
     user_id: Optional[str] = None,
@@ -860,6 +1021,9 @@ def run_task(
     scheduled_local_time: Optional[str] = None,
     expected_chicago_offset: Optional[str] = None,
     window_minutes: Optional[int] = None,
+    wait: bool = False,
+    poll_seconds: int = 3,
+    max_wait: int = 120,
 ) -> int:
     """
     Run a signed task request.
@@ -1016,6 +1180,25 @@ def run_task(
             # Return 1 for semantic errors, 0 for success
             if result_status in SEMANTIC_ERROR_STATUSES:
                 return 1
+
+            # --wait: follow the enqueued job to its terminal state. The
+            # default (wait=False) path below is BYTE-IDENTICAL to the prior
+            # behavior — it returns immediately after the 202, no polling.
+            if wait:
+                if job_run_id:
+                    return _follow_job_status(
+                        base_url=base_url,
+                        job_run_id=job_run_id,
+                        secret=secret,
+                        key_id=key_id,
+                        poll_seconds=poll_seconds,
+                        max_wait=max_wait,
+                        timeout=timeout,
+                    )
+                print(
+                    "[WAIT] No job_run_id in response; nothing to follow "
+                    "(synchronous task or idempotent skip)."
+                )
             return 0
         else:
             print(f"[ERROR] Request failed: {response.status_code}")
@@ -1068,6 +1251,8 @@ Examples:
     python scripts/run_signed_task.py paper_learning_ingest --force
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
     python scripts/run_signed_task.py suggestions_close --skip-time-gate
+    python scripts/run_signed_task.py paper_learning_ingest --user-id <uuid> --wait
+    python scripts/run_signed_task.py suggestions_open --wait --poll-seconds 5 --max-wait 300
 
 Environment Variables:
     TASK_SIGNING_SECRET  - Single signing secret
@@ -1148,6 +1333,31 @@ Environment Variables:
         help="Time gate window in minutes (default: 150).",
     )
     parser.add_argument(
+        "--wait",
+        action="store_true",
+        help=(
+            "After the 202 enqueue, follow the returned job_run_id to a "
+            "terminal state via the signed read-only status route and print "
+            "its redacted reason. Exit 0 only on 'succeeded'; nonzero on "
+            "partial/failed/cancelled/timeout. Default (omitted): return "
+            "immediately after the 202, unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=3,
+        metavar="SECONDS",
+        help="With --wait: seconds between status polls (default: 3).",
+    )
+    parser.add_argument(
+        "--max-wait",
+        type=int,
+        default=120,
+        metavar="SECONDS",
+        help="With --wait: max seconds to poll before timing out (default: 120).",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -1177,6 +1387,9 @@ Environment Variables:
         scheduled_local_time=args.scheduled_local_time,
         expected_chicago_offset=args.expected_chicago_offset,
         window_minutes=args.window_minutes,
+        wait=args.wait,
+        poll_seconds=args.poll_seconds,
+        max_wait=args.max_wait,
     )
 
 

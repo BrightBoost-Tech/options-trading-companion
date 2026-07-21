@@ -2185,6 +2185,26 @@ def _build_enriched_counts(
     }
 
 
+def _ctd_error_count(ctd) -> int:
+    """Genuine candidate-disposition WRITE failures for the cycle's
+    ``counts.errors`` channel.
+
+    A real write failure (table present, upsert errored) must surface into
+    ``counts.errors`` so the suggestions_open roll-up (#1199 / F-A9-8)
+    classifies the job PARTIAL — an observe-only writer still may not fail
+    SILENTLY (H9; §10 "a caught write exception must carry a typed stage to
+    the job result"). A missing-table typed no-op (``table_missing_noops``)
+    is the DESIGNED pre-migration state, NOT a failure, and is excluded — the
+    unapplied migration never partials the job. Pure; never raises.
+    """
+    if ctd is None:
+        return 0
+    try:
+        return int(getattr(ctd, "counters", {}).get("write_failures", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _legs_have_valid_nbbo_and_mid(legs: list) -> bool:
     """
     Check if all legs have valid NBBO and mid prices.
@@ -2736,6 +2756,16 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 cycle_date=datetime.now(timezone.utc).date().isoformat(),
             )
             _ctd.record_selected(candidates)
+            # Non-selected-alternate closure (funnel phase-2): every EMITTED
+            # scanner candidate that rank_and_select did NOT pick gets ONE
+            # durable ``rank_blocked`` final (selected=false), so every
+            # post-scanner candidate has exactly one honest terminal fate per
+            # cycle. `candidates` here is the full selected set (before the H7
+            # prefilter / allocator prune the selected set further — those
+            # deaths keep their own finals). OBSERVE-ONLY: this ADDS
+            # disposition rows only; it never touches `candidates`,
+            # `scout_results`, or any decision value (byte-identical output).
+            _ctd.record_not_selected(scout_results, candidates)
         except Exception as _ctd_err:
             logger.warning(
                 "[CANDIDATE_DISPOSITION] recorder init failed "
@@ -3056,6 +3086,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     "created": 0,
                     # Lane 4B writer telemetry
                     "candidate_disposition": _ctd.counters_dict() if _ctd is not None else None,
+                    # A genuine disposition write failure is a cycle error
+                    # (partial, never silently green — H9); a missing-table
+                    # no-op is excluded.
+                    "errors": _ctd_error_count(_ctd),
                 },
                 "cycle_metadata": _build_cycle_metadata(
                     exit_reason="no_candidates",
@@ -4206,10 +4240,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "candidates": len(candidates),
                 "created": 0,
                 # Lane 4B observability: selected-set fates are durable even
-                # on the zero-suggestion path (h7/allocator/sizing deaths).
+                # on the zero-suggestion path (h7/allocator/sizing deaths),
+                # as are the non-selected alternates (rank_blocked).
                 "candidate_disposition": (
                     _ctd.counters_dict() if _ctd is not None else None
                 ),
+                # A genuine disposition write failure -> partial (H9); a
+                # missing-table no-op is excluded.
+                "errors": _ctd_error_count(_ctd),
             },
             "cycle_metadata": _build_cycle_metadata(
                 exit_reason=_exit_reason,
@@ -4635,6 +4673,9 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "suggestion_insert_failures": len(_midday_insert_failures),
                 # Lane 4B writer telemetry
                 "candidate_disposition": _ctd.counters_dict() if _ctd is not None else None,
+                # A genuine disposition write failure -> partial (H9); a
+                # missing-table no-op is excluded.
+                "errors": _ctd_error_count(_ctd),
             },
             "cycle_metadata": _build_cycle_metadata(
                 # Happy path: exit_reason=None signals successful funnel

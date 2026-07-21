@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from packages.quantum.observability.canonical import canonical_json_bytes
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent, BACKGROUND_QUEUE
 from packages.quantum.jobs.job_runs import JobRunStore
+from packages.quantum.jobs.job_status_projection import project_job_status
 from packages.quantum.jobs.origin import resolve_request_origin
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
@@ -1549,4 +1550,52 @@ async def task_paper_mark_to_market(
         force_rerun=payload.force_rerun,
         origin=resolve_request_origin(request),
     )
+
+
+# =============================================================================
+# Signed read-only job-status lookup (UX: run_signed_task.py --wait)
+# =============================================================================
+
+
+@router.get("/status/{job_run_id}", status_code=200)
+@limiter.limit("60/minute")
+async def task_job_status(
+    request: Request,
+    job_run_id: str,
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:job_status")),
+):
+    """
+    Read-only terminal-state lookup for ONE job_run by id.
+
+    Auth: v4 HMAC signature with scope 'tasks:job_status' — the SAME signing
+    secret run_signed_task.py already uses to ENQUEUE. This surface is
+    strictly LESS privileged than every enqueue route above (read-only, a
+    single row, no mutation, no enqueue, no live-exec/go-live path) and adds
+    NO new credential path: the shared secret already lets a caller sign any
+    scope, so a dedicated read scope neither widens nor weakens auth.
+
+    Returns a curated, secret-free projection (see
+    ``jobs/job_status_projection.py``): status + terminal flag, timestamps,
+    duration, attempt, a typed reason, and an ALLOWLISTED result summary
+    (counts / reason / errors_count). It NEVER returns the raw ``payload``
+    (may carry user_id / origin), ``error`` internals, lock fields,
+    idempotency_key, or any signing material.
+
+    Powers ``run_signed_task.py --wait`` so an operator can follow an enqueued
+    job to its terminal reason instead of seeing "nothing came back" after the
+    202 enqueue. Deliberately NOT in the ``TASKS`` map / scheduler — it is a
+    status read, never a scheduled job.
+    """
+    # Malformed id → 404 (never a 500 from a bad uuid cast; never leak).
+    try:
+        uuid_mod.UUID(str(job_run_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Job run not found")
+
+    store = JobRunStore()
+    row = store.get_job(str(job_run_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Job run not found")
+
+    return project_job_status(row)
 

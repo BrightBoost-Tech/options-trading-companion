@@ -40,8 +40,18 @@ exact cause):
     writer-enforced (strict raise in dev/test, fail-soft + counted in
     production; owner decision 2026-07-18). Parent
     ``WHERE disposition='h7_dropped'`` queries are unchanged.
-  - ``rank_blocked`` covers verdict blocks: edge_below_minimum (raev<=-999)
-    and the redundant policy final gate.
+  - ``rank_blocked`` is the RANKER/selection-seam family. It covers two
+    distinguishable-by-``detail`` sub-cases: (a) a SELECTED candidate whose
+    ranker VERDICT blocked it — ``detail.reason='edge_below_minimum'``
+    (raev<=-999) or the redundant policy final gate, ``selected=true``; and
+    (b) an EMITTED candidate the ranker did NOT select at all —
+    ``rank_and_select`` out-ranked it past the tier cap / risk budget / the
+    score floor — ``detail.reason='not_selected_by_ranker'``,
+    ``detail.selection_stage='rank_and_select'``, ``selected=false`` (the
+    non-selected-alternate class; see :meth:`record_not_selected`). The exact
+    per-alternate break reason is NOT reconstructable at this seam
+    (``rank_and_select`` returns only the survivors), so it is honestly NOT
+    fabricated — only known facts (score, emitted/selected counts) are stamped.
   - ``persisted_blocked`` / ``persisted_executable`` are the persist-seam
     outcomes; a persist that yielded no row is ``persisted_blocked`` with
     ``detail.insert_failed=true`` (the row is LOST — the flag is the truth).
@@ -369,7 +379,9 @@ class CandidateDispositionRecorder:
                 )
             return False
 
-    def _base_row(self, ident: Dict[str, Any]) -> Dict[str, Any]:
+    def _base_row(
+        self, ident: Dict[str, Any], selected: bool = True
+    ) -> Dict[str, Any]:
         return {
             "cycle_id": self.cycle_id,
             "cycle_date": self.cycle_date,
@@ -380,7 +392,12 @@ class CandidateDispositionRecorder:
             "candidate_fingerprint": ident["fingerprint"],
             "attempt": ident["attempt"],
             "is_primary": ident["is_primary"],
-            "selected": True,
+            # True for the rank_and_select-SELECTED set (record_selected /
+            # every selected-seam record_final); False only for the
+            # non-selected alternates (record_not_selected). The scanner
+            # emitted them as concrete opportunities but the ranker did not
+            # pick them — the honest flag, not a default.
+            "selected": selected,
             "code_sha": self._code_sha,
         }
 
@@ -477,6 +494,7 @@ class CandidateDispositionRecorder:
         symbol: Optional[str] = None,
         strategy: Optional[str] = None,
         fingerprint: Optional[str] = None,
+        selected: bool = True,
     ) -> None:
         """Record THE final disposition for a candidate's current attempt.
 
@@ -485,6 +503,9 @@ class CandidateDispositionRecorder:
           its suggestion_id at the persist seam).
         - Finalizing a DIFFERENT attempt of the same identity demotes the
           old final to ``superseded_retry`` first (supersede, not violation).
+        - ``selected`` defaults True (every selected-seam call is byte-
+          identical to before). :meth:`record_not_selected` passes False for
+          the non-selected alternates.
         """
         try:
             if disposition not in DISPOSITIONS:
@@ -559,7 +580,7 @@ class CandidateDispositionRecorder:
             if prior is not None and prior != attempt:
                 self._demote_other_finals(fp, attempt)
 
-            row = self._base_row(ident)
+            row = self._base_row(ident, selected=selected)
             row["is_final"] = True
             row["disposition"] = disposition
             row["finalized_at"] = _utcnow_iso()
@@ -588,6 +609,80 @@ class CandidateDispositionRecorder:
             logger.warning(
                 "[CANDIDATE_DISPOSITION] record_final failed (non-fatal): %s",
                 exc,
+            )
+
+    def record_not_selected(
+        self,
+        emitted: List[Dict[str, Any]],
+        selected: List[Dict[str, Any]],
+        *,
+        stage: str = "rank_and_select",
+        reason: str = "not_selected_by_ranker",
+    ) -> None:
+        """Record ONE ``rank_blocked`` final for every EMITTED scanner
+        candidate that the ranker did NOT select.
+
+        Closes the non-selected-alternate gap: ``rank_and_select`` returns only
+        its survivors, so the scanner-emitted candidates it passed over
+        (out-ranked past the tier cap / risk budget / the score floor) had NO
+        durable terminal fate — only the selected primaries were recorded. This
+        writes their honest final at the SELECTION seam (``selected=false``),
+        so ``emitted == selected_finals + not_selected_finals`` per cycle.
+
+        HONESTY (contract §4 — known facts only):
+          - identity: candidate fingerprint + symbol + strategy + cycle_id
+            (all from the candidate / recorder, never fabricated);
+          - ``detail.selection_stage`` / ``detail.reason``: the seam + a typed
+            reason (NOT the exact per-alternate break cause — that is not
+            reconstructable here; ``rank_and_select`` returns no per-drop
+            reason, so inventing capacity-vs-budget-vs-floor would be a lie);
+          - ``detail.score``: stamped ONLY when the candidate actually carries
+            one (the ranker sorts on it); typed-unavailable otherwise;
+          - ``detail.emitted_count`` / ``detail.selected_count``: the cycle's
+            known funnel widths;
+          - affordability / round-trip BP are DELIBERATELY absent — a
+            non-selected alternate never reached H7 / sizing, so those were
+            never computed (typed-unavailable = not stamped, never zeroed).
+
+        Membership is by object identity (``id``): ``rank_and_select`` appends
+        the SAME candidate dicts it selected, so a survivor is excluded even
+        when a structurally-identical alternate shares its fingerprint.
+
+        Fail-soft: never raises into the cycle; per-candidate failures are
+        counted by :meth:`record_final` (write_failures) and surfaced in the
+        cycle result.
+        """
+        try:
+            emitted_list = list(emitted or [])
+            if not emitted_list or self._disabled:
+                return
+            selected_ids = {id(c) for c in (selected or [])}
+            selected_count = len(selected_ids)
+            emitted_count = len(emitted_list)
+            for cand in emitted_list:
+                if id(cand) in selected_ids:
+                    continue
+                detail: Dict[str, Any] = {
+                    "reason": reason,
+                    "selection_stage": stage,
+                    "emitted_count": emitted_count,
+                    "selected_count": selected_count,
+                }
+                score = (cand or {}).get("score")
+                if isinstance(score, (int, float)):
+                    detail["score"] = score
+                else:
+                    # Typed-unavailable: the ranker's sort key was absent on
+                    # this candidate; never fabricate a numeric rank/score.
+                    detail["score_unavailable"] = True
+                self.record_final(
+                    cand, "rank_blocked", detail=detail, selected=False,
+                )
+        except Exception as exc:  # absolute fail-soft
+            self.counters["write_failures"] += 1
+            logger.warning(
+                "[CANDIDATE_DISPOSITION] record_not_selected failed "
+                "(non-fatal): %s", exc,
             )
 
     def counters_dict(self) -> Dict[str, Any]:

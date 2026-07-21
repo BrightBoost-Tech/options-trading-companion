@@ -1,0 +1,49 @@
+-- =============================================================================
+-- fleet_reconciliation_receipts — REVOKE the residual PG17 MAINTAIN privilege
+-- =============================================================================
+-- Follows 20260721010500_harden_fleet_receipt_privileges.sql (Lane B) and MUST
+-- sort strictly after it. NOT APPLIED BY THIS PR. Additive privilege change only;
+-- NO data change, NO row read/written, NO fleet/policy/activation effect.
+-- Requires 20260721010500_harden_fleet_receipt_privileges.sql applied first.
+--
+-- WHY (read-only DB adjudication, 2026-07-21, PostgreSQL 17.6): Lane B revoked
+-- TRUNCATE/UPDATE/DELETE/REFERENCES/TRIGGER from service_role but NOT PG17's
+-- newer MAINTAIN privilege (VACUUM/ANALYZE/CLUSTER/REINDEX/REFRESH MATERIALIZED
+-- VIEW/LOCK TABLE). The schema-wide default ACL granted service_role ALL
+-- (arwdDxtm, INCLUDING m = MAINTAIN) at CREATE-TABLE time, so after Lane B
+-- service_role STILL held {SELECT, INSERT, MAINTAIN}, not the intended
+-- {SELECT, INSERT}. Verified against production:
+--     pg_class.relacl  = {postgres=arwdDxtm/postgres, service_role=arm/postgres}
+--     has_table_privilege('service_role', <tbl>, 'MAINTAIN') = true
+-- (information_schema.role_table_grants is MAINTAIN-BLIND — it reported
+-- "INSERT,SELECT" and hid the residual, which is exactly why the Lane-B grant
+-- test did not catch it.) Lane B's stated intent was EXACTLY {SELECT, INSERT};
+-- MAINTAIN is the residual this migration removes.
+--
+-- WHAT MAINTAIN CAN / CANNOT DO: it lets the grantee run VACUUM/ANALYZE/CLUSTER/
+-- REINDEX/REFRESH MATERIALIZED VIEW/LOCK TABLE. It CANNOT erase or mutate rows,
+-- so this is least-privilege defence-in-depth, not a data-loss hole like the
+-- TRUNCATE grant Lane B closed. service_role has no operational need for it.
+--
+-- SAFETY: postgres/owner KEEPS everything (arwdDxtm) — migrations, autovacuum,
+-- and DB maintenance are unaffected; ONLY service_role loses MAINTAIN. The
+-- writer RPC (INSERT + idempotency SELECT), the activation RPC's existence
+-- SELECT (SELECT count(*) ... FROM fleet_reconciliation_receipts), and the
+-- immutable-receipt triggers (row BEFORE UPDATE OR DELETE + statement BEFORE
+-- TRUNCATE) all keep working — none needs MAINTAIN.
+--
+-- DEFAULT-PRIVILEGE DURABILITY: this migration deliberately does NOT touch the
+-- schema-wide ALTER DEFAULT PRIVILEGES. ADP applies ONLY at object-CREATION time
+-- and never re-applies to an already-created table, so this plain REVOKE on the
+-- existing table is durable — nothing silently re-grants MAINTAIN to THIS table.
+-- (The default ACL still grants ALL to FUTURE public tables; changing that is a
+-- separate, broader decision that would affect every future table + other
+-- migrations — out of scope and unnecessary here.)
+-- =============================================================================
+
+-- Land service_role on EXACTLY {SELECT, INSERT}: drop the residual MAINTAIN.
+-- Idempotent: REVOKE of a not-held privilege is a no-op (NOTICE only).
+REVOKE MAINTAIN ON TABLE fleet_reconciliation_receipts FROM service_role;
+
+-- Re-assert the intended writer surface (idempotent; unchanged by the revoke).
+GRANT SELECT, INSERT ON TABLE fleet_reconciliation_receipts TO service_role;

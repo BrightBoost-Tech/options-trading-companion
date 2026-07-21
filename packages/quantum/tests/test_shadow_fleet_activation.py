@@ -123,14 +123,15 @@ class _FakeRpc:
 
 class FakeSupabase:
     def __init__(self, fleets=None, micro_accounts=None, orders=None,
-                 positions=None, registrations=None, fail_tables=(),
-                 rpc_handler=None):
+                 positions=None, registrations=None, receipts=None,
+                 fail_tables=(), rpc_handler=None):
         self.tables = {
             "shadow_fleets": list(fleets or []),
             "shadow_micro_accounts": list(micro_accounts or []),
             "paper_orders": list(orders or []),
             "paper_positions": list(positions or []),
             "policy_registrations": list(registrations or []),
+            "fleet_reconciliation_receipts": list(receipts or []),
         }
         self.fail_tables = set(fail_tables)
         self.rpc_handler = rpc_handler
@@ -220,6 +221,38 @@ def _approved_registry_rows(reg_map, epoch="small_tier_v1", status="approved"):
     ]
 
 
+# Deterministic 64-char content fingerprints for the two prerequisite receipts.
+_STALE_ORDER_RECEIPT_FP = "04317fc1" + "a" * 56
+_MANUAL_REVIEW_RECEIPT_FP = "5d5cd9fc" + "b" * 56
+
+
+def _reconciliation_receipts():
+    """A structurally-valid receipt bundle covering both REQUIRED_RECEIPT_KINDS
+    (scenario 5). STRUCTURE only — the RPC enforces EXISTENCE."""
+    return [
+        {"receipt_id": "recon:stale_order:small_tier_v1",
+         "receipt_kind": "stale_order",
+         "content_fingerprint": _STALE_ORDER_RECEIPT_FP},
+        {"receipt_id": "recon:manual_review:small_tier_v1",
+         "receipt_kind": "manual_review",
+         "content_fingerprint": _MANUAL_REVIEW_RECEIPT_FP},
+    ]
+
+
+def _receipt_rows(user=USER, epoch="small_tier_v1"):
+    """fleet_reconciliation_receipts rows matching _reconciliation_receipts()."""
+    return [
+        {"receipt_id": "recon:stale_order:small_tier_v1", "user_id": user,
+         "receipt_kind": "stale_order", "content_fingerprint": _STALE_ORDER_RECEIPT_FP,
+         "effective_epoch": epoch, "source_table": "paper_orders",
+         "source_row_id": "04317fc1", "source_alert_id": None},
+        {"receipt_id": "recon:manual_review:small_tier_v1", "user_id": user,
+         "receipt_kind": "manual_review", "content_fingerprint": _MANUAL_REVIEW_RECEIPT_FP,
+         "effective_epoch": epoch, "source_table": "paper_orders",
+         "source_row_id": "5d5cd9fc", "source_alert_id": None},
+    ]
+
+
 def _attestation():
     return {
         "stale_order_reconciliation_receipt": "risk_alerts:receipt-abc123",
@@ -230,6 +263,8 @@ def _attestation():
         # _registrations() and its fingerprint is the value the operator attests.
         "expected_binding_fingerprint": sfa.binding_manifest_fingerprint(
             _registrations()),
+        # Typed reconciliation-receipt bundle (scenario 5). Both required kinds.
+        "reconciliation_receipts": _reconciliation_receipts(),
     }
 
 

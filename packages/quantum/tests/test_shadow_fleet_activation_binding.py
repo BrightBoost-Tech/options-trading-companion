@@ -448,28 +448,38 @@ class TestPlanReportsFingerprint:
         assert plan["would_execute"] is False
 
 
-# ── Scenario 5 (receipt existence) — OPEN, but PINNED, never silent ──────────
+# ── Scenario 5 (receipt existence) — CLOSED as of 20260720150000 ─────────────
+# The OPEN pin is INVERTED: the Python layer now REQUIRES a typed receipt bundle
+# (structure), and the RPC enforces EXISTENCE against fleet_reconciliation_
+# receipts (proven by the SQL-mirror in test_shadow_fleet_receipt_binding.py).
 
-class TestScenario5ReceiptExistenceOpen:
+class TestScenario5ReceiptExistenceClosed:
     def test_receipt_reference_nonblank_is_enforced(self):
         att = _attestation()
         att["stale_order_reconciliation_receipt"] = "   "
         with pytest.raises(sfa.AttestationInvalid):
             sfa.validate_attestation(att)
 
-    def test_receipt_existence_is_not_yet_enforced_OPEN(self):
-        """SCENARIO 5 OPEN. There is no durable typed receipt contract, so a
-        syntactically-valid-but-FABRICATED (nonexistent) receipt reference is
-        currently ACCEPTED — only non-blank is checked. This test PINS that
-        gap so it is explicit, not silent. Closing it requires the operator to
-        adopt the contract designed in
-        docs/review/fleet-receipt-contract-prerequisite-2026-07-19.md; until
-        then, activation must not proceed on receipt existence alone."""
+    def test_missing_receipt_bundle_is_rejected(self):
+        """The legacy non-blank single field is NO LONGER sufficient — a typed
+        reconciliation_receipts bundle is required (structure), so a fabricated
+        single reference without the bundle fails at validate_attestation."""
         att = _attestation()
         att["stale_order_reconciliation_receipt"] = "risk_alerts:does-not-exist-999"
-        normalized = sfa.validate_attestation(att)  # accepted today (OPEN)
-        assert normalized["stale_order_reconciliation_receipt"] == \
-            "risk_alerts:does-not-exist-999"
+        del att["reconciliation_receipts"]
+        with pytest.raises(sfa.AttestationInvalid) as exc:
+            sfa.validate_attestation(att)
+        assert "reconciliation_receipts" in str(exc.value)
+
+    def test_bundle_must_cover_both_required_kinds(self):
+        att = _attestation()
+        # drop manual_review — only stale_order remains
+        att["reconciliation_receipts"] = [
+            r for r in att["reconciliation_receipts"]
+            if r["receipt_kind"] == "stale_order"]
+        with pytest.raises(sfa.AttestationInvalid) as exc:
+            sfa.validate_attestation(att)
+        assert "reconciliation_receipt_kind_missing" in str(exc.value)
 
 
 # ── Migration drift-lock: the RPC TEXT still carries every hardening clause ──

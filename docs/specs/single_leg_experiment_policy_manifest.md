@@ -60,7 +60,7 @@ Each experimental row binds the INDEPENDENT probability source — the v1 lognor
 
 | field | value |
 |---|---|
-| `source` | `packages.quantum.analytics.terminal_distribution.single_leg:evaluate_single_leg_from_inputs` |
+| `source` | `single_leg.evaluate_single_leg_from_inputs (⑤ observe-only challenger adapter; injected)` |
 | `adapter` | `single_leg_adapter` |
 | `adapter_version` | `single_leg@1.0.0` |
 | `model` | `lognormal_v1` |

@@ -54,13 +54,20 @@ single-leg-optin.md):
     derives server-side). The hashing FUNCTION is imported verbatim from
     fleet_policy_design so the two manifests can never drift on the rule.
   * INDEPENDENT terminal-distribution EV: each EXPERIMENTAL row binds the
-    independent probability source
-    ``packages.quantum.analytics.terminal_distribution.single_leg`` (the v1
-    lognormal challenger integrated over the exact one-leg payoff). The scalar
-    EV is a PER-CANDIDATE RUNTIME quantity computed by the INJECTED estimator at
-    scan time (H9: unpriceable inputs abstain via a typed ``Unavailable``); a
-    per-policy constant EV would be FABRICATED, so none is stored — the manifest
-    carries the typed-REQUIRED source/model/contract binding instead.
+    independent probability source — the ⑤ observe-only single-leg challenger
+    adapter ``single_leg.evaluate_single_leg_from_inputs`` (the v1 lognormal
+    challenger integrated over the exact one-leg payoff). The scalar EV is a
+    PER-CANDIDATE RUNTIME quantity computed by the INJECTED estimator at scan
+    time (H9: unpriceable inputs abstain via a typed abstention); a per-policy
+    constant EV would be FABRICATED, so none is stored — the manifest carries
+    the typed-REQUIRED source/model/contract binding instead.
+
+    OBSERVE-ONLY IMPORT LOCK: like the generator (single_leg_experiment.py),
+    this provenance module NEVER imports or names the analytics ⑤ package token
+    — the adapter is consumed only via dependency injection. The EV identity
+    literals below are referenced by name and drift-locked against the real
+    module in packages/quantum/tests/test_single_leg_experiment_design.py (the
+    test suite is exempt from the lock and imports the real constants).
 """
 
 from __future__ import annotations
@@ -89,15 +96,18 @@ from packages.quantum.strategies.single_leg_experiment import (
     OPT_IN_KEY,
 )
 
-# ── Independent EV source identity — IMPORTED from the real module ────────────
-from packages.quantum.analytics.terminal_distribution.challenger_lognormal import (
-    MODEL_NAME,
-)
-from packages.quantum.analytics.terminal_distribution.contract import CONTRACT_VERSION
-from packages.quantum.analytics.terminal_distribution.single_leg import (
-    SINGLE_LEG_SOURCE,
-    SINGLE_LEG_VERSION,
-)
+# ── Independent EV source identity — referenced by NAME ONLY (import lock) ────
+# The analytics ⑤ single-leg challenger adapter is OBSERVE-ONLY: no production
+# module may import OR name its package token (the ⑤ import-lock test enforces
+# the ABSENCE full-text). Like the generator, this module cites the adapter by
+# function/model/contract identity and never imports it — the real estimator is
+# consumed via dependency injection at runtime. These literals are drift-locked
+# against the real module in the (exempt) test suite.
+EV_ADAPTER = "single_leg_adapter"          # == single_leg.SINGLE_LEG_SOURCE
+EV_ADAPTER_VERSION = "single_leg@1.0.0"    # == single_leg.SINGLE_LEG_VERSION
+EV_MODEL = "lognormal_v1"                  # == challenger_lognormal.MODEL_NAME
+EV_CONTRACT_VERSION = "1.0.0"              # == contract.CONTRACT_VERSION
+EV_SOURCE = "single_leg.evaluate_single_leg_from_inputs (⑤ observe-only challenger adapter; injected)"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 EXPERIMENT_EPOCH = "single_leg_experiment_v1"   # distinct from FLEET_EPOCH
@@ -140,11 +150,11 @@ SINGLE_LEG_BLOCK: Dict[str, Any] = {
 # ── Independent terminal-distribution EV binding (typed-REQUIRED, experimental) ─
 # NO scalar EV: the number is per-candidate/runtime and would be fabricated here.
 TERMINAL_EV_BINDING: Dict[str, Any] = {
-    "source": "packages.quantum.analytics.terminal_distribution.single_leg:evaluate_single_leg_from_inputs",
-    "adapter": SINGLE_LEG_SOURCE,            # single_leg_adapter
-    "adapter_version": SINGLE_LEG_VERSION,   # single_leg@1.0.0
-    "model": MODEL_NAME,                     # lognormal_v1
-    "contract_version": CONTRACT_VERSION,    # 1.0.0
+    "source": EV_SOURCE,
+    "adapter": EV_ADAPTER,                    # single_leg_adapter
+    "adapter_version": EV_ADAPTER_VERSION,    # single_leg@1.0.0
+    "model": EV_MODEL,                        # lognormal_v1
+    "contract_version": EV_CONTRACT_VERSION,  # 1.0.0
     "basis": "raw",                          # no calibration in this layer
     "evaluation": "per_candidate_runtime",   # NOT a manifest constant
     "injection": "dependency_injected",      # generator never imports the estimator
@@ -317,7 +327,7 @@ def _experimental_row(arm_spec: Mapping[str, Any]) -> Dict[str, Any]:
         f"max_debit<=${SINGLE_LEG_BLOCK[KEY_MAX_DEBIT]:g}/contract). "
         f"{arm_spec['rationale']}. Matched control: {control_id} (differs on "
         f"axis A={AXIS_OPTIN} only). Independent EV: "
-        f"{SINGLE_LEG_SOURCE}@{MODEL_NAME}/{CONTRACT_VERSION} "
+        f"{EV_ADAPTER}@{EV_MODEL}/{EV_CONTRACT_VERSION} "
         f"(per-candidate runtime; H9-abstains; no scalar stored)."
     )
     return {

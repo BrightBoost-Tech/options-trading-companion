@@ -219,11 +219,37 @@ def test_experimental_carries_independent_terminal_ev(rows):
         for f in design.REQUIRED_TERMINAL_EV_FIELDS:
             assert ev.get(f) not in (None, ""), f
         assert ev["independent"] is True
-        # bound to the REAL independent probability source module
-        assert "terminal_distribution.single_leg" in ev["source"]
+        # bound to the single-leg challenger adapter by function identity
+        assert "evaluate_single_leg_from_inputs" in ev["source"]
         assert ev["model"] == "lognormal_v1"
         assert ev["basis"] == "raw"
         assert ev["evaluation"] == "per_candidate_runtime"
+
+
+def test_terminal_ev_identity_matches_real_module():
+    """Drift-lock: the design module cites the ⑤ adapter's identity by NAME
+    (it may not import the observe-only package — the import lock forbids it),
+    so this exempt test imports the real constants and asserts the literals
+    match. If the real adapter's model/contract/source moves, this fails."""
+    from packages.quantum.analytics.terminal_distribution.challenger_lognormal import (
+        MODEL_NAME,
+    )
+    from packages.quantum.analytics.terminal_distribution.contract import (
+        CONTRACT_VERSION,
+    )
+    from packages.quantum.analytics.terminal_distribution.single_leg import (
+        SINGLE_LEG_SOURCE,
+        SINGLE_LEG_VERSION,
+    )
+
+    assert design.EV_MODEL == MODEL_NAME
+    assert design.EV_CONTRACT_VERSION == CONTRACT_VERSION
+    assert design.EV_ADAPTER == SINGLE_LEG_SOURCE
+    assert design.EV_ADAPTER_VERSION == SINGLE_LEG_VERSION
+    # and those literals are exactly what the binding carries
+    assert design.TERMINAL_EV_BINDING["model"] == MODEL_NAME
+    assert design.TERMINAL_EV_BINDING["contract_version"] == CONTRACT_VERSION
+    assert design.TERMINAL_EV_BINDING["adapter"] == SINGLE_LEG_SOURCE
 
 
 def test_terminal_ev_carries_no_fabricated_scalar(rows):

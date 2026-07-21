@@ -527,7 +527,36 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
   fleet ACTIVATION gate (legacy-terminal attestation, 6 stale 04-09 rows) ·
   runtime falsifiers per ledger.
 
-## 2026-07-16 — POST-MERGE STANDING (authoritative; supersedes older queue text)
+## 2026-07-21 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+
+Current action surface after the 07-21 overnight priority sprint (final main `f28906ff`; ten merges +
+two applied receipt migrations — all shipped items are in `audit/ledger.md` 07-21 exclusion memory,
+not repeated here). A merged/applied path is not runtime proof; falsifiers live in the ledger.
+
+**Shipped this sprint → excluded (see ledger 07-21):** receipt WRITER RPC + privilege hardening
+(#1335, 2 migrations) · OI default-OFF (#1325) · alert dedup (#1332) · tier-taper dark band (#1334) ·
+E19 v3 (#1331) · url.txt guard (#1330) · single-leg draft manifest (#1336) · H7 ratification (#1333) ·
+hygiene + `.Jules` dedup (#1337) · runner assert/rotation (#1338) · 40 Palette dup closures.
+
+**Open / actionable (post-sprint):**
+- **Wire a production reconciliation PRODUCER to the receipt writer** — the writer
+  (`rpc_issue_fleet_reconciliation_receipt_v1`) exists but has no caller; a future reconciliation flow
+  must stamp a typed completed-marker on its user-scoped source row, then call the writer. This is the
+  next structural fleet step; **no receipt exists until then**, and activation stays fail-closed.
+- **Fleet ACTIVATION** — OWNER-gated + IRREVERSIBLE-in-place; now additionally requires a real receipt
+  (REQUIRED_KINDS {stale_order, manual_review}) that only the producer above can create. `ACTIVATE_FLEET=false`.
+- **Operator-gated / dark toggles (unchanged, do not flip without a named owner decision):** OI
+  enrichment enable · tier-taper live enable · E19 execution (blocked on fleet epoch + 8 source events)
+  · single-leg registry seed (2 draft rows; seed prompt in `docs/review/single-leg-seed-prompt-2026-07-21.md`)
+  · F-REDATE correction (recommended CORRECT_ALL_CONFIRMED_ROWS, not executed).
+- **Operator-checkout `.Jules` reconcile** — the case-collision phantom blocks the ff; reconcile locally,
+  then ff to main (also lands #1338's runner changes into the nightly runtime).
+- **F-RUNNER-BROKER-CREDS** — set ALPACA creds in the nightly runner shim env (2 consecutive broker-blind
+  nights); wiring fix.
+- **Small residuals:** fleet receipt-table `REVOKE MAINTAIN` micro-hardening · E19 §12 upstream module-hash
+  provenance governance lane.
+
+## 2026-07-16 — POST-MERGE STANDING (superseded by the 2026-07-21 block above; retained as history)
 
 This is the current action surface after PRs #1203–#1227. Older dated sections
 remain as audit history, but their priority lists are not actionable where they

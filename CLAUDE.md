@@ -642,9 +642,44 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   never forges activation); UPDATE/DELETE are trigger-blocked. Held: Lane B OI
   (#1325) DRAFT-only (needs a NEW provider call — Alpaca snapshots carry no OI);
   Lane E F-REDATE = operator packet, NOT executed. Nightly (Lane C) falsifier =
-  the natural 00:00 CT 2026-07-21 run — INCONCLUSIVE/PENDING and
-  operator-power-gated (the `SUB_SLEEP\UNATTENDSLEEP` timer, which
-  `SetThreadExecutionState` does NOT reset and the loop may NOT change).
+  the natural 00:00 CT 2026-07-21 run (RESOLVED — PASSED 07-21, see the 07-21
+  entry below; the wake lock held, no sleep-kill).
+  **07-21 OVERNIGHT PRIORITY SPRINT** (`docs/review/
+  overnight-priority-sprint-results-2026-07-21.md`; Fable orchestrator + ≤7
+  opus parallel build/review; serialized merges): TEN merges, final main
+  `f28906ff` — #1335 `8eeb11f4` **durable fleet reconciliation-receipt WRITER
+  RPC + receipt-table privilege hardening** (2 migrations APPLIED by exact name,
+  receipts `a5294476`/`7e882073`; NEVER REAPPLY): `20260721010000_rpc_issue_
+  fleet_reconciliation_receipt_v1` (server-gen id, source-marker-validated,
+  idempotent, `orphan_run` RAISEs — job_runs has no user_id; **issues NO receipt
+  at apply, no producer wired**) + `20260721010500_harden_fleet_receipt_
+  privileges` (REVOKE TRUNCATE/UPDATE/DELETE/REFERENCES/TRIGGER from service_role
+  → grants `arwdDxtm`→`arm`; + `BEFORE TRUNCATE` guard; **closes the receipt
+  erase hole**; activation-RPC SELECT non-regression proven; residual `MAINTAIN`
+  benign). · #1325 `f105377b` OI enrichment **default-OFF** (byte-identity + 0
+  provider calls; Alpaca `/v2/options/contracts`; no gate/rank/sizing consumer;
+  flag NOT enabled) · #1332 `4a0739f9` alert re-fire dedup on `(job_run_id,type,
+  detector_version,failure_signature)` (first emits, repeats suppressed-typed; no
+  historical-row mutation) · #1334 `dd551207` tier-taper **DARK** band
+  `[900,1100]`→ratified `[800,1000]` + engine v2 (live sizing byte-identical;
+  monotonic no-increase; version-partitioned evidence; NOT live) · #1331
+  `76c06c28` E19 **v3** re-freeze (min=8; v2 immutable `50e7e237…`; v3
+  `cfdcfc9e…`; execution BLOCKED) · #1330 `ada5ce96` url.txt `.gitignore` guard
+  (+ local archive+removal; NEVER-TRACKED, no rotation) · #1336 `609cae01`
+  single-leg **draft-only** policy manifest (no registry write; seed in
+  `seed-transactions/`) · #1333 `3eb85d7e` H7 taxonomy ratified (`h7_dropped`
+  parent + 5 subreasons; `sizing_outcome` separate; VERIFIED-CODE) · #1337
+  `ad495be3` hygiene (OI-overflow guard + docs + nonce text + `.Jules` dedup) ·
+  #1338 `f28906ff` runner (assert run_tag + marker-sink rotation; merged
+  post-nightly). **40 duplicate Palette PRs closed** (5 canonicals kept). **F-REDATE
+  packet = CORRECT_ALL_CONFIRMED_ROWS (20 rows), NOT executed.** **Natural nightly
+  PASSED** (`2026-07-21-25320-45cbf6d9`, report sha `4cc0d77d…`, contract met=True,
+  UP ping, operator checkout unchanged; broker-blind caveat = F-RUNNER-BROKER-CREDS).
+  Fleet UNCHANGED: 50 inactive / 0 active / 0 bindings / **0 receipts / 0
+  activations ever**; `ACTIVATE_FLEET=false`. Residual: the `.Jules`/`.jules`
+  case-collision phantom blocks the operator-checkout ff (morning reconcile).
+  Zero broker / fleet-activation / policy-registry / control / env / schedule /
+  data-correction writes.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -1085,7 +1120,17 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-20 post-close max-throughput run)
+## Current overnight standing (2026-07-16; updated through the 07-21 overnight priority sprint)
+
+- **07-21 sprint:** the durable reconciliation-receipt WRITER RPC + receipt-table
+  privilege hardening are LIVE (`20260721010000` + `20260721010500` applied) —
+  the receipt-issuance loop is now closed at both ends (immutable table +
+  fail-closed activation + a canonical server-side writer), but **NO producer is
+  wired, so 0 receipts exist and the fleet stays fail-closed / NOT activatable**.
+  The natural 00:00 CT nightly PASSED (wake lock held — the 07-20 power sleep-kill
+  is resolved). The next fleet step remains OWNER-gated activation, now additionally
+  gated on a real receipt existing (issued only by a future reconciliation producer
+  calling the writer). Everything else this sprint is dark/observe-only/draft/docs.
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch

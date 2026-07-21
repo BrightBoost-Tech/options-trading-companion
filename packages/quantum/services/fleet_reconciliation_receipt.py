@@ -39,6 +39,7 @@ Activation remains FORBIDDEN and operator-only; this module authorizes no flag,
 gate, threshold, stop, universe, cadence, or broker action.
 """
 
+import hashlib
 import logging
 from typing import Any, Dict, Mapping, Optional
 
@@ -217,3 +218,111 @@ def issue_reconciliation_receipt(
         (res.data or {}).get("receipt_id") if isinstance(res.data, Mapping) else res.data,
     )
     return res.data
+
+
+# ── Producer helpers: fingerprint + post-commit stamp-and-issue ──────────────
+# These are the ONLY additions a reconciliation producer needs. The producer
+# computes ONE durable content fingerprint (deterministic over the reconciliation
+# content) and passes it to BOTH the marker stamp AND the RPC — so they match by
+# construction. `stamp_and_issue_reconciliation_receipt` performs the two ordered
+# post-commit steps (a) stamp the typed marker on the source row's jsonb column
+# (non-destructive merge) then (b) call the writer RPC. It must be invoked ONLY
+# after the underlying reconciliation transaction has already committed.
+
+_FP_SEP = "\x1f"  # unit-separator; not a hex/text collision risk
+
+
+def reconciliation_content_fingerprint(*parts: Any) -> str:
+    """Deterministic FULL (64-char) sha256-hex fingerprint over the canonical
+    reconciliation content.
+
+    Stable across replays of the SAME reconciliation (so the writer RPC returns
+    the SAME receipt idempotently) and distinct across different reconciliations.
+    A ``None`` part is normalized to the empty string so a missing optional field
+    never silently collides with a present one (it changes the joined string).
+    The result is always >= 32 chars, satisfying the RPC's full-token floor.
+    """
+    canonical = _FP_SEP.join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def stamp_reconciliation_marker(
+    supabase,
+    *,
+    source_table: str,
+    source_row_id: str,
+    existing_jsonb: Optional[Mapping[str, Any]],
+    receipt_kind: str,
+    content_fingerprint: str,
+    effective_epoch: str,
+) -> Dict[str, Any]:
+    """Merge the canonical completed-reconciliation marker into the source row's
+    jsonb marker column (non-destructive) and persist it — step (a).
+
+    ``existing_jsonb`` is the source row's CURRENT marker-column value (so the
+    stamp is a merge, never a clobber of unrelated keys). Returns the merged jsonb
+    that was written. Raises ReceiptStructureInvalid for an unsupported table
+    (before any write). Call ONLY after the reconciliation transaction committed;
+    the writer RPC later PROVES this exact marker before minting a receipt.
+    """
+    tbl = str(source_table or "").strip()
+    if tbl not in SOURCE_MARKER_COLUMN:
+        raise ReceiptStructureInvalid(f"source_table_unsupported:{tbl}")
+    marker = build_reconciliation_marker(
+        receipt_kind=receipt_kind,
+        content_fingerprint=content_fingerprint,
+        effective_epoch=effective_epoch,
+    )
+    col = SOURCE_MARKER_COLUMN[tbl]
+    merged: Dict[str, Any] = dict(existing_jsonb or {})
+    merged[RECONCILIATION_MARKER_KEY] = marker[RECONCILIATION_MARKER_KEY]
+    supabase.table(tbl).update({col: merged}).eq("id", source_row_id).execute()
+    logger.info(
+        "[RECON_RECEIPT] marker stamped kind=%s table=%s row=%s",
+        receipt_kind, tbl, str(source_row_id)[:8],
+    )
+    return merged
+
+
+def stamp_and_issue_reconciliation_receipt(
+    supabase,
+    *,
+    source_table: str,
+    source_row_id: str,
+    existing_jsonb: Optional[Mapping[str, Any]],
+    user_id: str,
+    receipt_kind: str,
+    content_fingerprint: str,
+    effective_epoch: str,
+    actor_class: str,
+) -> Dict[str, Any]:
+    """Post-commit: (a) stamp the typed completed-reconciliation marker on the
+    source row, then (b) issue the durable receipt via the writer RPC — the single
+    ordered path a producer calls AFTER its reconciliation transaction committed.
+
+    The SAME ``content_fingerprint`` is used for the marker and the RPC, so they
+    match by construction. Raises ReceiptStructureInvalid on a structural problem
+    (the marker stamp is validated first; a bad structure raises before the RPC).
+    The RPC re-proves user scope + kind + epoch + full fingerprint SERVER-SIDE and
+    is the final authority; it is idempotent on exact replay and RAISEs a typed
+    conflict on a conflicting replay — both surface to the caller (H9-loud).
+    """
+    stamp_reconciliation_marker(
+        supabase,
+        source_table=source_table,
+        source_row_id=source_row_id,
+        existing_jsonb=existing_jsonb,
+        receipt_kind=receipt_kind,
+        content_fingerprint=content_fingerprint,
+        effective_epoch=effective_epoch,
+    )
+    return issue_reconciliation_receipt(
+        supabase,
+        user_id=user_id,
+        receipt_kind=receipt_kind,
+        effective_epoch=effective_epoch,
+        content_fingerprint=content_fingerprint,
+        actor_class=actor_class,
+        source_table=source_table,
+        source_row_id=source_row_id,
+    )

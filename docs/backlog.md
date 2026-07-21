@@ -570,6 +570,32 @@ falsifiers remain in the ledger.
   failed fetch separately from an empty cohort; the served multiplier path is
   unchanged.
 
+#### 2026-07-20 post-close increment (see `audit/ledger.md` 07-20 entry + `docs/review/monday-post-close-max-throughput-results-2026-07-20.md`)
+
+- **Provider-guardrail secret redaction** — #1322 redacts secrets on the
+  retries-exhausted exception/log/alert path (the direct-path fix's missing twin).
+- **Signed-CLI `--wait` + job-status route** — #1324 adds a read-only
+  `GET /tasks/status/{id}` under a strictly-less-privileged `tasks:job_status`
+  scope; default behavior byte-identical.
+- **Atomic-close guard hardening** — #1323 (`20260720120000`, applied) fails
+  closed on non-finite `p_fill_mid_reference` (PG17 NaN-as-string) + explicit
+  `live_eligible` reject. Runtime falsifier = first natural internal close
+  (DEFERRED-SAMPLE, book flat).
+- **Nightly wake-lock hardening** — #1326 holds ES_CONTINUOUS|ES_SYSTEM_REQUIRED
+  on the long-lived thread; typed acquire-failure. ⚠ Runtime PASS is
+  operator-power-gated on `SUB_SLEEP\UNATTENDSLEEP` (loop may NOT change it);
+  the 00:00 CT nightly is the falsifier.
+- **Funnel non-selected-candidate dispositions** — #1327 gives the 6 alternates a
+  durable `rank_blocked`/`selected=false` final (observe-only, no migration,
+  byte-identity). Falsifier = next natural midday cycle disposition count.
+- **Fleet Option-A reconciliation-receipt contract** — #1328 (D1
+  `20260720140000` + D3 `20260720150000`, both applied). Activation now
+  fail-closed on receipt EXISTENCE (REQUIRED_KINDS {stale_order, manual_review}).
+  D2 backfill BLOCKED (`BLOCKED_RECEIPT_ID_NOT_DURABLE`, 0 rows). Fleet READY but
+  UNACTIVATED (`ACTIVATE_FLEET=false`); the durable receipt-WRITER (id + kind +
+  epoch + full fingerprint at reconciliation time) is the remaining open lane
+  before any real activation attestation can pass — operator-owned.
+
 ### Current independent draft lanes
 
 > **SUPERSEDED 2026-07-17: #1228 and #1229 are MERGED code, not drafts** (runtime

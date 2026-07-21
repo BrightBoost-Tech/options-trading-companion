@@ -605,6 +605,46 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   rejections, 0 suggestions/orders). When touching `market_session.py` /
   `alpaca_client.get_calendar`: the SDK yields naive-ET datetime bounds — keep
   the single parser authority, never re-narrow to a `'T'`-only check.
+  **07-20 POST-CLOSE MAX-THROUGHPUT run** (`docs/review/
+  monday-post-close-max-throughput-results-2026-07-20.md`; Fable orchestrator +
+  opus parallel build/review; merges serialized): six merges, final main
+  `e455ed9f` — #1322 provider-guardrail secret redaction (retries-exhausted
+  path) · #1324 signed-CLI `--wait` + read-only `GET /tasks/status/{id}`
+  (`tasks:job_status` scope) · #1323 `20260720120000` atomic-close guard
+  hardening (non-finite `p_fill_mid_reference` NaN/Inf guard + explicit
+  `live_eligible` reject; APPLIED by exact name) · #1326 `0d0c3baf` nightly
+  wake-lock hardening (ES_CONTINUOUS|ES_SYSTEM_REQUIRED on the long-lived thread;
+  typed acquire-failure) · #1327 `c1a02ab3` funnel durable terminal dispositions
+  for the 6 NON-SELECTED candidates (`rank_blocked`/`selected=false`,
+  observe-only, NO migration — value already in the applied CHECK; byte-identity
+  proven; the H9 fold now marks the midday job PARTIAL on ANY
+  candidate-disposition write failure) · #1328 `e455ed9f` fleet **Option-A
+  immutable reconciliation-receipt contract + activation binding**. **Two
+  migrations APPLIED by exact name (receipts `618b284f`/`f16670ee`; NEVER
+  REAPPLY):** D1 `20260720140000_fleet_reconciliation_receipts` (immutable typed
+  receipt table — append-only trigger blocks UPDATE/DELETE for ALL roles incl
+  service_role, service_role-only RLS, 0 rows) · D3
+  `20260720150000_bind_fleet_activation_to_receipts` (CREATE OR REPLACE
+  `rpc_shadow_fleet_activate`, **5-arg signature UNCHANGED**, adds scenario-5
+  receipt-EXISTENCE binding — every prior gate preserved verbatim, 1 overload
+  [4-arg re-dropped], REQUIRED_KINDS {stale_order, manual_review} both enforced,
+  fail-closed on the empty receipt table). **D2 backfill = NOT RUN**
+  (`BLOCKED_RECEIPT_ID_NOT_DURABLE` — the four 07-18 fingerprints carry no
+  durable typed receipt identity; H9, zero fabricated rows; artifact stays in
+  `supabase/backfills/`). **Fleet plan-activation DRY-RUN (READ-ONLY) PASS:**
+  binding fingerprint recomputes from pure DB truth to `1cd004b5…`, fleet
+  `pending_legacy_terminal` / **50 inactive / 0 active / 0 bound / 0 receipts**;
+  activation is now **fail-closed on empty receipts** (scenario-5 live,
+  unsatisfiable). `ACTIVATE_FLEET=false`; `shadow_fleet_activated` rows = 0 ever;
+  entries_paused untouched. ⚠ Residual (defense-in-depth, non-blocking):
+  `service_role` retains TRUNCATE on `fleet_reconciliation_receipts` via Supabase
+  blanket defaults — TRUNCATE only REMOVES receipts (strictly more fail-closed,
+  never forges activation); UPDATE/DELETE are trigger-blocked. Held: Lane B OI
+  (#1325) DRAFT-only (needs a NEW provider call — Alpaca snapshots carry no OI);
+  Lane E F-REDATE = operator packet, NOT executed. Nightly (Lane C) falsifier =
+  the natural 00:00 CT 2026-07-21 run — INCONCLUSIVE/PENDING and
+  operator-power-gated (the `SUB_SLEEP\UNATTENDSLEEP` timer, which
+  `SetThreadExecutionState` does NOT reset and the loop may NOT change).
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -1045,14 +1085,22 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-19 Sunday-implementation run)
+## Current overnight standing (2026-07-16; updated through the 07-20 post-close max-throughput run)
 
 - Main through #1227 contains the dormant small-tier fleet foundation, the
   calendar-stable prequential fixtures, and truthful calibration-report fetch
   semantics. Fleet schema applied 07-17 (`20260717052208`); the fleet
   RPC + dispositions + quote-provenance migrations applied 07-18; the
   `policy_registrations` migration + `h7_subreason_check` constraint applied
-  07-19. The seven activation blockers were RESOLVED 07-18 (weekend run) —
+  07-19; the fleet **reconciliation-receipt contract** (D1
+  `20260720140000_fleet_reconciliation_receipts` + activation-binding D3
+  `20260720150000_bind_fleet_activation_to_receipts`) applied 07-20 (#1328) —
+  activation is now additionally **fail-closed on receipt EXISTENCE** (empty
+  receipt table ⇒ every activation RAISEs `receipt_not_found`; REQUIRED_KINDS
+  {stale_order, manual_review}). The D2 receipt backfill was BLOCKED
+  (`BLOCKED_RECEIPT_ID_NOT_DURABLE`, 0 rows) and the 07-20 READ-ONLY dry-run
+  reconfirmed fleet 50 inactive / 0 active / 0 bound / 0 receipts, binding fp
+  `1cd004b5…`, `ACTIVATE_FLEET=false`. The seven activation blockers were RESOLVED 07-18 (weekend run) —
   the legacy-terminal boundary is clean. **07-19: the fleet is now PROVISIONED
   INACTIVE** — fleet `b8b1ea1f…` status `pending_legacy_terminal`, 50 inactive
   `$2,000` slots / 50 `shadow_only` portfolios / 0 policy bindings, and **50

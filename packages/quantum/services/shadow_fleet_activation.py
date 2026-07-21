@@ -112,7 +112,24 @@ ATTESTATION_REQUIRED_KEYS = (
     "legacy_terminal_verified_at",
     "attested_by",
     "expected_binding_fingerprint",
+    "reconciliation_receipts",
 )
+
+# ── Reconciliation-receipt bundle (scenario 5; mirrors migration 20260720150000)
+# The activation attestation carries a typed bundle of receipt references. The
+# Python layer validates STRUCTURE only; EXISTENCE is enforced server-side by the
+# activation RPC (the final authority) against fleet_reconciliation_receipts —
+# never fabricated here.
+RECONCILIATION_RECEIPT_KINDS = frozenset(
+    {"stale_order", "manual_review", "orphan_run"})
+# Both documented activation prerequisites must be referenced AND validated
+# (the stale-order reconciliation + the seventh-row manual-review adjudication).
+# The orphan-run reconciliation is job_runs hygiene, not an order/position
+# terminal-boundary prerequisite, so it is NOT required (validated if listed).
+REQUIRED_RECEIPT_KINDS = ("stale_order", "manual_review")
+# Full content fingerprint floor — mirrors the D1 CHECK (a truncated display
+# prefix can never pose as the full token).
+MIN_CONTENT_FINGERPRINT_LEN = 32
 
 
 # ── Binding-manifest canonical serialization (client↔SQL, ONE definition) ────
@@ -268,19 +285,65 @@ def _require_idempotency_key(idempotency_key: Optional[str]) -> str:
 
 # ── Attestation validation (never defaulted) ────────────────────────────────
 
+def _validate_reconciliation_receipts(bundle: Any) -> List[Dict[str, str]]:
+    """Validate the typed reconciliation-receipt bundle (scenario 5) STRUCTURE.
+
+    EXISTENCE is enforced server-side by the activation RPC (the final
+    authority) against fleet_reconciliation_receipts — this never queries the DB
+    and never fabricates a receipt. Requires a non-empty list of
+    ``{receipt_id, receipt_kind, content_fingerprint}`` objects, a kind in the
+    typed allowlist, a FULL (>= 32-char) content fingerprint, and that BOTH
+    REQUIRED_RECEIPT_KINDS are referenced (the second prerequisite is never
+    silently dropped). Returns the normalized list; raises AttestationInvalid.
+    """
+    if not isinstance(bundle, (list, tuple)) or not bundle:
+        raise AttestationInvalid("attestation_missing_reconciliation_receipts")
+    normalized: List[Dict[str, str]] = []
+    kinds = set()
+    for elem in bundle:
+        if not isinstance(elem, Mapping):
+            raise AttestationInvalid("reconciliation_receipt_malformed")
+        rid = str(elem.get("receipt_id") or "").strip()
+        kind = str(elem.get("receipt_kind") or "").strip()
+        fingerprint = str(elem.get("content_fingerprint") or "").strip().lower()
+        if not rid or not kind or not fingerprint:
+            raise AttestationInvalid("reconciliation_receipt_malformed")
+        if kind not in RECONCILIATION_RECEIPT_KINDS:
+            raise AttestationInvalid(f"reconciliation_receipt_bad_kind:{kind}")
+        if len(fingerprint) < MIN_CONTENT_FINGERPRINT_LEN:
+            raise AttestationInvalid(
+                "reconciliation_receipt_fingerprint_not_full")
+        normalized.append({
+            "receipt_id": rid,
+            "receipt_kind": kind,
+            "content_fingerprint": fingerprint,
+        })
+        kinds.add(kind)
+    missing = [k for k in REQUIRED_RECEIPT_KINDS if k not in kinds]
+    if missing:
+        raise AttestationInvalid(
+            "reconciliation_receipt_kind_missing:" + ",".join(missing))
+    return normalized
+
+
 def validate_attestation(attestation: Any) -> Dict[str, Any]:
     """Validate the operator attestation; raise AttestationInvalid otherwise.
 
     Required keys:
       * stale_order_reconciliation_receipt — non-blank reference to the
-        reconciliation receipt for the stale legacy orders. NOTE (scenario 5):
-        only NON-BLANK is checked; existence is not validated (no durable typed
-        receipt contract yet — see the prerequisite packet). OPEN by design.
+        reconciliation receipt for the stale legacy orders (PRESERVED as a
+        belt-and-suspenders non-blank check; receipt EXISTENCE is now enforced
+        via the typed bundle below + the RPC, scenario 5 CLOSED).
       * legacy_terminal_verified_at — timezone-aware ISO-8601 timestamp;
         becomes shadow_fleets.legacy_terminal_verified_at verbatim.
       * attested_by — non-blank operator identity.
       * expected_binding_fingerprint — the operator-attested binding-manifest
         fingerprint (SHA-256 hex). The RPC re-derives and must match it.
+      * reconciliation_receipts — a typed bundle of
+        {receipt_id, receipt_kind, content_fingerprint} references. STRUCTURE is
+        validated here; the RPC enforces EXISTENCE against
+        fleet_reconciliation_receipts (correct user/epoch/kind/fingerprint) and
+        that REQUIRED_RECEIPT_KINDS are covered.
     """
     if not isinstance(attestation, Mapping):
         raise AttestationInvalid("attestation_payload_required")
@@ -307,11 +370,14 @@ def validate_attestation(attestation: Any) -> Dict[str, Any]:
     if not SHA256_HEX.match(fingerprint):
         raise AttestationInvalid(
             "attestation_expected_binding_fingerprint_must_be_sha256_hex")
+    receipts = _validate_reconciliation_receipts(
+        attestation.get("reconciliation_receipts"))
     return {
         "stale_order_reconciliation_receipt": receipt,
         "legacy_terminal_verified_at": parsed.isoformat(),
         "attested_by": attested_by,
         "expected_binding_fingerprint": fingerprint,
+        "reconciliation_receipts": receipts,
     }
 
 
@@ -770,6 +836,19 @@ def plan_activation(
         ).strip().lower()
         binding_fingerprint_matches = bool(supplied) and supplied == derived_fingerprint
 
+    # Reconciliation-receipt bundle (scenario 5): STRUCTURE reported here;
+    # EXISTENCE is enforced in-RPC against fleet_reconciliation_receipts.
+    attested_receipts: List[Dict[str, Any]] = []
+    if isinstance(attestation, Mapping):
+        raw_bundle = attestation.get("reconciliation_receipts")
+        if isinstance(raw_bundle, (list, tuple)):
+            attested_receipts = [dict(r) for r in raw_bundle
+                                 if isinstance(r, Mapping)]
+    attested_receipt_kinds = sorted({
+        str(r.get("receipt_kind") or "").strip()
+        for r in attested_receipts if str(r.get("receipt_kind") or "").strip()
+    })
+
     return {
         "mode": "dry_run",
         "step": "activate",
@@ -779,6 +858,9 @@ def plan_activation(
         "attestation_error": attestation_error,
         "derived_binding_fingerprint": derived_fingerprint,
         "binding_fingerprint_matches": binding_fingerprint_matches,
+        "reconciliation_receipts_attested": len(attested_receipts),
+        "reconciliation_receipt_kinds": attested_receipt_kinds,
+        "required_receipt_kinds": list(REQUIRED_RECEIPT_KINDS),
         "would_execute": (
             readiness.outcome == READY_TO_ACTIVATE
             and attestation_valid
@@ -792,6 +874,8 @@ def plan_activation(
             "legacy_terminal_verified_at": "from_attestation_only",
             "binding_rule": "server_derived_order_by_policy_registration_id_asc",
             "expected_binding_fingerprint": derived_fingerprint,
+            "reconciliation_receipt_existence": (
+                "enforced_in_rpc_against_fleet_reconciliation_receipts"),
             "slots_to_activate": MICRO_ACCOUNT_COUNT,
         },
         "receipt_spec": build_receipt_spec("activate", user_id, idempotency_key),

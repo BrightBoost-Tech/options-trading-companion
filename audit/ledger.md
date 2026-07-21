@@ -4,6 +4,49 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-20 — POST-CLOSE MAX-THROUGHPUT ORCHESTRATOR (fable + opus parallel; serialized merges) · status:shipped
+
+Full record: `docs/review/monday-post-close-max-throughput-results-2026-07-20.md`. Six serialized
+merges, final main `e455ed9f`; each got an adversarial opus review + CI-green + 4-service
+deploy-verify + safety checkpoint. #1322 provider-guardrail secret redaction (retries-exhausted
+path) · #1324 signed-CLI `--wait` + read-only `GET /tasks/status/{id}` (`tasks:job_status` scope,
+strictly less-privileged) · #1323 `20260720120000` atomic-close guard hardening (non-finite
+`p_fill_mid_reference` NaN/Inf + explicit `live_eligible` reject; APPLIED) · #1326 `0d0c3baf`
+nightly wake-lock hardening (ES_CONTINUOUS|ES_SYSTEM_REQUIRED on the long-lived thread) · #1327
+`c1a02ab3` funnel durable dispositions for the 6 non-selected candidates (`rank_blocked`/
+`selected=false`, observe-only, NO migration, byte-identity proven; the CI-red `test_cycle_
+metadata_writer.py` failures were a brittle 2000-char source-proximity window, widened
+2000→2300/2500→2700, NOT a behavioral regression; the H9 fold now partials the midday job on ANY
+ctd write failure) · #1328 `e455ed9f` fleet **Option-A immutable reconciliation-receipt contract +
+activation binding** (two opus PASS). **APPLIED by exact name (receipts `618b284f`/`f16670ee`;
+NEVER REAPPLY):** D1 `20260720140000_fleet_reconciliation_receipts` (append-only trigger blocks
+UPDATE/DELETE for ALL roles, service_role-only RLS, 0 rows) · D3 `20260720150000_bind_fleet_
+activation_to_receipts` (CREATE OR REPLACE `rpc_shadow_fleet_activate`, 5-arg sig UNCHANGED, +
+scenario-5 receipt-existence binding, every prior gate verbatim, 1 overload, REQUIRED_KINDS
+{stale_order, manual_review}, fail-closed on empty receipts). **D2 backfill NOT RUN**
+(`BLOCKED_RECEIPT_ID_NOT_DURABLE` — 4 fingerprints lack durable typed receipt identity; 0 fabricated
+rows; artifact in `supabase/backfills/`). **READ-ONLY dry-run PASS:** binding fp `1cd004b5…`, fleet
+50 inactive / 0 active / 0 bound / 0 receipts, `ACTIVATE_FLEET=false`, `shadow_fleet_activated`=0
+ever. Held: Lane B OI (#1325) DRAFT-only (Alpaca snapshots carry no OI — needs a NEW provider call);
+Lane E F-REDATE operator packet, NOT executed. **Findings recorded (EXCLUDE from re-finding):**
+(OBS-1) the 6 open HIGH `job_succeeded_with_errors` = ONE 14:04Z `suggestions_open`
+`market_calendar_unavailable` blip (calendar row `open='2026-07-20 09:30:00'` parse) that
+self-resolved by 16:00Z — A10/#1229 territory, NOT from tonight's merges; (OBS-2)
+`fleet_reconciliation_receipts` service_role retains TRUNCATE via Supabase blanket defaults —
+defense-in-depth only (TRUNCATE only removes receipts → more fail-closed; UPDATE/DELETE
+trigger-blocked). **Zero broker / fleet-activation / policy-registry / control / env / schedule
+change; entries_paused untouched.**
+PENDING VERIFICATIONS (2026-07-20 → next session):
+- **#1327 alternate-disposition falsifier** — next natural midday cycle: `candidate_terminal_
+  dispositions` finals == scanner emitted count (selected finals + `rank_blocked` alternates,
+  `selected=false`). INCONCLUSIVE until that cycle.
+- **00:00 CT 2026-07-21 nightly** (Lane C #1305/#1326 falsifier) — PENDING; operator-power-gated on
+  the `SUB_SLEEP\UNATTENDSLEEP` timer (loop FORBIDDEN to change it). Sleep-kill ⇒ FAILED-on-power,
+  NOT a code regression. Grading runbook in the results doc.
+- **#1323 atomic internal-close** — 0 natural fires (book flat) = DEFERRED-SAMPLE; grade on the
+  first natural internal close.
+- **TCM v2 (#1289/#1299)** 0/15 accruing; **model-review (#1286)** not-triggered — both HONEST-EMPTY.
+
 ## 2026-07-20 — EMERGENCY MARKET-CALENDAR HOTFIX (fable + opus; mid-session, operator-authorized) · status:shipped
 
 Full record: `docs/review/calendar-space-datetime-hotfix-2026-07-20.md`. **Regression from Lane C

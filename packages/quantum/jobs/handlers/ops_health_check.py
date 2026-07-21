@@ -21,6 +21,9 @@ from packages.quantum.services.ops_health_service import (
     get_output_freshness,
     get_recent_failures,
     get_silent_job_failures,
+    find_prior_silent_failure_alert,
+    a4_failure_signature,
+    A4_DETECTOR_VERSION,
     get_suggestions_stats,
     get_integrity_stats,
     send_ops_alert,
@@ -527,31 +530,48 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 f"Silent failure: {job_name} (errors={error_count})"
             )
 
-            # CONDITION RE-EMIT DEDUP (2026-07-11): the SAME stale run re-detects
-            # every :07/:37 poll for the detector's ~24h lookback, writing a fresh
-            # (independently-egressed) row each time — the 4×/10-per-2-days class.
-            # Fingerprint by RUN_ID (not job_name) + a 24h cooldown (> lookback)
-            # so a given run alerts ONCE. Row-identity cross-owner dedup
-            # (egress_owner) already stops inline+relay double-send. This is a
-            # NOISE type only — the genuine safety trips (force_close /
-            # streak_breaker_* / force_close_failed) keep the shared cooldown.
-            _run_id = sf.get("run_id") or job_name
-            fingerprint = get_alert_fingerprint(
-                "job_succeeded_with_errors", {"run_id": _run_id}
+            # DURABLE RE-FIRE DEDUP (2026-07-20): the SAME succeeded/partial-
+            # with-errors run re-detects on every :07/:37 poll across the
+            # detector's ~24h lookback. The prior (2026-07-11) fingerprint
+            # cooldown read its sent-fingerprint list back out of only the last
+            # 5 ops_health_check runs (`should_suppress_alert` limit(5) ≈ 2.5h)
+            # — far shorter than the 24h re-detection window — so a given run
+            # re-emitted a fresh HIGH roughly every 3h (df3c56e9 fired
+            # 14:07/17:07/20:07Z on 2026-07-20 → the 6 open HIGHs). Key the emit
+            # instead on the DURABLE, append-only risk_alerts rows themselves:
+            # identity (run_id, alert_type, detector_version, failure_signature).
+            # The FIRST emit for an identity stands; a repeat is a TYPED
+            # suppressed_duplicate (no new HIGH row, no new egress); a
+            # materially changed failure signature OR a new detector_version
+            # re-emits. Historical rows (no version/signature field) are matched
+            # by deriving those from their own metadata — the known incident is
+            # suppressed with ZERO mutation of any existing row. Genuine safety
+            # trips (force_close / streak_breaker_* / force_close_failed) are a
+            # DIFFERENT alert_type and are entirely UNAFFECTED.
+            _run_id = sf.get("run_id")
+            _failure_signature = a4_failure_signature(job_name, error_count)
+            _prior = find_prior_silent_failure_alert(
+                client,
+                run_id=_run_id,
+                detector_version=A4_DETECTOR_VERSION,
+                failure_signature=_failure_signature,
             )
-            suppressed, last_sent = should_suppress_alert(
-                client, fingerprint, 1440
-            )
-            if suppressed:
+            if _prior is not None:
                 alerts_suppressed.append({
                     "type": f"job_succeeded_with_errors:{job_name}",
-                    "reason": "cooldown",
-                    "last_sent": last_sent,
+                    "reason": "duplicate",
+                    "run_id": _run_id,
+                    "detector_version": A4_DETECTOR_VERSION,
+                    "failure_signature": _failure_signature,
+                    "prior_alert_id": _prior.get("id"),
                 })
                 continue
 
             # alert() is the canonical primitive (never raises) and egresses
             # this high-severity allowlisted type via _maybe_egress_risk_alert.
+            # The identity fields are persisted into metadata so the NEXT poll's
+            # durable lookup matches on the explicit fields (and future rows
+            # never need the historical-derivation path).
             _alert(
                 client,
                 alert_type="job_succeeded_with_errors",
@@ -565,12 +585,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     "source": "ops_health_check",
                     "job_name": job_name,
                     "error_count": error_count,
-                    "run_id": sf.get("run_id"),
+                    "run_id": _run_id,
                     "finished_at": sf.get("finished_at"),
+                    "detector_version": A4_DETECTOR_VERSION,
+                    "failure_signature": _failure_signature,
                 },
             )
             alerts_sent.append(f"job_succeeded_with_errors:{job_name}")
-            alert_fingerprints.append(fingerprint)
 
         # ==============================================================
         # 3.7 Gap-2: rolling signal-accuracy telemetry (observe-only,

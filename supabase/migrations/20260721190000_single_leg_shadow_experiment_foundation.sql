@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS single_leg_shadow_attempts (
     )),
     reason_code text,
     detail text,
-    candidate_fingerprint text,
+    candidate_fingerprint text NOT NULL DEFAULT '',
     occ_symbol text,
     strike numeric,
     expiry date,
@@ -94,19 +94,9 @@ CREATE TABLE IF NOT EXISTS single_leg_shadow_attempts (
     provider text,
     known_at timestamptz,
     evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (run_id, policy_registration_id, symbol, stage, candidate_fingerprint)
 );
-
--- PostgreSQL NULLs are distinct in ordinary UNIQUE constraints.  Coalesce the
--- optional fingerprint so a typed rejection (no candidate) is still idempotent.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_single_leg_attempt_identity
-    ON single_leg_shadow_attempts (
-        run_id,
-        policy_registration_id,
-        symbol,
-        stage,
-        COALESCE(candidate_fingerprint, '')
-    );
 
 CREATE TABLE IF NOT EXISTS single_leg_shadow_lifecycle_events (
     event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

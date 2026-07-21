@@ -82,3 +82,12 @@ audit/.nightly-runner.lock
 audit/preflight-manifest.json
 audit/broker-snapshot.json
 audit/reports/selftest-*.md
+
+# Operator-local secret-at-rest files (DSN / connection-string / URL secrets) —
+# never committed. Added 2026-07-20 (chore/url-txt-ignore-guard): an untracked
+# `url.txt` (DSN-shaped secret) sat at the repo root matched by NO ignore rule,
+# one `git add` from being committed. History audit proved it was NEVER tracked.
+# Root-anchored so a legitimately-tracked file of the same name in a subdir is
+# unaffected; `*.dsn` guards connection-string files anywhere in the tree.
+/url.txt
+*.dsn

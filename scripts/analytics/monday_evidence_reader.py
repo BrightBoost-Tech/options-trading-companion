@@ -801,16 +801,29 @@ def build_scan_capture(raw: Any) -> SectionBuild:
 
 
 def build_tier_taper(raw: Any) -> SectionBuild:
+    # The taper engine version bump (tier_taper.v1 [900,1100] → v2 [800,1000])
+    # partitions the observe evidence: v1-era and v2-era samples have different
+    # band/state semantics and MUST NOT be pooled. This reader tags every
+    # observation with its engine_version and reports verdict tallies PER
+    # version (by_engine_version is authoritative); the top-level by_verdict is
+    # a pooled convenience only, valid solely when a single version is present.
     rows = [r for r in _rows(raw) if isinstance(r, Mapping)]
     verdicts: Dict[str, int] = {}
+    by_version: Dict[str, Dict[str, Any]] = {}
     parsed = []
     for r in rows:
         verdict = str(r.get("verdict") or "unknown")
+        version = str(r.get("engine_version") or "unknown")
         verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        bucket = by_version.setdefault(
+            version, {"n_observations": 0, "by_verdict": {}})
+        bucket["n_observations"] += 1
+        bucket["by_verdict"][verdict] = bucket["by_verdict"].get(verdict, 0) + 1
         cur = r.get("current") if isinstance(r.get("current"), Mapping) else None
         prop = r.get("proposed") if isinstance(r.get("proposed"), Mapping) else None
         diff = r.get("difference") if isinstance(r.get("difference"), Mapping) else None
         parsed.append({
+            "engine_version": version,
             "verdict": verdict,
             "effective_tier_state": r.get("effective_tier_state"),
             "raw_tier": r.get("raw_tier"),
@@ -819,13 +832,29 @@ def build_tier_taper(raw: Any) -> SectionBuild:
             "difference_envelope_pct": (diff or {}).get("envelope_pct"),
             "difference_per_trade_ceiling_pct": (diff or {}).get("per_trade_ceiling_pct"),
         })
-    summary = {"n_observations": len(rows), "by_verdict": dict(sorted(verdicts.items())),
+    by_engine_version = {
+        v: {"n_observations": by_version[v]["n_observations"],
+            "by_verdict": dict(sorted(by_version[v]["by_verdict"].items()))}
+        for v in sorted(by_version)
+    }
+    engine_versions = sorted(by_version)
+    summary = {"n_observations": len(rows),
+               "engine_versions": engine_versions,
+               "by_engine_version": by_engine_version,
+               "by_verdict": dict(sorted(verdicts.items())),
                "observations": parsed}
     is_empty = len(rows) == 0
-    lines = [f"- tier-taper observations (DARK, observe-only): **{len(rows)}**",
-             _counts_line("- by verdict", verdicts)]
+    lines = [f"- tier-taper observations (DARK, observe-only): **{len(rows)}**"]
+    if len(engine_versions) > 1:
+        lines.append("- ⚠ MULTIPLE engine versions present — reported "
+                     "separately; NEVER pooled (v1/v2 band semantics differ):")
+    for v in engine_versions:
+        bv = by_engine_version[v]
+        lines.append(_counts_line(f"  - `{v}` (n={bv['n_observations']}) verdicts",
+                                  bv["by_verdict"]))
     for o in parsed:
-        lines.append(f"  - verdict=`{o['verdict']}` tier `{o['current_tier']}`→`{o['proposed_tier']}` "
+        lines.append(f"  - [`{o['engine_version']}`] verdict=`{o['verdict']}` "
+                     f"tier `{o['current_tier']}`→`{o['proposed_tier']}` "
                      f"(effective=`{o['effective_tier_state']}`) "
                      f"Δenvelope_pct={o['difference_envelope_pct']}")
     return summary, is_empty, lines

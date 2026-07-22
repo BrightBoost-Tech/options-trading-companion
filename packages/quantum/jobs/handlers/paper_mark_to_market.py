@@ -4,7 +4,7 @@ Paper Mark-to-Market Job Handler
 Refreshes current_mark and unrealized_pl on all open paper positions,
 then saves an EOD snapshot for checkpoint evaluation.
 
-Schedule: 3:30 PM CDT (while quotes are still live, before checkpoint).
+Schedule: 3:30 PM CDT (after the 3:00 PM CT / 4:00 PM ET close).
 """
 
 import logging
@@ -137,12 +137,42 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             f"[PAPER_MARK_TO_MARKET] Snapshots saved: {snapshot_result.get('snapshots_saved', 0)}"
         )
 
-        return {
-            "ok": True,
+        # 3. Settle expired single-leg experiment positions after the regular
+        # close. V1 holds these positions to expiry; this seam calls only the
+        # dedicated internal-paper close RPC. Missing spot stays typed deferred.
+        try:
+            from packages.quantum.services.single_leg_shadow_lifecycle import (
+                settle_expired_positions,
+            )
+
+            shadow_settlement = settle_expired_positions(client, user_id)
+        except Exception as shadow_err:
+            logger.exception("[PAPER_MARK_TO_MARKET] single-leg settlement crashed")
+            shadow_settlement = {
+                "status": "settlement_seam_crashed",
+                "counts": {"errors": 1},
+                "error_details": [
+                    {
+                        "stage": "settlement_seam",
+                        "error_class": type(shadow_err).__name__,
+                        "error": str(shadow_err)[:200],
+                    }
+                ],
+            }
+        settlement_errors = int(
+            (shadow_settlement.get("counts") or {}).get("errors") or 0
+        )
+
+        result = {
+            "ok": settlement_errors == 0,
             "mark_result": mark_result,
             "snapshot_result": snapshot_result,
             "envelope_violations": envelope_violations,
+            "single_leg_shadow_settlement": shadow_settlement,
         }
+        if settlement_errors:
+            result["counts"] = {"errors": settlement_errors}
+        return result
 
     except Exception as e:
         logger.error(f"[PAPER_MARK_TO_MARKET] Failed for user {user_id}: {e}")

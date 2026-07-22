@@ -68,38 +68,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             )
             result["resting_tp_sweep"] = {"error": str(sweep_err)[:200]}
 
-        # Independent single-leg shadow positions hold to expiry in v1. The
-        # settlement service writes only dedicated internal-paper tables/RPCs;
-        # it never enters the normal paper/live position evaluator or a broker.
-        try:
-            from packages.quantum.services.single_leg_shadow_lifecycle import (
-                settle_expired_positions,
-            )
-
-            shadow_settlement = settle_expired_positions(client, user_id)
-        except Exception as shadow_err:
-            logger.exception("[PAPER_EXIT_EVALUATE] single-leg settlement crashed")
-            shadow_settlement = {
-                "status": "settlement_seam_crashed",
-                "counts": {"errors": 1},
-                "error_details": [
-                    {
-                        "stage": "settlement_seam",
-                        "error_class": type(shadow_err).__name__,
-                        "error": str(shadow_err)[:200],
-                    }
-                ],
-            }
-        result["single_leg_shadow_settlement"] = shadow_settlement
-
-        settlement_errors = int(
-            (shadow_settlement.get("counts") or {}).get("errors") or 0
-        )
-        if settlement_errors:
-            counts = result.setdefault("counts", {})
-            counts["errors"] = int(counts.get("errors") or 0) + settlement_errors
-
-        return {"ok": settlement_errors == 0, **result}
+        return {"ok": True, **result}
 
     except Exception as e:
         logger.error(f"[PAPER_EXIT_EVALUATE] Failed for user {user_id}: {e}")

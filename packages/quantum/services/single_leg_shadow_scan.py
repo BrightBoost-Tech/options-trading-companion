@@ -330,9 +330,10 @@ def maybe_enqueue_single_leg_shadow_scan(
 
     result = enqueued if isinstance(enqueued, dict) else {}
     terminal_skip = bool(result.get("skipped"))
+    actually_queued = bool(result.get("rq_job_id")) and not terminal_skip
     return {
         "status": result.get("status", "queued"),
-        "enqueued": not terminal_skip,
+        "enqueued": actually_queued,
         "errors": 0,
         "job_run_id": result.get("job_run_id"),
         "rq_job_id": result.get("rq_job_id"),
@@ -512,13 +513,17 @@ def build_underlying_contexts(
         for (key, kind) in replay.inputs_map
         if kind == "chain" and ":chain" in str(key)
     }
-    symbols = sorted(
+    observed_symbols = (
         chain_symbols
         | set(symbol_features)
         | set(surfaces)
         | set(closes_by_symbol)
         | set(spot_by_symbol)
-    )[:max_symbols]
+    )
+    # Option-leg quote inputs also live in the parent tape. When at least one
+    # underlying chain was captured, restrict the experiment universe to those
+    # underlyings so an OCC quote cannot masquerade as a new underlying.
+    symbols = sorted(chain_symbols or observed_symbols)[:max_symbols]
 
     contexts: List[Dict[str, Any]] = []
     for symbol in symbols:

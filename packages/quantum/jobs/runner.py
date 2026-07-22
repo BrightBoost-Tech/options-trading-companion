@@ -89,6 +89,7 @@ def _build_handler_payload(job: Dict[str, Any], job_run_id: str) -> Dict[str, An
     payload = dict(raw) if isinstance(raw, dict) else {}
     if str(job.get("job_name") or "") == "suggestions_open":
         payload.setdefault("_job_run_id", str(job_run_id))
+        payload.setdefault("_job_name", "suggestions_open")
     return payload
 
 

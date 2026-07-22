@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from packages.quantum.services.single_leg_shadow_lifecycle import (
@@ -35,6 +36,7 @@ ATTEMPT = {
     "debit_per_contract": 95.0,
     "known_at": "2026-07-22T16:00:00+00:00",
     "evidence": {},
+    "stage": "candidate_generated",
 }
 
 
@@ -48,10 +50,16 @@ class FakeQuery:
 
     def select(self, columns):
         self.columns = columns
+        self.operation = "select"
         return self
 
     def insert(self, payload):
         self.operation = "insert"
+        self.payload = payload
+        return self
+
+    def update(self, payload):
+        self.operation = "update"
         self.payload = payload
         return self
 
@@ -67,17 +75,26 @@ class FakeQuery:
         self.limit_value = value
         return self
 
-    def execute(self):
-        if self.operation == "insert":
-            self.client.inserts.setdefault(self.table, []).append(self.payload)
-            return SimpleNamespace(data=[self.payload])
+    def _filtered(self):
         rows = [dict(row) for row in self.client.tables.get(self.table, [])]
         for column, value in self.filters:
             if isinstance(value, tuple) and value[0] == "lte":
                 rows = [row for row in rows if str(row.get(column)) <= str(value[1])]
             else:
                 rows = [row for row in rows if row.get(column) == value]
-        return SimpleNamespace(data=rows)
+        return rows
+
+    def execute(self):
+        if self.operation == "insert":
+            # EvidenceWriter.begin_run retries the already-existing run and then
+            # fetches it, mirroring the real unique-key idempotency path.
+            if self.table == "single_leg_shadow_runs":
+                raise RuntimeError("23505 duplicate key")
+            self.client.inserts.setdefault(self.table, []).append(self.payload)
+            return SimpleNamespace(data=[self.payload])
+        if self.operation == "update":
+            return SimpleNamespace(data=self._filtered())
+        return SimpleNamespace(data=self._filtered())
 
 
 class FakeClient:
@@ -229,9 +246,7 @@ def test_expiry_settlement_uses_market_truth_and_internal_close_rpc():
     result = settle_expired_positions(
         client,
         RUN["user_id"],
-        as_of=__import__("datetime").datetime(
-            2026, 7, 22, 20, 0, tzinfo=__import__("datetime").timezone.utc
-        ),
+        as_of=datetime(2026, 7, 22, 20, 0, tzinfo=timezone.utc),
         snapshot_fetcher=lambda symbols: {
             "SPY": SimpleNamespace(quote=SimpleNamespace(last=130.0, mid=129.9, bid=129.8))
         },
@@ -251,9 +266,7 @@ def test_missing_expiry_spot_defers_without_fabricating_zero():
     result = settle_expired_positions(
         client,
         RUN["user_id"],
-        as_of=__import__("datetime").datetime(
-            2026, 7, 22, 20, 0, tzinfo=__import__("datetime").timezone.utc
-        ),
+        as_of=datetime(2026, 7, 22, 20, 0, tzinfo=timezone.utc),
         snapshot_fetcher=lambda symbols: {"SPY": SimpleNamespace(quote=SimpleNamespace())},
         rpc_caller=lambda *args: calls.append(args),
     )

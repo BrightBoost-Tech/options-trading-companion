@@ -80,16 +80,15 @@ def _classify_handler_return(result: Any) -> str:
 def _build_handler_payload(job: Dict[str, Any], job_run_id: str) -> Dict[str, Any]:
     """Return an isolated handler payload carrying runner-owned provenance.
 
-    ``job_runs.payload`` remains immutable. The hidden ``_job_run_id`` field is
-    injected only into the in-process copy so a handler can create an
-    attributable child job without querying for "the latest running row".
-    Existing handlers ignore unknown keys.
+    ``job_runs.payload`` remains immutable. Only ``suggestions_open`` receives
+    the hidden ``_job_run_id`` field required for its attributable experiment
+    child. Every other handler receives a byte-identical shallow copy.
     """
 
     raw = job.get("payload")
     payload = dict(raw) if isinstance(raw, dict) else {}
-    payload.setdefault("_job_run_id", str(job_run_id))
-    payload.setdefault("_job_name", str(job.get("job_name") or ""))
+    if str(job.get("job_name") or "") == "suggestions_open":
+        payload.setdefault("_job_run_id", str(job_run_id))
     return payload
 
 

@@ -106,6 +106,7 @@ DECLARE
     v_portfolio paper_portfolios%ROWTYPE;
     v_epoch_state text;
     v_normal_rows bigint;
+    v_require_initial_balance boolean := false;
 BEGIN
     SELECT *
       INTO v_portfolio
@@ -162,19 +163,20 @@ BEGIN
     END IF;
 
     -- Initial disabled setup and the first disabled->enabled transition are
-    -- fixed to exactly $2,000 per experimental arm.  A paused experiment may
+    -- fixed to exactly $2,000 per experimental arm. A paused experiment may
     -- later resume with its genuine accrued cash, so paused->enabled is not
     -- reset or compared to the original balance.
+    IF TG_OP = 'INSERT' THEN
+        v_require_initial_balance := true;
+    ELSIF TG_OP = 'UPDATE'
+          AND NEW.enabled
+          AND NOT OLD.enabled
+          AND v_epoch_state = 'disabled' THEN
+        v_require_initial_balance := true;
+    END IF;
+
     IF NEW.epoch_name = 'single_leg_experiment_v1'
-       AND (
-           TG_OP = 'INSERT'
-           OR (
-               TG_OP = 'UPDATE'
-               AND NEW.enabled
-               AND NOT OLD.enabled
-               AND v_epoch_state = 'disabled'
-           )
-       )
+       AND v_require_initial_balance
        AND (
            v_portfolio.cash_balance IS DISTINCT FROM 2000::numeric
            OR v_portfolio.net_liq IS DISTINCT FROM 2000::numeric
@@ -199,7 +201,7 @@ CREATE TRIGGER trg_single_leg_experiment_binding_custody
     FOR EACH ROW
     EXECUTE FUNCTION single_leg_experiment_binding_custody_guard_v1();
 
--- Refuse to install the guard over already-contaminated custody.  This block is
+-- Refuse to install the guard over already-contaminated custody. This block is
 -- read-only on success and rolls the migration back on any mismatch.
 DO $$
 DECLARE

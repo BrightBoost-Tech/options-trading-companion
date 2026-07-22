@@ -14,6 +14,7 @@ from packages.quantum.strategies.single_leg_selection import (
     SingleLegSelectionResult,
 )
 from scripts.analytics.single_leg_shadow_dry_run import (
+    ReadOnlyViolation,
     run_single_leg_shadow_dry_replay,
 )
 
@@ -67,6 +68,8 @@ class Client:
 class Replay:
     decision_run = {
         "decision_id": DECISION,
+        "strategy_name": "suggestions_open",
+        "status": "ok",
         "user_id": USER,
         "tape_integrity": "complete",
         "git_sha": "a" * 40,
@@ -75,7 +78,14 @@ class Replay:
     features_map = {}
 
 
-def _candidate(symbol="SPY"):
+CONTEXTS = [
+    {"symbol": "SPY"},
+    {"symbol": "QQQ"},
+    {"symbol": "IWM"},
+]
+
+
+def _candidate(symbol="SPY", *, contracts=1):
     return SingleLegCandidate(
         symbol=symbol,
         option_type="call",
@@ -95,6 +105,7 @@ def _candidate(symbol="SPY"):
         vrp_multiplier=1.0,
         vrp_source="test",
         occ_symbol="SPY260821C00125000",
+        contracts=contracts,
     )
 
 
@@ -126,24 +137,32 @@ def _selector(contexts, policy_config, **kwargs):
     )
 
 
+def _run(**overrides):
+    params = {
+        "client": Client(),
+        "user_id": USER,
+        "decision_id": DECISION,
+        "replay_factory": lambda client, decision_id: Replay(),
+        "context_builder": lambda replay: list(CONTEXTS),
+        "selector": _selector,
+        "estimator": lambda request: object(),
+    }
+    params.update(overrides)
+    client = params.pop("client")
+    return run_single_leg_shadow_dry_replay(client, **params)
+
+
 def test_dry_run_evaluates_only_two_experimental_policies_without_writes():
-    client = Client()
-    result = run_single_leg_shadow_dry_replay(
-        client,
-        user_id=USER,
-        decision_id=DECISION,
-        replay_factory=lambda client, decision_id: Replay(),
-        context_builder=lambda replay: [{"symbol": "SPY"}],
-        selector=_selector,
-        estimator=lambda request: object(),
-    )
+    result = _run()
 
     assert result["status"] == "CANDIDATES_FOUND"
     assert result["write_mode"] == "NO-WRITE"
+    assert result["database_write_attempts"] == 0
     assert result["provider_calls"] == 0
     assert result["broker_calls"] == 0
+    assert result["data_source"] == "stored_decision_tape"
     assert result["policies_evaluated"] == 2
-    assert result["contexts"] == 1
+    assert result["contexts"] == 3
     assert result["attempts"] == 6
     assert result["candidates"] == 2
     assert [row["policy_registration_id"] for row in result["policy_results"]] == [
@@ -153,26 +172,29 @@ def test_dry_run_evaluates_only_two_experimental_policies_without_writes():
     assert all(
         row["candidates"][0]["contracts"] == 1
         and row["candidates"][0]["routing"] == "shadow_only"
+        and row["candidates"][0]["lifecycle_state"] == "experimental"
         for row in result["policy_results"]
     )
 
 
-def test_dry_run_rejects_hash_drift_before_selector_runs():
-    def mutate(rows):
-        rows[0]["config_hash"] = "0" * 64
+def test_dry_run_rejects_hash_config_and_schema_drift_before_selector_runs():
+    mutations = (
+        lambda rows: rows[0].__setitem__("config_hash", "0" * 64),
+        lambda rows: rows[0].__setitem__("schema_version", 99),
+        lambda rows: rows[0]["policy_config"].__setitem__(
+            "single_leg_max_debit_per_contract", 149.0
+        ),
+    )
+    matches = ("policy hash mismatch", "schema-version mismatch", "config mismatch")
 
-    with pytest.raises(ValueError, match="policy hash mismatch"):
-        run_single_leg_shadow_dry_replay(
-            Client(mutate=mutate),
-            user_id=USER,
-            decision_id=DECISION,
-            replay_factory=lambda client, decision_id: Replay(),
-            context_builder=lambda replay: [],
-            selector=lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("selector must not run")
-            ),
-            estimator=lambda request: object(),
-        )
+    for mutation, match in zip(mutations, matches):
+        with pytest.raises(ValueError, match=match):
+            _run(
+                client=Client(mutate=mutation),
+                selector=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("selector must not run")
+                ),
+            )
 
 
 def test_dry_run_rejects_control_opt_in_and_wrong_user_tape():
@@ -184,27 +206,62 @@ def test_dry_run_rejects_control_opt_in_and_wrong_user_tape():
         )
         control["policy_config"]["single_leg_experiment_enabled"] = True
 
-    with pytest.raises(ValueError, match="control carries single-leg opt-in"):
-        run_single_leg_shadow_dry_replay(
-            Client(mutate=mutate),
-            user_id=USER,
-            decision_id=DECISION,
-            replay_factory=lambda client, decision_id: Replay(),
-            context_builder=lambda replay: [],
-            selector=_selector,
-            estimator=lambda request: object(),
-        )
+    with pytest.raises(ValueError, match="config mismatch|control carries"):
+        _run(client=Client(mutate=mutate))
 
     class OtherReplay(Replay):
         decision_run = {**Replay.decision_run, "user_id": "other-user"}
 
     with pytest.raises(ValueError, match="different user"):
-        run_single_leg_shadow_dry_replay(
-            Client(),
-            user_id=USER,
-            decision_id=DECISION,
-            replay_factory=lambda client, decision_id: OtherReplay(),
-            context_builder=lambda replay: [],
-            selector=_selector,
-            estimator=lambda request: object(),
+        _run(replay_factory=lambda client, decision_id: OtherReplay())
+
+
+def test_dry_run_requires_complete_ok_suggestions_open_tape_and_contexts():
+    bad_runs = (
+        ({**Replay.decision_run, "tape_integrity": None}, "not complete"),
+        ({**Replay.decision_run, "status": "failed"}, "status is not ok"),
+        (
+            {**Replay.decision_run, "strategy_name": "suggestions_close"},
+            "not a suggestions_open",
+        ),
+    )
+    for decision_run, match in bad_runs:
+        replay_type = type(
+            "BadReplay",
+            (Replay,),
+            {"decision_run": decision_run},
         )
+        with pytest.raises(ValueError, match=match):
+            _run(replay_factory=lambda client, decision_id, cls=replay_type: cls())
+
+    with pytest.raises(ValueError, match="zero replayable contexts"):
+        _run(context_builder=lambda replay: [])
+
+
+def test_dry_run_blocks_database_mutation_and_rpc_before_delegation():
+    def mutating_replay(client, decision_id):
+        client.table("policy_registrations").insert({"forbidden": True})
+        return Replay()
+
+    with pytest.raises(ReadOnlyViolation, match="blocked query mutation"):
+        _run(replay_factory=mutating_replay)
+
+    def rpc_replay(client, decision_id):
+        client.rpc("forbidden_rpc", {})
+        return Replay()
+
+    with pytest.raises(ReadOnlyViolation, match="blocked RPC"):
+        _run(replay_factory=rpc_replay)
+
+
+def test_dry_run_fails_on_outcome_coverage_or_candidate_invariant_gap():
+    with pytest.raises(ValueError, match="outcome coverage mismatch"):
+        _run(context_builder=lambda replay: CONTEXTS + [{"symbol": "DIA"}])
+
+    def bad_candidate_selector(*args, **kwargs):
+        result = _selector(*args, **kwargs)
+        result.generation.candidates[:] = [_candidate(contracts=2)]
+        return result
+
+    with pytest.raises(ValueError, match="candidate invariant violation"):
+        _run(selector=bad_candidate_selector)

@@ -30,6 +30,140 @@ def _client_order_id_reconcile_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _fleet_receipt_producer_enabled() -> bool:
+    """Stale-order reconciliation-receipt producer gate (Lane A).
+
+    BEHAVIORAL / explicit opt-in (§3): DARK unless the value is exactly ``1``.
+    Absent / empty / any other value → OFF, and the order-sync path is
+    byte-identical to its pre-producer behavior (no marker stamp, no receipt-
+    writer RPC). Default-OFF because it ADDS a durable receipt-writer RPC to a
+    live reconciliation path, and fleet-activation-prerequisite receipts are
+    operator-gated — the operator flips this on only after acceptance review. An
+    env regression therefore fails SAFE (issues nothing)."""
+    return (os.environ.get("FLEET_RECEIPT_PRODUCER_ENABLED") or "").strip() == "1"
+
+
+def _issue_stale_order_receipt(client, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Post-commit producer: after a response-lost order has been re-armed to the
+    terminal 'cancelled' state (the stale-order reconciliation has COMMITTED),
+    stamp the typed completed-reconciliation marker on the (user-scoped)
+    paper_orders row and issue exactly ONE durable ``stale_order`` receipt via the
+    writer RPC.
+
+    The content fingerprint is deterministic over the reconciliation content, so
+    an exact replay returns the SAME receipt idempotently. RAISEs on any missing
+    durable fact (no user scope → never fabricate one, H9) or on an RPC failure /
+    conflict — the caller records the failure loud and marks the job partial.
+    Never called when the producer flag is OFF.
+    """
+    from packages.quantum.policy_lab.shadow_fleet import FLEET_EPOCH
+    from packages.quantum.services.fleet_reconciliation_receipt import (
+        reconciliation_content_fingerprint,
+        stamp_and_issue_reconciliation_receipt,
+    )
+
+    oid = row.get("id")
+    coid = row.get("client_order_id")
+    user_id = row.get("user_id")
+    # Durable user scope is REQUIRED (the RPC rejects a scope-less source); a
+    # missing user_id RAISEs here rather than fabricating one (H9).
+    if not oid or not user_id:
+        raise ValueError(
+            f"stale_order receipt missing durable scope "
+            f"(order={str(oid)[:8]}, user_id_present={bool(user_id)})"
+        )
+
+    fingerprint = reconciliation_content_fingerprint(
+        "stale_order", "paper_orders", oid, coid, FLEET_EPOCH,
+        "client_order_id_not_at_broker",
+    )
+    return stamp_and_issue_reconciliation_receipt(
+        client,
+        source_table="paper_orders",
+        source_row_id=str(oid),
+        existing_jsonb=row.get("broker_response"),
+        user_id=str(user_id),
+        receipt_kind="stale_order",
+        content_fingerprint=fingerprint,
+        effective_epoch=FLEET_EPOCH,
+        actor_class="stale_order_reconciler:alpaca_order_sync",
+    )
+
+
+def _reconcile_lost_submits(alpaca, client, shadow_portfolio_ids) -> Dict[str, Any]:
+    """Step 1.5 — targeted resolution of response-lost submits (PR2), plus the
+    gated stale-order reconciliation-receipt producer (Lane A).
+
+    For each response-lost order (client_order_id set, alpaca_order_id NULL) look
+    it up at the broker: FOUND → backfill the alpaca_order_id; 404 → re-arm to the
+    terminal 'cancelled' state — the stale-order reconciliation COMMITS inside
+    ``_resolve_lost_submit`` there. ONLY AFTER that commit, and ONLY when the
+    receipt producer is enabled, stamp the typed marker + issue exactly one
+    durable ``stale_order`` receipt (``_issue_stale_order_receipt``).
+
+    Origin-to-top H9: a per-row resolve that RAISES (pre-commit failure) issues
+    NOTHING for that row; a receipt-issuance failure AFTER a committed cancel is
+    recorded in ``receipt_errors`` (never swallowed) so the caller marks the job
+    partial. Returns counts + receipt_errors; the caller merges them into totals.
+    """
+    out: Dict[str, Any] = {
+        "client_id_backfilled": 0,
+        "client_id_rearmed": 0,
+        "stale_order_receipts": 0,
+        "receipt_errors": [],
+    }
+
+    lost_q = client.table("paper_orders") \
+        .select("id, client_order_id, status, position_id, user_id, broker_response") \
+        .in_("status", ["needs_manual_review", "submitted", "working"]) \
+        .is_("alpaca_order_id", "null") \
+        .not_.is_("client_order_id", "null")
+    if shadow_portfolio_ids:
+        lost_q = lost_q.not_.in_("portfolio_id", shadow_portfolio_ids)
+    lost_rows = lost_q.execute().data or []
+
+    producer_on = _fleet_receipt_producer_enabled()
+    for _row in lost_rows:
+        try:
+            _res = _resolve_lost_submit(alpaca, client, _row)
+        except Exception as _row_err:
+            # Pre-commit failure: the resolve (cancel/backfill) did NOT commit →
+            # issue nothing for this row (never a fabricated receipt).
+            logger.error(
+                f"[ALPACA_SYNC] Step 1.5 resolve raised for "
+                f"order={str(_row.get('id'))[:8]}: {_row_err}"
+            )
+            continue
+
+        if _res == "backfilled":
+            out["client_id_backfilled"] += 1
+            continue
+        if _res != "rearmed":
+            continue
+        out["client_id_rearmed"] += 1
+
+        # ── Stale-order reconciliation-receipt producer (post-commit, gated) ─
+        if not producer_on:
+            continue
+        try:
+            _issue_stale_order_receipt(client, _row)
+            out["stale_order_receipts"] += 1
+        except Exception as _receipt_err:
+            # H9-loud: the required receipt was NOT issued. The cancel already
+            # committed, so the reconciliation stands; surface the failure so the
+            # job is partial (never a silent swallow, never a fabricated receipt).
+            logger.error(
+                f"[ALPACA_SYNC] Step 1.5 stale_order receipt FAILED for "
+                f"order={str(_row.get('id'))[:8]}: {_receipt_err}"
+            )
+            out["receipt_errors"].append({
+                "stage": "stale_order_receipt",
+                "order_id": _row.get("id"),
+                "error": str(_receipt_err)[:500],
+            })
+    return out
+
+
 def _resolve_lost_submit(alpaca, client, row: Dict[str, Any]) -> str:
     """Resolve ONE response-lost order (client_order_id set, alpaca_order_id
     NULL) by broker lookup. Returns 'backfilled' | 'rearmed' | 'noop'.
@@ -197,20 +331,27 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # until PR2 ids exist.
             if _client_order_id_reconcile_enabled():
                 try:
-                    lost_q = client.table("paper_orders") \
-                        .select("id, client_order_id, status, position_id") \
-                        .in_("status", ["needs_manual_review", "submitted", "working"]) \
-                        .is_("alpaca_order_id", "null") \
-                        .not_.is_("client_order_id", "null")
-                    if shadow_portfolio_ids:
-                        lost_q = lost_q.not_.in_("portfolio_id", shadow_portfolio_ids)
-                    lost_rows = lost_q.execute().data or []
-                    for _row in lost_rows:
-                        _res = _resolve_lost_submit(alpaca, client, _row)
-                        if _res == "backfilled":
-                            totals["client_id_backfilled"] = totals.get("client_id_backfilled", 0) + 1
-                        elif _res == "rearmed":
-                            totals["client_id_rearmed"] = totals.get("client_id_rearmed", 0) + 1
+                    recon = _reconcile_lost_submits(alpaca, client, shadow_portfolio_ids)
+                    totals["client_id_backfilled"] = (
+                        totals.get("client_id_backfilled", 0) + recon["client_id_backfilled"]
+                    )
+                    totals["client_id_rearmed"] = (
+                        totals.get("client_id_rearmed", 0) + recon["client_id_rearmed"]
+                    )
+                    if recon["stale_order_receipts"]:
+                        totals["stale_order_receipts"] = (
+                            totals.get("stale_order_receipts", 0) + recon["stale_order_receipts"]
+                        )
+                    # H9: a stale_order receipt that FAILED to issue is a real
+                    # error — count it and attach a typed stage so the job goes
+                    # partial (ok=False) instead of a silent green.
+                    if recon["receipt_errors"]:
+                        totals["errors"] += len(recon["receipt_errors"])
+                        totals["error_details"].extend(recon["receipt_errors"])
+                        totals["stale_order_receipt_errors"] = (
+                            totals.get("stale_order_receipt_errors", 0)
+                            + len(recon["receipt_errors"])
+                        )
                 except Exception as _step15_err:
                     logger.error(
                         f"[ALPACA_SYNC] Step 1.5 client_order_id resolve failed: {_step15_err}"

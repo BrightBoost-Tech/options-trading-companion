@@ -1266,6 +1266,232 @@ def test_broker_snapshot_write_atomic(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# F-RUNNER-BROKER-CREDS: sanctioned local-file credential loading
+# (synthetic secrets ONLY; every test proves the creds NEVER leak into the
+#  snapshot / manifest / status; a missing/invalid cred stays typed
+#  available=false and never false-greens a broker-dependent claim.)
+# ---------------------------------------------------------------------------
+# Synthetic creds — long enough (>=8 chars) to exercise the fail-loud scrub.
+_SYN_KEY = "SYNTHKEYID_AAAAAAAAAAAA1234"
+_SYN_SECRET = "SYNTHSECRET_BBBBBBBBBBBB5678wxyz"
+
+
+def _write_env_file(path: Path, key=_SYN_KEY, secret=_SYN_SECRET, paper="false",
+                    extra: str = "") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        "# local dev env (gitignored)\n"
+        f"ALPACA_API_KEY={key}\n"
+        f"ALPACA_SECRET_KEY={secret}\n"
+        f"ALPACA_PAPER={paper}\n"
+        "SUPABASE_URL=https://example.supabase.co\n"  # unrelated key: must be ignored
+    ) + extra
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_load_creds_from_repo_root_dotenv(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env")
+    merged, status = bs.load_local_broker_creds({}, repo_root=str(repo))
+    assert merged["ALPACA_API_KEY"] == _SYN_KEY
+    assert merged["ALPACA_SECRET_KEY"] == _SYN_SECRET
+    assert status["keys_injected"] == ["ALPACA_API_KEY", "ALPACA_PAPER", "ALPACA_SECRET_KEY"]
+    assert status["loaded_from"].endswith(".env")
+    assert status["creds_present_after_load"] is True
+    # unrelated key from the file is NEVER pulled in
+    assert "SUPABASE_URL" not in merged
+    # status is no-secret: neither value appears anywhere in it
+    blob = __import__("json").dumps(status)
+    assert _SYN_KEY not in blob and _SYN_SECRET not in blob
+
+
+def test_load_creds_env_local_wins_over_env(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env", key="FROM_DOTENV_KEY_1", secret="FROM_DOTENV_SECRET_1")
+    _write_env_file(repo / ".env.local", key=_SYN_KEY, secret=_SYN_SECRET)
+    merged, status = bs.load_local_broker_creds({}, repo_root=str(repo))
+    # .env.local has priority (first in the search order)
+    assert merged["ALPACA_API_KEY"] == _SYN_KEY
+    assert status["loaded_from"].endswith(".env.local")
+
+
+def test_load_creds_does_not_override_present_env(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env")  # would inject the synthetic creds
+    env = {"ALPACA_API_KEY": "PRESET_KEY_VALUE_XYZ", "ALPACA_SECRET_KEY": "PRESET_SECRET_VALUE_XYZ"}
+    merged, status = bs.load_local_broker_creds(env, repo_root=str(repo))
+    # a real env cred always wins over a file cred
+    assert merged["ALPACA_API_KEY"] == "PRESET_KEY_VALUE_XYZ"
+    assert merged["ALPACA_SECRET_KEY"] == "PRESET_SECRET_VALUE_XYZ"
+    assert "ALPACA_API_KEY" not in status["keys_injected"]
+    assert "ALPACA_SECRET_KEY" not in status["keys_injected"]
+    assert status["env_had_api_key"] is True and status["env_had_secret_key"] is True
+
+
+def test_load_creds_explicit_override_env_var(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env", key="DEFAULT_SEARCH_KEY", secret="DEFAULT_SEARCH_SECRET")
+    explicit = _write_env_file(tmp_path / "elsewhere" / "creds.env")
+    env = {bs.CREDS_FILE_ENV_VAR: str(explicit)}
+    merged, status = bs.load_local_broker_creds(env, repo_root=str(repo))
+    # the explicit override is used; the default .env search is NOT consulted
+    assert merged["ALPACA_API_KEY"] == _SYN_KEY
+    assert status["override_env_var_set"] is True
+    assert status["files_checked"] == [str(explicit)]
+
+
+def test_load_creds_missing_file_typed_unavailable(tmp_path):
+    repo = tmp_path / "operator"  # no .env files created
+    merged, status = bs.load_local_broker_creds({}, repo_root=str(repo))
+    assert "ALPACA_API_KEY" not in merged
+    assert status["keys_injected"] == []
+    assert status["loaded_from"] is None
+    assert status["creds_present_after_load"] is False
+    # every default location was checked (loud diagnosability), none existed
+    assert len(status["files_checked"]) == 4
+
+
+def test_load_creds_malformed_file_never_crashes(tmp_path):
+    repo = tmp_path / "operator"
+    (repo).mkdir(parents=True, exist_ok=True)
+    (repo / ".env").write_text(
+        "this is not a dotenv line\n# comment only\n=novalue\nALPACA_API_KEY\n",
+        encoding="utf-8",
+    )
+    merged, status = bs.load_local_broker_creds({}, repo_root=str(repo))
+    # junk parsed without exception; no usable cred -> stays unavailable
+    assert status["creds_present_after_load"] is False
+
+
+def test_build_snapshot_loads_creds_from_local_file(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env")
+
+    def fake_get(url, headers, params=None):
+        # prove the loaded creds actually reach the request headers
+        assert headers["APCA-API-KEY-ID"] == _SYN_KEY
+        assert headers["APCA-API-SECRET-KEY"] == _SYN_SECRET
+        if url.endswith("/v2/account"):
+            return 200, {"account_number": "211900084", "status": "ACTIVE", "equity": "2000"}
+        if url.endswith("/v2/clock"):
+            return 200, {"is_open": False}
+        if url.endswith("/v2/calendar"):
+            return 200, []
+        if url.endswith("/v2/positions"):
+            return 200, []
+        if url.endswith("/v2/orders"):
+            return 200, []
+        return 404, None
+
+    snap = bs.build_snapshot(env={}, http_get=fake_get, repo_root=str(repo))
+    assert snap["available"] is True
+    assert snap["account"]["account_number"] == "*****0084"
+    # the creds NEVER appear in the serialized snapshot (scrub + absence)
+    blob = __import__("json").dumps(snap)
+    assert _SYN_KEY not in blob and _SYN_SECRET not in blob
+    # provenance is present and no-secret
+    assert snap["creds_source"]["creds_present_after_load"] is True
+    assert snap["creds_source"]["keys_injected"] == [
+        "ALPACA_API_KEY", "ALPACA_PAPER", "ALPACA_SECRET_KEY"
+    ]
+
+
+def test_build_snapshot_missing_creds_file_stays_unavailable(tmp_path):
+    repo = tmp_path / "operator"  # no .env
+
+    def fail_get(url, headers, params=None):  # must never be called
+        raise AssertionError("broker GET attempted while creds unavailable")
+
+    snap = bs.build_snapshot(env={}, http_get=fail_get, repo_root=str(repo))
+    assert snap["available"] is False
+    assert "not set" in snap["error"]
+    # broker-dependent fields are typed-absent, NEVER fabricated (no fake flat book)
+    assert snap["account"] is None
+    assert snap["positions"] is None
+    assert snap["clock"] is None
+    assert snap["orders"] is None
+    assert snap["creds_source"]["creds_present_after_load"] is False
+
+
+def test_build_snapshot_creds_file_secret_never_on_disk(tmp_path):
+    repo = tmp_path / "operator"
+    _write_env_file(repo / ".env")
+    out = tmp_path / "snap.json"
+    bs.write_snapshot(
+        str(out), env={}, repo_root=str(repo),
+        http_get=lambda u, h, p=None: (500, None),  # HTTP fails -> available False
+    )
+    disk = out.read_text(encoding="utf-8")
+    # even though creds were loaded, neither the key nor the secret is written
+    assert _SYN_KEY not in disk and _SYN_SECRET not in disk
+
+
+def test_default_snapshot_writer_threads_operator_repo_root(tmp_path, monkeypatch):
+    """The runner's default snapshot writer MUST pass the OPERATOR checkout as
+    repo_root (not the disposable worktree) so creds load from the operator's
+    .env. Drive the real production method; assert the kwarg it forwards.
+    Stubs broker_snapshot via sys.modules so no network / real requests occur."""
+    import types
+
+    recorded = {}
+
+    def _fake_write_snapshot(path, **kwargs):
+        recorded["path"] = path
+        recorded["kwargs"] = kwargs
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        nr.write_json_atomic(Path(path), {"available": False, "error": "stub"})
+        return {"available": False, "error": "stub"}
+
+    fake_mod = types.ModuleType("broker_snapshot")
+    fake_mod.write_snapshot = _fake_write_snapshot
+    monkeypatch.setitem(sys.modules, "broker_snapshot", fake_mod)
+
+    cfg = _make_config(tmp_path, _child_writes_report(tmp_path / "x.md"))
+    runner = nr.NightlyRunner(cfg)
+    snap_path = tmp_path / "worktree" / "audit" / "broker-snapshot.json"
+    runner._default_snapshot_writer(snap_path)
+    assert recorded["kwargs"].get("repo_root") == str(cfg.operator_repo)
+
+
+def test_manifest_carries_no_secret_creds_source(tmp_path):
+    """End-to-end through the runner: a real .env with synthetic creds loads via
+    the DEFAULT snapshot writer + build_snapshot, and NEITHER value lands in the
+    manifest / snapshot / markers — only the no-secret provenance does."""
+    op, _sha = _make_git_operator(tmp_path)
+    _write_env_file(op / ".env")
+    wt_report = tmp_path / "wt" / "audit" / "reports" / "2026-07-19.md"
+
+    def fake_get(url, headers, params=None):
+        if url.endswith("/v2/account"):
+            return 200, {"account_number": "211900084", "status": "ACTIVE", "equity": "2000"}
+        if url.endswith("/v2/clock"):
+            return 200, {"is_open": False}
+        if url.endswith("/v2/calendar"):
+            return 200, []
+        return 200, []
+
+    # real default writer, but inject the fake http_get so no network is touched
+    def _writer(path: Path):
+        return bs.write_snapshot(str(path), repo_root=str(op), http_get=fake_get)
+
+    cfg = _real_git_config(op, tmp_path, report_date="2026-07-19")
+    cfg.child_argv = _child_writes_report(wt_report)
+    cfg.snapshot_writer = _writer
+    nr.NightlyRunner(cfg).run()
+
+    import json
+    manifest = json.loads((cfg.audit_worktree / "audit" / "preflight-manifest.json").read_text())
+    cs = manifest["broker_snapshot"]["creds_source"]
+    assert cs is not None and cs["creds_present_after_load"] is True
+    manifest_txt = (cfg.audit_worktree / "audit" / "preflight-manifest.json").read_text()
+    snap_txt = (cfg.audit_worktree / "audit" / "broker-snapshot.json").read_text()
+    for surface in (manifest_txt, snap_txt, _marker_text(cfg)):
+        assert _SYN_KEY not in surface
+        assert _SYN_SECRET not in surface
+
+
+# ---------------------------------------------------------------------------
 # no-secret-logging assertion across artifacts
 # ---------------------------------------------------------------------------
 def test_no_secret_in_manifest_or_markers(tmp_path):

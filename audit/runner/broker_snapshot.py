@@ -21,6 +21,19 @@ SAFETY CONTRACT (absolute)
 - Credentials are read from the environment and used ONLY as request headers.
   They are NEVER written to the snapshot, logged, or returned. A final assert
   fails loud if any credential substring appears in the serialized snapshot.
+- CREDENTIAL SOURCE (F-RUNNER-BROKER-CREDS): the runner is launched by Windows
+  Task Scheduler via audit/run-nightly.cmd — an unattended session whose process
+  env carries NONE of the Alpaca creds (those live only in the Railway worker
+  env). The interactive helpers scripts/win/load_env.{cmd,ps1} DO source creds
+  from gitignored local ``.env`` files, but the scheduled task never runs them,
+  so for two nights the snapshot was cred-less and broker-blind. This module now
+  loads the SAME sanctioned local ``.env`` files itself (``load_local_broker_
+  creds``), filling only MISSING creds and only the Alpaca allowlist. Those
+  files are gitignored (``.gitignore``: ``.env`` / ``.env.*``, only
+  ``.env.example`` tracked), so this code never places a secret in the repo, the
+  logs, the manifest, or the snapshot. An operator may also point
+  ``AUDIT_BROKER_CREDS_FILE`` at an explicit creds file (the VALUE is a path,
+  never a secret).
 - The account number is MASKED (last 4 only); the account UUID (`id`) is never
   requested. No account identifiers leave this module in the clear.
 - Trust level is SECONDARY to the Alpaca MCP (recorded in the snapshot). It is
@@ -38,7 +51,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
-from typing import Any, Callable, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # Alpaca REST bases. The account under audit is the LIVE margin account
 # (211900084); ALPACA_PAPER=false selects it. Paper base is included only so a
@@ -117,17 +131,166 @@ def _default_http_get(
     return resp.status_code, body
 
 
+# ---------------------------------------------------------------------------
+# credential loading — the sanctioned LOCAL secret source
+# ---------------------------------------------------------------------------
+# Only these keys are ever read out of a local file — an allowlist, never a
+# general dotenv import, so an unrelated secret in the file is never touched.
+_CRED_KEYS = ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ALPACA_PAPER")
+_CRED_FILE_ALLOWLIST = frozenset(_CRED_KEYS)
+
+# Sanctioned local env-file locations, relative to the operator repo root, in
+# priority order (first file that supplies a given key wins). Mirrors
+# scripts/win/load_env.cmd so the runner reads exactly what the operator's
+# interactive shell already reads. All are gitignored — never committed.
+_DEFAULT_ENV_FILE_RELPATHS = (
+    ".env.local",
+    ".env",
+    os.path.join("packages", "quantum", ".env.local"),
+    os.path.join("packages", "quantum", ".env"),
+)
+
+# Env var an operator may set to point at an explicit creds file (overrides the
+# default search entirely). The VALUE is a path, never a secret.
+CREDS_FILE_ENV_VAR = "AUDIT_BROKER_CREDS_FILE"
+
+
+def _parse_cred_file(path: str) -> Dict[str, str]:
+    """Parse KEY=VALUE lines from a dotenv-style file, returning ONLY the
+    allowlisted Alpaca cred keys.
+
+    NEVER raises (a missing/unreadable/malformed file → ``{}``) and NEVER logs a
+    value. Comment (``#``) and blank lines are skipped, an optional ``export``
+    prefix and surrounding quotes are stripped (matching load_env.{cmd,ps1}),
+    and any line without ``=`` is ignored.
+    """
+    out: Dict[str, str] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        if name not in _CRED_FILE_ALLOWLIST:
+            continue
+        value = value.strip().strip('"').strip("'")
+        out.setdefault(name, value)  # first occurrence within a file wins
+    return out
+
+
+def load_local_broker_creds(
+    env: Dict[str, str],
+    repo_root: Optional[str] = None,
+    files: Optional[Sequence[str]] = None,
+) -> Tuple[Dict[str, str], Dict[str, Any]]:
+    """Return ``(merged_env, status)``.
+
+    Fills MISSING Alpaca creds into a COPY of ``env`` from the sanctioned local
+    ``.env`` files (or from an explicit ``AUDIT_BROKER_CREDS_FILE`` path when that
+    var is set in ``env``). Precedence: a cred already present (non-empty) in
+    ``env`` is NEVER overridden — matching load_env's "only set if not already
+    defined" semantics, so a real env cred always wins over a stale file.
+
+    The returned ``status`` is a NO-SECRET provenance dict: key NAMES, file
+    paths, and booleans only, NEVER a credential VALUE. It is safe to serialize
+    into the snapshot / preflight manifest.
+
+    Absence stays typed-unavailable, loudly: when no file supplies a missing cred
+    the merged env simply lacks it, ``build_snapshot`` then returns
+    ``available=false``, and this status records ``loaded_from=None`` +
+    ``keys_injected=[]`` so a broker-blind run is diagnosable — it never
+    fabricates a cred and never lets a load failure read as success.
+    """
+    merged = dict(env)
+    override = (merged.get(CREDS_FILE_ENV_VAR) or "").strip()
+    if files is not None:
+        candidates = [str(f) for f in files]
+    elif override:
+        candidates = [override]
+    elif repo_root:
+        candidates = [str(Path(repo_root) / rel) for rel in _DEFAULT_ENV_FILE_RELPATHS]
+    else:
+        candidates = []
+
+    files_checked: List[str] = []
+    file_creds: Dict[str, str] = {}   # key -> value (first file wins)
+    file_source: Dict[str, str] = {}  # key -> path that supplied it
+    for path in candidates:
+        files_checked.append(path)
+        if not os.path.isfile(path):
+            continue
+        for k, v in _parse_cred_file(path).items():
+            if v and k not in file_creds:
+                file_creds[k] = v
+                file_source[k] = path
+
+    keys_injected: List[str] = []
+    loaded_from: Optional[str] = None
+    for k in _CRED_KEYS:
+        cur = merged.get(k)
+        if (cur is None or str(cur).strip() == "") and k in file_creds:
+            merged[k] = file_creds[k]
+            keys_injected.append(k)
+            if loaded_from is None and k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
+                loaded_from = file_source[k]
+
+    status: Dict[str, Any] = {
+        "mechanism": (
+            "explicit AUDIT_BROKER_CREDS_FILE" if override
+            else "sanctioned local .env files" if candidates
+            else "none (no repo_root / no override)"
+        ),
+        "override_env_var_set": bool(override),
+        "env_had_api_key": bool((env.get("ALPACA_API_KEY") or "").strip()),
+        "env_had_secret_key": bool((env.get("ALPACA_SECRET_KEY") or "").strip()),
+        "files_checked": files_checked,          # paths only, never secrets
+        "keys_injected": sorted(keys_injected),  # NAMES only, never values
+        "loaded_from": loaded_from,              # a path, never a secret
+        "creds_present_after_load": bool(
+            (merged.get("ALPACA_API_KEY") or "").strip()
+            and (merged.get("ALPACA_SECRET_KEY") or "").strip()
+        ),
+        "note": (
+            "Creds are used ONLY as headers for read-only GETs and are NEVER "
+            "written to this snapshot. Provide them via a gitignored local .env "
+            f"(repo root or packages/quantum/) or point {CREDS_FILE_ENV_VAR} at "
+            "a file. Absent creds keep the snapshot available=false — "
+            "broker-dependent audit claims must stay labeled unavailable."
+        ),
+    }
+    return merged, status
+
+
 def build_snapshot(
     env: Optional[Dict[str, str]] = None,
     http_get: Optional[HttpGet] = None,
     now_fn: Optional[Callable[[], datetime.datetime]] = None,
     base_url: Optional[str] = None,
+    repo_root: Optional[str] = None,
+    load_creds: bool = True,
 ) -> Dict[str, Any]:
     """Build the read-only broker snapshot dict. Never raises for broker/network
-    failures — those become an explicit `error` + `available: false`."""
+    failures — those become an explicit `error` + `available: false`.
+
+    When ``load_creds`` is true (default) any MISSING Alpaca creds are filled
+    from the sanctioned local ``.env`` files under ``repo_root`` (or an explicit
+    ``AUDIT_BROKER_CREDS_FILE`` path in ``env``); an already-present env cred is
+    never overridden. The no-secret provenance is recorded in
+    ``snapshot['creds_source']``.
+    """
     env = env if env is not None else dict(os.environ)
     http_get = http_get or _default_http_get
     now_fn = now_fn or _utcnow
+
+    cred_status: Optional[Dict[str, Any]] = None
+    if load_creds:
+        env, cred_status = load_local_broker_creds(env, repo_root=repo_root)
 
     key = env.get("ALPACA_API_KEY", "") or ""
     secret = env.get("ALPACA_SECRET_KEY", "") or ""
@@ -146,6 +309,7 @@ def build_snapshot(
         ),
         "available": False,
         "error": None,
+        "creds_source": cred_status,  # NO-SECRET provenance (names + paths only)
         "account": None,
         "clock": None,
         "calendar": None,
@@ -155,8 +319,11 @@ def build_snapshot(
 
     if not key or not secret:
         snapshot["error"] = (
-            "ALPACA_API_KEY / ALPACA_SECRET_KEY not set in the runner env — "
-            "broker snapshot unavailable (broker-blind for this run)."
+            "ALPACA_API_KEY / ALPACA_SECRET_KEY not set for the runner — broker "
+            "snapshot unavailable (broker-blind for this run). Provide them via a "
+            "gitignored local .env (repo root or packages/quantum/) or point "
+            f"{CREDS_FILE_ENV_VAR} at a creds file; the runner reads it read-only "
+            "for GET-only broker truth. Never commit the secret."
         )
         return snapshot
 

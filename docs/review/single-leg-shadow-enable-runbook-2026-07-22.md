@@ -22,9 +22,29 @@ steps into one transaction or enable before the prior receipt is verified.
   - deterministic reader and no-write replay.
 - `single_leg_experiment_v1` currently has zero policy rows, epoch rows,
   bindings, runs, attempts, orders, positions, outcomes, and cash events.
+- The target user already has at least one established `live_eligible`
+  `paper_portfolios` row created before this experiment. The setup RPC creates
+  two *new* shadow-only portfolios; it must never become the user's first/default
+  paper-portfolio surface. Stop if no live-eligible portfolio exists.
+- Existing Policy Lab cohort mappings, if used, resolve only through
+  `policy_lab_cohorts.portfolio_id`; do not reuse either experiment portfolio as
+  a Policy Lab cohort portfolio.
 
 Use one immutable target user UUID as `:USER_ID`. Never paste credentials into
 SQL, reports, or prompts.
+
+Before any setup write, capture the existing portfolio baseline:
+
+```sql
+select id, name, routing_mode, cash_balance, net_liq, created_at
+from paper_portfolios
+where user_id = ':USER_ID'::uuid
+order by created_at, id;
+```
+
+Required: at least one pre-existing `live_eligible` row and zero rows named
+`Single Leg Throughput v1` / `Single Leg Conviction v1`. Preserve this result
+with the setup receipt.
 
 ## Phase 1 — apply lifecycle migrations in order
 
@@ -127,6 +147,10 @@ No other row may exist in the epoch.
 
 ## Phase 4 — T1 disabled setup
 
+Re-run the portfolio-baseline query from Preconditions. Stop if the target has
+no pre-existing `live_eligible` portfolio or if an experiment-named portfolio
+already exists without a matching disabled binding receipt.
+
 Call the setup RPC with the exact user and fixed `$2,000` experimental capital:
 
 ```sql
@@ -157,7 +181,7 @@ where epoch_name = 'single_leg_experiment_v1';
 
 select b.policy_registration_id, b.role, b.enabled, b.routing_mode,
        b.execution_mode, pp.name, pp.cash_balance, pp.net_liq,
-       pp.routing_mode as portfolio_routing
+       pp.routing_mode as portfolio_routing, pp.created_at
 from single_leg_experiment_bindings b
 join paper_portfolios pp on pp.id = b.portfolio_id
 where b.epoch_name = 'single_leg_experiment_v1'
@@ -166,7 +190,8 @@ order by b.policy_registration_id collate "C";
 ```
 
 Expected: epoch `disabled`; exactly two experimental bindings; both disabled;
-both portfolios `shadow_only`, `cash_balance=net_liq=2000`.
+both portfolios `shadow_only`, `cash_balance=net_liq=2000`, and both created
+after the pre-existing live-eligible default portfolio.
 
 At this point the natural parent scan still performs zero child provider calls
 and writes zero experiment rows.
@@ -189,23 +214,52 @@ Required proof:
 
 ```text
 write_mode = NO-WRITE
+database_write_attempts = 0
 provider_calls = 0
 broker_calls = 0
+data_source = stored_decision_tape
 policies_evaluated = 2
 policy IDs = sl_exp_conviction_v1 + sl_exp_throughput_v1
-all candidates contracts=1, routing=shadow_only
+attempts = contexts × 2
+all candidates contracts=1, routing=shadow_only, lifecycle_state=experimental
 ```
 
 `HONEST-EMPTY` is acceptable when typed rejections explain all evaluated
-contexts. Stop on hash drift, incomplete tape, wrong user, failed read, or any
-write/provider/broker claim.
+contexts. Stop on hash/config/schema drift, incomplete or non-OK tape, wrong
+strategy/user/decision identity, zero replayable contexts, incomplete outcome
+coverage, candidate-invariant failure, failed read, or any attempted database
+write/RPC/provider/broker action.
 
 Re-run the database zero census after the dry-run. It must remain zero in runs,
 attempts, events, orders, positions, outcomes, and cash events.
 
 ## Phase 6 — T2 approve exact policy rows
 
-Only after the no-write replay passes:
+Only after the no-write replay passes, repeat the disabled custody check:
+
+```sql
+select
+  count(*) as binding_count,
+  count(*) filter (where b.enabled) as enabled_bindings,
+  count(*) filter (
+    where b.role = 'experimental'
+      and b.routing_mode = 'shadow_only'
+      and b.execution_mode = 'internal_paper'
+      and pp.routing_mode = 'shadow_only'
+      and pp.cash_balance = 2000
+      and pp.net_liq = 2000
+  ) as exact_disabled_custody
+from single_leg_experiment_bindings b
+join paper_portfolios pp on pp.id = b.portfolio_id
+where b.epoch_name = 'single_leg_experiment_v1'
+  and b.user_id = ':USER_ID'::uuid;
+```
+
+Expected before approval: `binding_count=2`, `enabled_bindings=0`,
+`exact_disabled_custody=2`. Also verify no normal `paper_orders` or
+`paper_positions` references either experiment portfolio. Stop on any mismatch.
+
+Then call:
 
 ```sql
 select rpc_approve_single_leg_experiment_v1(
@@ -220,8 +274,8 @@ disabled. Verify all existing `small_tier_v1` rows are unchanged.
 
 ## Phase 7 — T3 enable shadow-only accrual
 
-Only after approval, deployment checks, flat-book recheck, and a deterministic
-reader baseline:
+Only after approval, deployment checks, flat-book recheck, a deterministic
+reader baseline, and another exact-custody query returning `2 / 0 / 2`:
 
 ```sql
 select rpc_enable_single_leg_experiment_v1(

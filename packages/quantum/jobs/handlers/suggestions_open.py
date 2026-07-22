@@ -51,6 +51,7 @@ def _persist_error_rollup(cycle_results) -> int:
             continue
     return total
 
+
 # Replay feature store integration (lazy import to avoid circular deps)
 def _get_decision_context_class():
     """Lazy import DecisionContext to avoid circular imports."""
@@ -141,6 +142,10 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             for uid in active_users:
                 try:
+                    source_decision_id = None
+                    source_code_sha = None
+                    source_as_of = None
+
                     # 1. Ensure default strategy exists
                     ensure_default_strategy_exists(uid, strategy_name, client)
 
@@ -187,6 +192,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                                         f"error={_cc_err} tape_integrity="
                                         f"{_commit_res.get('tape_integrity')}"
                                     )
+                                else:
+                                    # The independent single-leg child is allowed
+                                    # to consume only a complete, durably committed
+                                    # parent decision tape.
+                                    source_decision_id = str(
+                                        _commit_res.get("decision_id") or ctx.decision_id
+                                    )
+                                    source_code_sha = ctx.git_sha
+                                    source_as_of = as_of_ts.isoformat()
                         except Exception as cycle_err:
                             ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
                             raise
@@ -244,6 +258,61 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             "error": str(fork_err)[:200],
                         }]
                         notes.append(f"Policy Lab fork error: {fork_err}")
+
+                    # Independent one-contract single-leg shadow experiment.
+                    # The seam is a no-op while the epoch is absent/disabled or
+                    # no approved opt-in binding exists. Only a scheduler-origin
+                    # parent with a complete decision tape may enqueue a child;
+                    # manual/forced scans cannot manufacture research evidence.
+                    try:
+                        from packages.quantum.services.single_leg_shadow_scan import (
+                            maybe_enqueue_single_leg_shadow_scan,
+                        )
+
+                        origin_blob = payload.get("origin")
+                        parent_origin = (
+                            origin_blob.get("origin")
+                            if isinstance(origin_blob, dict)
+                            else None
+                        )
+                        _sl_enq = maybe_enqueue_single_leg_shadow_scan(
+                            client,
+                            user_id=uid,
+                            source_job_run_id=payload.get("_job_run_id"),
+                            source_decision_id=source_decision_id,
+                            source_code_sha=source_code_sha,
+                            as_of=source_as_of,
+                            parent_origin=parent_origin,
+                        )
+                        cycle_result = cycle_result or {}
+                        cycle_result["single_leg_shadow_enqueue"] = _sl_enq
+                        _sl_errors = int(_sl_enq.get("errors") or 0)
+                        if _sl_errors:
+                            _slc = cycle_result.setdefault("counts", {})
+                            _slc["errors"] = (
+                                int(_slc.get("errors") or 0) + _sl_errors
+                            )
+                            notes.append(
+                                f"single-leg shadow enqueue DEGRADED for "
+                                f"{uid[:8]}: {_sl_enq.get('status')}"
+                            )
+                        elif _sl_enq.get("enqueued"):
+                            notes.append(
+                                f"single-leg shadow child enqueued for "
+                                f"{uid[:8]}: {_sl_enq.get('job_run_id')}"
+                            )
+                    except Exception as sl_err:
+                        cycle_result = cycle_result or {}
+                        _slc = cycle_result.setdefault("counts", {})
+                        _slc["errors"] = int(_slc.get("errors") or 0) + 1
+                        cycle_result["single_leg_shadow_enqueue"] = {
+                            "status": "enqueue_seam_crashed",
+                            "enqueued": False,
+                            "errors": 1,
+                            "error_class": type(sl_err).__name__,
+                            "error": str(sl_err)[:200],
+                        }
+                        notes.append(f"single-leg shadow enqueue error: {sl_err}")
 
                     # Capture cycle result for observability
                     if cycle_result:

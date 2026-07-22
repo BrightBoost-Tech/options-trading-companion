@@ -24,6 +24,7 @@ echo_effective_flags(process="worker")
 
 logger = logging.getLogger(__name__)
 
+
 def _fold_alert_write_failures(final_result: Dict[str, Any], before: int) -> Dict[str, Any]:
     """A9-F8 (2026-07-07): fold alert-insert losses that occurred DURING this
     handler into the job's result counts, so a run that silently lost alerts
@@ -76,17 +77,35 @@ def _classify_handler_return(result: Any) -> str:
     return "succeeded"
 
 
+def _build_handler_payload(job: Dict[str, Any], job_run_id: str) -> Dict[str, Any]:
+    """Return an isolated handler payload carrying runner-owned provenance.
+
+    ``job_runs.payload`` remains immutable. Only ``suggestions_open`` receives
+    the hidden ``_job_run_id`` field required for its attributable experiment
+    child. Every other handler receives a byte-identical shallow copy.
+    """
+
+    raw = job.get("payload")
+    payload = dict(raw) if isinstance(raw, dict) else {}
+    if str(job.get("job_name") or "") == "suggestions_open":
+        payload.setdefault("_job_run_id", str(job_run_id))
+        payload.setdefault("_job_name", "suggestions_open")
+    return payload
+
+
 class RetryableJobError(Exception):
     """
     Raised when a job should be retried.
     """
     pass
 
+
 class PermanentJobError(Exception):
     """
     Raised when a job should be dead-lettered immediately.
     """
     pass
+
 
 def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str, Any]:
     """
@@ -130,8 +149,8 @@ def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str,
         return {"status": "error", "error": f"mark_running_failed: {str(e)}", "job_run_id": job_run_id}
 
     job_name = job["job_name"]
-    # Payload from the DB record, not the one passed to this function
-    job_payload = job.get("payload", {})
+    # Payload from the DB record, copied and augmented with runner-owned metadata.
+    job_payload = _build_handler_payload(job, str(job_run_id))
 
     # 3. Dispatch to handler
     handlers = discover_handlers()

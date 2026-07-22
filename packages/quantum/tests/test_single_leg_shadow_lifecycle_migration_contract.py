@@ -8,19 +8,30 @@ MIGRATION = (
     / "migrations"
     / "20260722010000_single_leg_shadow_internal_lifecycle.sql"
 )
+HARDENING = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260722010100_single_leg_shadow_open_rpc_concurrency_hardening.sql"
+)
 
 
 def _sql():
     return MIGRATION.read_text(encoding="utf-8")
 
 
-def test_migration_exists_after_foundation():
+def _final_open_sql():
+    return HARDENING.read_text(encoding="utf-8")
+
+
+def test_migrations_exist_after_foundation_in_order():
     assert MIGRATION.exists()
+    assert HARDENING.exists()
     foundation = ROOT / "supabase" / "migrations" / (
         "20260721190000_single_leg_shadow_experiment_foundation.sql"
     )
     assert foundation.exists()
-    assert MIGRATION.name > foundation.name
+    assert foundation.name < MIGRATION.name < HARDENING.name
 
 
 def test_dedicated_internal_tables_and_no_live_table_writes():
@@ -50,7 +61,7 @@ def test_one_contract_shadow_internal_nonlive_constraints_are_repeated():
 
 
 def test_open_rpc_rechecks_every_authoritative_gate():
-    sql = _sql().lower()
+    sql = _final_open_sql().lower()
     assert "rpc_open_single_leg_shadow_position_v1" in sql
     for token in (
         "candidate_generated evidence missing",
@@ -69,8 +80,20 @@ def test_open_rpc_rechecks_every_authoritative_gate():
         assert token in sql
 
 
+def test_open_rpc_serializes_before_idempotency_and_uses_valid_sqlstates():
+    sql = _final_open_sql().lower()
+    run_lock = sql.index("from single_leg_shadow_runs")
+    existing_read = sql.index("from single_leg_shadow_orders")
+    assert run_lock < existing_read
+    assert "policy_registration_id = p_policy_registration_id" in sql
+    assert "portfolio_id = p_portfolio_id" in sql
+    assert "user_id = p_user_id" in sql
+    assert "insufficient_funds" not in sql
+    assert "using errcode = '23514'" in sql
+
+
 def test_open_rpc_is_atomic_cash_order_position_and_evidence():
-    sql = _sql().lower()
+    sql = _final_open_sql().lower()
     assert "insert into single_leg_shadow_orders" in sql
     assert "insert into single_leg_shadow_positions" in sql
     assert "update paper_portfolios" in sql
@@ -120,10 +143,10 @@ def test_service_role_reads_directly_but_writes_only_via_rpcs():
     assert "grant update on single_leg_shadow_positions" not in sql
 
 
-def test_migration_is_structural_only_until_runtime_rpc_calls():
-    sql = _sql().lower()
+def test_migrations_are_structural_only_until_runtime_rpc_calls():
+    sql = (_sql() + "\n" + _final_open_sql()).lower()
     assert "insert into policy_registrations" not in sql
     assert "insert into paper_portfolios" not in sql
     assert "insert into single_leg_experiment_bindings" not in sql
     assert "update single_leg_experiment_epochs" not in sql
-    assert "commit;" in sql
+    assert sql.count("commit;") == 2

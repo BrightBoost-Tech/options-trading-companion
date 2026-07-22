@@ -19,7 +19,8 @@ steps into one transaction or enable before the prior receipt is verified.
 - The following code is merged and deployed:
   - independent scheduler-only child scan;
   - internal-paper open/expiry custody;
-  - deterministic reader and no-write replay.
+  - deterministic reader and no-write replay;
+  - bound-portfolio isolation guards.
 - `single_leg_experiment_v1` currently has zero policy rows, epoch rows,
   bindings, runs, attempts, orders, positions, outcomes, and cash events.
 - The target user already has at least one established `live_eligible`
@@ -85,18 +86,22 @@ select
 
 Expected: `0 | 0 | 0 | 0`.
 
-## Phase 2 — apply control-RPC migration
+## Phase 2 — apply control and custody-guard migrations
 
-Apply exactly once:
+Apply exactly once, in order:
 
 ```text
 20260722020000_single_leg_experiment_control_rpcs.sql
+20260722020100_single_leg_experiment_portfolio_isolation.sql
 ```
 
-This migration creates functions only. It must not create policies, portfolios,
-bindings, or enable the epoch.
+The first migration creates control functions only. The second creates triggers,
+a restrictive authenticated-update policy, and validation functions only. Neither
+migration creates policies, portfolios, bindings, business rows, or enables the
+epoch.
 
-Verify one overload per control function and `service_role`-only execution:
+Verify one overload per control/guard function and `SECURITY DEFINER` where
+expected:
 
 ```sql
 select proname, oidvectortypes(proargtypes) as args, prosecdef
@@ -107,10 +112,31 @@ where proname in (
   'rpc_setup_single_leg_experiment_v1',
   'rpc_approve_single_leg_experiment_v1',
   'rpc_enable_single_leg_experiment_v1',
-  'rpc_pause_single_leg_experiment_v1'
+  'rpc_pause_single_leg_experiment_v1',
+  'single_leg_experiment_portfolio_is_bound_v1',
+  'single_leg_reject_normal_surface_on_bound_portfolio_v1',
+  'single_leg_experiment_binding_custody_guard_v1'
 )
 order by proname, args;
 ```
+
+Verify the three normal-paper isolation triggers and the binding-custody trigger:
+
+```sql
+select event_object_table, trigger_name
+from information_schema.triggers
+where trigger_name in (
+  'trg_single_leg_isolate_normal_paper_orders',
+  'trg_single_leg_isolate_normal_paper_positions',
+  'trg_single_leg_isolate_normal_paper_ledger',
+  'trg_single_leg_experiment_binding_custody'
+)
+order by event_object_table, trigger_name;
+```
+
+Expected: all four trigger names. Do not proceed if the isolation migration's
+preflight rejects existing custody; investigate the cited portfolio before any
+seed/setup action.
 
 ## Phase 3 — seed the four exact DRAFT registrations
 
@@ -256,8 +282,10 @@ where b.epoch_name = 'single_leg_experiment_v1'
 ```
 
 Expected before approval: `binding_count=2`, `enabled_bindings=0`,
-`exact_disabled_custody=2`. Also verify no normal `paper_orders` or
-`paper_positions` references either experiment portfolio. Stop on any mismatch.
+`exact_disabled_custody=2`. Also verify no normal `paper_orders`,
+`paper_positions`, or `paper_ledger` row references either experiment portfolio.
+The isolation triggers make such rows impossible after guard installation; the
+query is the operator receipt. Stop on any mismatch.
 
 Then call:
 

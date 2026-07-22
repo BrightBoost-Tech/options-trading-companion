@@ -378,6 +378,151 @@ class TestImmutabilityAndPrivileges:
             cur.execute("RESET ROLE")
 
 
+# ── MAINTAIN revoke (Lane-B follow-up, migration 20260721011000) ─────────────
+# Lane B revoked TRUNCATE/UPDATE/DELETE/REFERENCES/TRIGGER but left PG17's
+# MAINTAIN, because the schema-wide default ACL granted service_role ALL
+# (arwdDxtm — INCLUDING m) at CREATE-TABLE time. The follow-up migration drops
+# that residual so service_role holds EXACTLY {SELECT, INSERT}. These checks use
+# has_table_privilege + aclexplode(relacl) — information_schema.role_table_grants
+# is MAINTAIN-BLIND (it reports "INSERT,SELECT" even while relacl is 'arm', which
+# is exactly why the Lane-B information_schema grant test could not catch this).
+
+_ALL_TABLE_PRIVS = (
+    "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES",
+    "TRIGGER", "MAINTAIN",
+)
+
+
+def _effective_privs(cur, role):
+    """The set of table privileges ``role`` effectively holds (MAINTAIN-aware)."""
+    held = set()
+    for p in _ALL_TABLE_PRIVS:
+        cur.execute(
+            "SELECT has_table_privilege(%s, "
+            "'public.fleet_reconciliation_receipts', %s)", (role, p))
+        if cur.fetchone()[0]:
+            held.add(p)
+    return held
+
+
+def _relacl_privs(cur, role):
+    """Privileges granted to ``role`` per pg_class.relacl (aclexplode; MAINTAIN-
+    aware, unlike information_schema which omits MAINTAIN)."""
+    cur.execute(
+        "SELECT coalesce(string_agg(ae.privilege_type, ',' "
+        "ORDER BY ae.privilege_type), '') "
+        "FROM pg_class c "
+        "CROSS JOIN LATERAL aclexplode(c.relacl) ae "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname='public' "
+        "AND c.relname='fleet_reconciliation_receipts' "
+        "AND ae.grantee = %s::regrole", (role,))
+    row = cur.fetchone()[0]
+    return {p for p in row.split(",") if p}
+
+
+def _table_owner(cur):
+    cur.execute("SELECT tableowner FROM pg_tables WHERE schemaname='public' "
+                "AND tablename='fleet_reconciliation_receipts'")
+    return cur.fetchone()[0]
+
+
+class TestMaintainRevoke:
+    def test_service_role_has_no_maintain(self, conn):
+        cur = conn.cursor()
+        cur.execute("SELECT has_table_privilege('service_role', "
+                    "'public.fleet_reconciliation_receipts', 'MAINTAIN')")
+        assert cur.fetchone()[0] is False
+
+    def test_service_role_effective_privs_exactly_select_insert(self, conn):
+        """MAINTAIN-aware equivalent of the information_schema grant test: the
+        FULL effective set is exactly {SELECT, INSERT} — no MAINTAIN residual."""
+        cur = conn.cursor()
+        assert _effective_privs(cur, "service_role") == {"SELECT", "INSERT"}
+
+    def test_service_role_relacl_is_exactly_select_insert(self, conn):
+        """Same fact from pg_class.relacl (the raw ACL the adjudication read):
+        service_role's aclitem is exactly {SELECT, INSERT}, no 'm'."""
+        cur = conn.cursor()
+        assert _relacl_privs(cur, "service_role") == {"SELECT", "INSERT"}
+
+    def test_owner_retains_full_privileges(self, conn):
+        """Only service_role loses MAINTAIN; the table OWNER keeps EVERYTHING
+        (incl. MAINTAIN), so migrations / autovacuum / maintenance are
+        unaffected. Owner resolved dynamically (postgres in prod, the connecting
+        role in the harness)."""
+        cur = conn.cursor()
+        owner = _table_owner(cur)
+        assert _effective_privs(cur, owner) == set(_ALL_TABLE_PRIVS)
+
+    def test_writer_still_inserts_and_selects_as_service_role(self, conn):
+        """The definitive 'does REVOKE MAINTAIN break the writer?' proof: run the
+        writer RPC AS service_role (post-revoke). INSERT + the idempotency SELECT
+        both survive; a second call is an idempotent replay (SELECT-only path)."""
+        cur = conn.cursor()
+        u, fp = str(uuid.uuid4()), _fp()
+        cur.execute("SELECT set_config('request.jwt.claim.role','service_role',false)")
+        cur.fetchone()
+        cur.execute("SET ROLE service_role")
+        try:
+            oid = str(uuid.uuid4())
+            cur.execute("INSERT INTO paper_orders (id,user_id,broker_response) "
+                        "VALUES (%s,%s,%s)", (oid, u, _marker("stale_order", fp)))
+            first = _call(cur, u, "stale_order", fp, table="paper_orders", row=oid)
+            assert first["idempotent_replay"] is False   # INSERT path survives
+            replay = _call(cur, u, "stale_order", fp, table="paper_orders", row=oid)
+            assert replay["idempotent_replay"] is True    # SELECT-only path survives
+            assert replay["receipt_id"] == first["receipt_id"]
+        finally:
+            cur.execute("RESET ROLE")
+            cur.execute("SELECT set_config('request.jwt.claim.role','',false)")
+            cur.fetchone()
+        assert _receipt_count(cur, fp) == 1
+
+    def test_activation_existence_select_works_as_service_role(self, conn):
+        """The activation RPC binds by SELECT count(*) FROM the receipt table.
+        That existence SELECT still works as service_role after the revoke.
+        Mirror production: the service_role key sets the JWT role claim so the D1
+        RLS policy (auth.role() = 'service_role') passes — otherwise RLS filters
+        the rows (this is the RLS layer, orthogonal to the MAINTAIN grant)."""
+        cur = conn.cursor()
+        u, fp = str(uuid.uuid4()), _fp()
+        oid = _new_order(cur, u, _marker("stale_order", fp))
+        r = _call(cur, u, "stale_order", fp, table="paper_orders", row=oid)
+        cur.execute("SELECT set_config('request.jwt.claim.role','service_role',false)")
+        cur.fetchone()
+        cur.execute("SET ROLE service_role")
+        try:
+            cur.execute(
+                "SELECT count(*) FROM fleet_reconciliation_receipts "
+                "WHERE receipt_id=%s AND user_id=%s AND receipt_kind=%s "
+                "AND content_fingerprint=%s",
+                (r["receipt_id"], u, "stale_order", fp))
+            assert cur.fetchone()[0] == 1
+        finally:
+            cur.execute("RESET ROLE")
+            cur.execute("SELECT set_config('request.jwt.claim.role','',false)")
+            cur.fetchone()
+
+    def test_update_delete_truncate_still_blocked_as_service_role(self, conn):
+        """The MAINTAIN revoke does not weaken immutability: UPDATE/DELETE/TRUNCATE
+        remain permission-denied for service_role (grant gone) and, even if a
+        grant existed, the append-only triggers still fire (owner-side trigger
+        coverage lives in TestImmutabilityAndPrivileges)."""
+        cur = conn.cursor()
+        cur.execute("SET ROLE service_role")
+        try:
+            for sql in (
+                "UPDATE fleet_reconciliation_receipts SET created_by='x'",
+                "DELETE FROM fleet_reconciliation_receipts",
+                "TRUNCATE fleet_reconciliation_receipts",
+            ):
+                with pytest.raises(Exception, match="permission denied"):
+                    cur.execute(sql)
+        finally:
+            cur.execute("RESET ROLE")
+
+
 # ── No fleet/policy mutation ─────────────────────────────────────────────────
 
 def test_writer_touches_only_receipt_table(conn):

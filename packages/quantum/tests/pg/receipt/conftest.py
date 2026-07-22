@@ -13,10 +13,13 @@ already uses (see ../conftest.py and the fork/ordering modules). No
 this RPC lives in the pure-python mirror suite
 (packages/quantum/tests/test_fleet_reconciliation_receipt_writer.py).
 
-To RUN locally / in review, point it at a throwaway Postgres:
+To RUN locally / in review, point it at a throwaway Postgres. PostgreSQL 17+ is
+required: the 20260721011000 migration REVOKEs the PG17 MAINTAIN privilege (that
+keyword does not exist before PG17), and production is 17.6 — so the container
+must match:
 
     docker run -d --name pg -e POSTGRES_PASSWORD=pw -e POSTGRES_USER=pg \
-        -e POSTGRES_DB=testdb -p 55432:5432 postgres:16-alpine
+        -e POSTGRES_DB=testdb -p 55432:5432 postgres:17-alpine
     WT17_PG_PORT=55432 py -3.11 -m pytest packages/quantum/tests/pg/receipt
 
 Connection is read from WT17_PG_{HOST,PORT,USER,PASSWORD,DB} (same env as the
@@ -45,6 +48,7 @@ _MIGRATIONS = [
     _MIG_DIR / "20260720140000_fleet_reconciliation_receipts.sql",          # D1 schema
     _MIG_DIR / "20260721010000_rpc_issue_fleet_reconciliation_receipt_v1.sql",  # Lane A
     _MIG_DIR / "20260721010500_harden_fleet_receipt_privileges.sql",         # Lane B
+    _MIG_DIR / "20260721011000_revoke_fleet_receipt_maintain.sql",           # Lane B follow-up: drop residual PG17 MAINTAIN
 ]
 
 
@@ -75,9 +79,24 @@ def _connect():
 
 @pytest.fixture(scope="session")
 def receipt_pg_schema():
-    """Apply the bootstrap base tables + the 3 receipt migrations ONCE."""
+    """Apply the bootstrap base tables + the 4 receipt migrations ONCE.
+
+    PostgreSQL 17+ is required (the final migration REVOKEs MAINTAIN, a PG17
+    privilege). Fail loudly with a clear message rather than let the apply die on
+    an opaque "unrecognized privilege type: maintain" — this is a precondition,
+    not a skip."""
     conn = _connect()
     cur = conn.cursor()
+    cur.execute("SHOW server_version_num")
+    server_version_num = int(cur.fetchone()[0])
+    if server_version_num < 170000:
+        cur.close()
+        conn.close()
+        raise RuntimeError(
+            "receipt real-pg suite requires PostgreSQL >= 17 "
+            f"(found server_version_num={server_version_num}); the "
+            "20260721011000 migration REVOKEs the PG17 MAINTAIN privilege and "
+            "production is 17.6. Point WT17_PG_* at a postgres:17+ container.")
     cur.execute(_BOOTSTRAP_SQL.read_text(encoding="utf-8"))
     for mig in _MIGRATIONS:
         cur.execute(mig.read_text(encoding="utf-8"))

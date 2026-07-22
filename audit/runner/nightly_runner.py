@@ -1229,7 +1229,16 @@ class NightlyRunner:
         try:
             import broker_snapshot  # noqa: PLC0415
 
-            return broker_snapshot.write_snapshot(str(path))
+            # Pass the OPERATOR checkout as repo_root so the snapshot builder can
+            # load Alpaca creds from the operator's sanctioned, gitignored local
+            # .env files (F-RUNNER-BROKER-CREDS). The disposable audit worktree is
+            # reset to origin/main and never carries .env, so creds MUST be read
+            # from the operator checkout. No secret is copied here — only the
+            # repo path is passed; the builder reads the file read-only for
+            # GET-only broker truth and never echoes a value.
+            return broker_snapshot.write_snapshot(
+                str(path), repo_root=str(self.cfg.operator_repo)
+            )
         except Exception as exc:  # noqa: BLE001
             snap = {
                 "generated_at": _utc_ts(),
@@ -1315,6 +1324,9 @@ class NightlyRunner:
                 "available": bool(snap.get("available")),
                 "error": snap.get("error"),
                 "source": snap.get("source"),
+                # NO-SECRET credential provenance (key names + file paths +
+                # booleans only) so a broker-blind run says WHY — never a value.
+                "creds_source": snap.get("creds_source"),
             },
             "mcp": {
                 "expected_headless_broker": "absent",

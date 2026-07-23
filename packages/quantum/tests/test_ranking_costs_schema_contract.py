@@ -288,7 +288,7 @@ def test_runner_classifier_maps_errors_to_partial():
 
 
 def _patch_handler(monkeypatch, cycle_result):
-    async def fake_cycle(client, uid):
+    async def fake_cycle(client, uid, *args, **kwargs):
         return cycle_result
     monkeypatch.setattr(midday_scan, "run_midday_cycle", fake_cycle)
     monkeypatch.setattr(midday_scan, "get_admin_client", lambda: object())

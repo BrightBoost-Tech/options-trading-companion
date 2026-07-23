@@ -17,6 +17,7 @@ Runtime Environment Variables:
 
 import os
 import logging
+from collections import defaultdict
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
@@ -798,6 +799,13 @@ class PaperAutopilotService:
             _process_orders_for_user,
             get_analytics_service,
             EntryQuoteUnpriceable,
+            EntryRoundtripCostExceedsEV,
+        )
+        # Canonical terminal-status transition for an execution-time economic
+        # block (counterpart to stamp_executed; dependency-light leaf module,
+        # no circular-import risk).
+        from packages.quantum.services.suggestion_status import (
+            stamp_not_executable,
         )
 
         supabase = self.client
@@ -827,6 +835,13 @@ class PaperAutopilotService:
         today_str = datetime.now(timezone.utc).date().isoformat()
         all_executed = []
         all_errors = []
+        # EXPECTED economic blocks (e.g. the #1101 round-trip cost gate) — NOT
+        # execution failures. Counted separately so they never pollute
+        # all_errors / the cohort-failure alert (07-23 acddb64e/681d6270: a
+        # routine ev_below_roundtrip_cost block drove errors=1 + a spurious
+        # paper_autopilot_cohort_per_suggestion_failed warning).
+        blocked_count = 0
+        blocked_by_reason: Dict[str, int] = defaultdict(int)
         total_processed = 0
         # #72-H5b: aggregation list for per-cohort per-suggestion failures
         _cohort_per_suggestion_failures = []
@@ -1262,6 +1277,53 @@ class PaperAutopilotService:
                     })
                     self._stamp_blocked_reason(sid, "entry_quote_unpriceable", str(_eq))
                     continue
+                except EntryRoundtripCostExceedsEV as _rt:
+                    # #1101 round-trip cost gate — an EXPECTED economic block
+                    # raised pre-broker-submit (gross EV does not survive the
+                    # executable round-trip cross vs the $15 floor; the gate
+                    # already logged the numbers at ENTRY_ROUNDTRIP_GATE). This
+                    # is NOT an execution failure: do NOT append to all_errors
+                    # or _cohort_per_suggestion_failures — no cohort-failure
+                    # alert fires for a routine economic reject (the 07-23
+                    # acddb64e/681d6270 mislabel this fixes). Mirrors the
+                    # EntryUtilizationBlocked / SymbolCooldownActive handlers.
+                    logger.warning(
+                        "[ROUNDTRIP_GATE] STAGE gate BLOCKED %s/%s cohort=%s — %s",
+                        ticker, sid[:8], cohort_name, _rt,
+                    )
+                    blocked_count += 1
+                    blocked_by_reason["ev_below_roundtrip_cost"] += 1
+                    # Terminal honesty: transition the row OUT of retryable
+                    # 'pending' into the canonical durable NOT_EXECUTABLE state
+                    # (+ blocked_reason/detail) so the morning sweep can't
+                    # relabel it 'dismissed' and the next cycle can't re-attempt
+                    # the same losing entry. A persist FAILURE here is a REAL
+                    # error (job partial) — never silently green.
+                    try:
+                        stamp_not_executable(
+                            supabase, sid, "ev_below_roundtrip_cost", str(_rt),
+                        )
+                    except Exception as _persist_err:
+                        logger.error(
+                            "[ROUNDTRIP_GATE] terminal NOT_EXECUTABLE persist "
+                            "FAILED for %s/%s cohort=%s — recording as job "
+                            "error: %s",
+                            ticker, sid[:8], cohort_name, _persist_err,
+                        )
+                        all_errors.append({
+                            "cohort": cohort_name, "suggestion_id": sid,
+                            "error": (
+                                f"terminal_status_persist_failed: {_persist_err}"
+                            ),
+                        })
+                        _cohort_per_suggestion_failures.append({
+                            "cohort_name": cohort_name,
+                            "suggestion_id": sid,
+                            "ticker": ticker,
+                            "error_class": "TerminalStatusPersistFailed",
+                            "error_message": str(_persist_err)[:200],
+                        })
+                    continue
                 except Exception as e:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")
                     all_errors.append({"cohort": cohort_name, "suggestion_id": sid, "error": str(e)})
@@ -1336,6 +1398,11 @@ class PaperAutopilotService:
             "status": "partial" if all_errors else "ok",
             "executed_count": len(all_executed),
             "error_count": len(all_errors),
+            # EXPECTED economic blocks — reported separately from failures so a
+            # routine ev_below_roundtrip_cost reject reads as blocked, not
+            # errored (error_count now EXCLUDES blocks; status stays 'ok').
+            "blocked_count": blocked_count,
+            "blocked_by_reason": dict(blocked_by_reason),
             "executed": all_executed,
             "errors": all_errors or None,
             "processed_summary": {

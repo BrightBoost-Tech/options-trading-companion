@@ -7,7 +7,6 @@
       "Grep",
       "ToolSearch",
       "Agent",
-      "Write(audit/**)",
       "Edit(audit/**)",
       "mcp__supabase__execute_sql",
       "mcp__supabase__list_tables",

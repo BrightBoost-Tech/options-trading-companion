@@ -2266,7 +2266,7 @@ def build_momentum_observation_rows(user_id, cycle_date, inserted_suggestions):
     return rows
 
 
-async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_override: Optional[float] = None):
+async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_override: Optional[float] = None, job_run_id: Optional[str] = None):
     """
     1. Use CashService.get_deployable_capital.
     2. Call optimizer/scanner to generate candidate trades.
@@ -2275,6 +2275,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
     deployable_capital_override (additive, default None → byte-identical): see
     _fetch_capital — the paper-shadow executor's synthetic-tier seam.
+
+    job_run_id (additive, default None → byte-identical): P1-1 (2026-07-23),
+    threaded from the handler's ``payload["_job_run_id"]`` so every persisted
+    suggestion_rejections row is attributable to its owning job_run (closes the
+    0/14,217 NULL-linkage gap). None on dev/manual routes → rows carry NULL
+    job_run_id, exactly as before.
     """
     t_cycle_start = time.monotonic()
 
@@ -2639,6 +2645,7 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             global_snapshot=global_snap,
             portfolio_cash=deployable_capital,
             account_tier=_midday_tier.name,
+            job_run_id=job_run_id,
         )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
@@ -4661,8 +4668,15 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "candidates": len(candidates),
                 "created": inserts_count,
                 "existing": existing_count,
-                # Observability (FIX 2 H9 verification):
+                # Observability (FIX 2 H9 verification): the partial driver =
+                # post-final-flush lost_after_retries + permanent_failure only.
                 "rejection_persist_failures": _persist_failures,
+                # P1-1 (2026-07-23) append-only persist taxonomy (observe-only).
+                "rejection_persisted_new": _scanner_stats.get("persisted_new", 0),
+                "rejection_duplicate_ack": _scanner_stats.get("duplicate_ack", 0),
+                "rejection_retry_recovery": _scanner_stats.get("retry_recovery", 0),
+                "rejection_lost_after_retries": _scanner_stats.get("lost_after_retries", 0),
+                "rejection_permanent_failure": _scanner_stats.get("permanent_failure", 0),
                 # #1218 job-truth (2026-07-16): per-suggestion inserts that
                 # exhausted the bounded strip/retry (e.g. a required column
                 # missing from the schema, like the ranking_costs PGRST204)

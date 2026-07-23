@@ -6,7 +6,8 @@ import numpy as np
 import operator
 import threading
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
+from uuid import uuid4
 from supabase import Client
 import logging
 import concurrent.futures
@@ -229,6 +230,16 @@ EXECUTION_COST_MAX_MULT = float(os.getenv("EXECUTION_COST_MAX_MULT", "1.5"))  # 
 logger = logging.getLogger(__name__)
 
 
+def _is_duplicate_key_violation(exc: BaseException) -> bool:
+    """True when ``exc`` is a Postgres/PostgREST UNIQUE violation (SQLSTATE
+    23505). Reuses the repo-wide convention
+    (``candidate_disposition._is_unique_violation``): a re-insert of a row
+    whose ``event_id`` already exists is the response-lost-after-commit retry
+    landing a second time — an idempotent duplicate to ACK, never an error."""
+    msg = str(exc).lower()
+    return "23505" in msg or "duplicate key" in msg
+
+
 class RejectionStats:
     """Thread-safe rejection statistics tracker for scanner diagnostics."""
 
@@ -254,6 +265,7 @@ class RejectionStats:
         cycle_date: Optional[date] = None,
         job_run_id: Optional[str] = None,
         retry_sleep: Optional[Any] = None,
+        client_factory: Optional[Callable[[], Any]] = None,
     ):
         self._counts: Dict[str, int] = defaultdict(int)
         # #113 PR-6: per-strategy dimension. Outer dict keyed by
@@ -290,22 +302,37 @@ class RejectionStats:
         self._cycle_date = cycle_date
         self._job_run_id = job_run_id
         self._tls = threading.local()
-        # FIX 2 (2026-05-18 instrumentation gap) H9 verification:
-        # count of suggestion_rejections.insert() failures since
-        # construction. Surfaces via to_dict() so cycle_metadata can
-        # show a non-zero value if writes are silently failing
-        # (the existing logger.warning is easy to miss in production).
-        # Per H9 doctrine "verified-write across wrapper chains":
-        # observability writes are fail-soft (anti-pattern 5 valid
-        # case — see _persist_rejection docstring), so we don't raise,
-        # but we DO count so the operator can detect drift.
-        self._persist_failures: int = 0
+        # P1-1 (2026-07-23): append-only idempotent persistence taxonomy.
+        # Every legitimate rejection is persisted via a plain INSERT carrying
+        # a per-event ``event_id`` (uuid4) generated ONCE before attempt 1 and
+        # reused verbatim across retries. The DB's unique partial index on
+        # event_id turns a response-lost-after-commit re-insert into a
+        # duplicate that is ACKed (never a second row, never an UPDATE). Each
+        # rejection increments EXACTLY ONE of the five mutually-exclusive
+        # outcome counters below (H9 verified-write: observability is
+        # fail-soft, so we never raise, but we DO count so the operator can
+        # detect drift). ONLY ``lost_after_retries``/``permanent_failure`` roll
+        # into the job-PARTIAL classification; duplicate_ack/retry_recovery do
+        # not (a duplicate ack or an absorbed transient burst is not a lost row).
+        self._c_persisted_new: int = 0
+        self._c_duplicate_ack: int = 0
+        self._c_retry_recovery: int = 0
+        self._c_lost_after_retries: int = 0
+        self._c_permanent_failure: int = 0
         self._persist_failures_lock = threading.Lock()
-        # A5 2026-07-01: count of inserts that failed transiently but were
-        # RECOVERED by the retry loop (persist_failures stays 0 on a full
-        # recovery). Surfaces via to_dict() → job_runs.result so a
-        # disconnect burst absorbed by the retry is still visible.
-        self._persist_retry_recoveries: int = 0
+        # Final-flush queue: rows that exhausted their inline transient retries
+        # (already counted lost_after_retries). flush() makes ONE last attempt
+        # per row with a fresh client at scan end — no NEW silent-loss window is
+        # introduced (a buffered row is already counted lost; flush can only
+        # RECOVER it), and there is no unflushed-buffer-of-unattempted-rows
+        # window (every row is always attempted inline first).
+        self._lost_payloads: List[Dict[str, Any]] = []
+        # Optional factory that returns a FRESH supabase client, used to
+        # REPLACE the possibly-poisoned handle before a transient retry (a dead
+        # keepalive session fails identically on every reuse). Injected by
+        # scan_for_opportunities in production (get_admin_client); None in
+        # direct-construction unit tests → the retry reuses the current handle.
+        self._client_factory = client_factory
         # Injectable backoff sleep (constructor DI, not @patch: dotted-path
         # patching on this module is order-fragile in the full suite — see
         # test_credit_spread_emission._read_anomaly_threshold's note on
@@ -319,24 +346,57 @@ class RejectionStats:
         ``_apply_tier_price_filter`` loop. Pass ``None`` to clear."""
         self._tls.current_symbol = symbol
 
+    def _refresh_client(self, current: Any) -> Any:
+        """Return a client to use for the NEXT (transient) retry attempt.
+
+        A stale-keepalive session fails identically on every reuse, so a
+        transient retry must NOT blindly reuse the poisoned handle. When a
+        ``client_factory`` is configured (production: get_admin_client, which
+        builds a brand-new client with a fresh connection pool) it is used to
+        REPLACE the handle. Fail-soft: any factory error, or no factory
+        (direct-construction unit tests, where ``current`` is a fake with no
+        live transport to poison), falls back to the current handle — the
+        retry stays bounded either way."""
+        factory = self._client_factory
+        if factory is None:
+            return current
+        try:
+            fresh = factory()
+            return fresh if fresh is not None else current
+        except Exception:  # noqa: BLE001 — refresh is best-effort
+            logger.debug(
+                "rejection persist client refresh failed (non-fatal); "
+                "reusing current handle",
+                exc_info=True,
+            )
+            return current
+
     def _persist_rejection(
         self,
         reason: str,
         strategy: Optional[str],
         sample: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Best-effort granular persist to suggestion_rejections.
+        """Append-only idempotent persist to suggestion_rejections.
 
-        Tier 1C (2026-05-13). Fails silently — observability writes
-        must not break the aggregate flow. The aggregate count in
-        ``_counts`` is the authoritative source; this row is
-        supplementary granularity for learning-mode analysis.
+        Tier 1C (2026-05-13); made idempotent P1-1 (2026-07-23). Fails
+        silently — observability writes must not break the aggregate flow.
+        The aggregate count in ``_counts`` is the authoritative source; this
+        row is supplementary granularity for learning-mode analysis.
 
-        H9 Convention note: this is the OPPOSITE of "verify side
-        effect, surface failure" — appropriate here because the row
-        is purely additive observability, not on the trade-decision
-        path. Anti-pattern 5 valid case (failure of observability
-        write must not undo primary work).
+        A per-event ``event_id`` (uuid4) is generated ONCE, before attempt 1,
+        and reused verbatim across every retry. A response-lost-after-commit
+        retry therefore re-sends the SAME event_id, which the DB's unique
+        partial index rejects as a duplicate — caught and classified
+        ``duplicate_ack`` below (an INSERT that no-ops, NEVER an UPDATE, so an
+        existing row is never modified). Two DISTINCT legitimate rejections of
+        the same (cycle_date, symbol, strategy_key, reason) tuple get DIFFERENT
+        event_ids and BOTH persist, so legitimate repeats stay distinguishable.
+
+        H9 Convention note: this is the OPPOSITE of "verify side effect,
+        surface failure" — appropriate here because the row is purely additive
+        observability, not on the trade-decision path. Anti-pattern 5 valid
+        case (failure of observability write must not undo primary work).
         """
         if self._supabase is None or self._cycle_date is None:
             return
@@ -346,66 +406,176 @@ class RejectionStats:
             # rather than write a row with no attribution.
             return
         try:
+            # Built ONCE — event_id generated before the first insert and
+            # reused across every retry (same dict object). This is the
+            # load-bearing invariant: an exact retry cannot manufacture a
+            # second row, because the DB collapses the repeated event_id.
             payload: Dict[str, Any] = {
                 "symbol": symbol,
                 "strategy_key": strategy,
                 "reason": reason,
                 "cycle_date": self._cycle_date.isoformat(),
+                "event_id": str(uuid4()),
             }
             if self._job_run_id is not None:
                 payload["job_run_id"] = self._job_run_id
             if sample is not None:
                 payload["spread_debug"] = self._make_json_safe(sample)
-            # A5 2026-07-01: right-sized retry on transient stale-keepalive
-            # disconnects, reusing #1100's classifier. ONLY a transient
-            # disconnect retries; every other exception breaks straight out
-            # to the unchanged fail-soft counter + warning below.
+
+            # A5 2026-07-01 / P1-1 2026-07-23: bounded retry on transient
+            # stale-keepalive disconnects only (#1100's classifier). ONLY a
+            # transient disconnect retries — and it retries on a FRESH client.
+            # A duplicate-key violation is an idempotent ACK (stop, success). A
+            # permanent/schema/auth error (42xxx, 401/403) never retries as
+            # transient.
+            client = self._supabase
             last_exc: Optional[BaseException] = None
-            recovered_on_retry = False
+            outcome: Optional[str] = None
             for attempt in range(1 + len(self.PERSIST_RETRY_BACKOFFS)):
                 if attempt:
                     self._retry_sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
+                    client = self._refresh_client(client)
                 try:
-                    self._supabase.table("suggestion_rejections").insert(payload).execute()
-                    recovered_on_retry = attempt > 0
+                    client.table("suggestion_rejections").insert(payload).execute()
+                    outcome = "retry_recovery" if attempt else "persisted_new"
                     last_exc = None
                     break
                 except Exception as exc:  # noqa: BLE001 — classified below
                     last_exc = exc
-                    if not _is_transient_disconnect(exc):
+                    if _is_duplicate_key_violation(exc):
+                        # The first physical write committed; this re-send
+                        # carries the SAME event_id → exactly one row exists.
+                        # Idempotent success, NOT an error, NEVER an UPDATE.
+                        outcome = "duplicate_ack"
+                        last_exc = None
                         break
-            if last_exc is not None:
-                if _is_transient_disconnect(last_exc):
-                    # DISTINCT loss marker (mirrors alert_lost_after_retries):
-                    # a transient disconnect persisted through every retry and
-                    # the row is gone.
-                    logger.error(
-                        "rejection_row_lost_after_retries (symbol=%s reason=%s retries=%d): %s",
-                        symbol, reason, len(self.PERSIST_RETRY_BACKOFFS), last_exc,
-                    )
-                raise last_exc
-            if recovered_on_retry:
-                # WARNING (not INFO — the deployed worker filters INFO) so a
-                # burst the retry absorbed is still visible in logs; counted
-                # so job_runs.result shows it durably.
-                with self._persist_failures_lock:
-                    self._persist_retry_recoveries += 1
-                logger.warning(
-                    "suggestion_rejections insert recovered after transient-disconnect retry (symbol=%s reason=%s)",
-                    symbol, reason,
-                )
+                    if not _is_transient_disconnect(exc):
+                        # Permanent/schema/auth (incl. pre-apply column-missing)
+                        # — do NOT retry as transient. Loud, counted, no retry.
+                        outcome = "permanent_failure"
+                        break
+                    # transient → loop and retry with a fresh client
+            if outcome is None:
+                # Every attempt was a transient disconnect that never recovered.
+                outcome = "lost_after_retries"
+
+            self._record_persist_outcome(
+                outcome, payload, symbol, reason, strategy, last_exc
+            )
         except Exception as e:  # noqa: BLE001 — observability fail-soft
-            # FIX 2 (2026-05-18 H9 verification): increment failure
-            # counter in addition to the existing logger.warning so
-            # the operator can see drift via cycle_metadata.counts.
-            # The counter surfaces in to_dict() → workflow_orchestrator
-            # cycle_result → job_runs.result.counts.rejection_persist_failures.
+            # An UNEXPECTED error (building the payload, an unclassifiable
+            # dispatch fault) is still fail-soft: count it as a permanent
+            # failure so the operator sees drift, and NEVER break the scan.
             with self._persist_failures_lock:
-                self._persist_failures += 1
+                self._c_permanent_failure += 1
             logger.warning(
                 "suggestion_rejections insert failed (symbol=%s reason=%s strategy=%s): %s",
-                symbol, reason, strategy, e,
+                getattr(self._tls, "current_symbol", None), reason, strategy, e,
             )
+
+    def _record_persist_outcome(
+        self,
+        outcome: str,
+        payload: Dict[str, Any],
+        symbol: Optional[str],
+        reason: str,
+        strategy: Optional[str],
+        last_exc: Optional[BaseException],
+    ) -> None:
+        """Increment the single mutually-exclusive outcome counter and emit the
+        matching log line. Counter mutation under the lock; logging outside it."""
+        with self._persist_failures_lock:
+            if outcome == "persisted_new":
+                self._c_persisted_new += 1
+            elif outcome == "duplicate_ack":
+                self._c_duplicate_ack += 1
+            elif outcome == "retry_recovery":
+                self._c_retry_recovery += 1
+            elif outcome == "permanent_failure":
+                self._c_permanent_failure += 1
+            elif outcome == "lost_after_retries":
+                self._c_lost_after_retries += 1
+                # Buffer the (already-counted-lost) row for ONE final flush
+                # attempt at scan end. No new silent-loss window.
+                self._lost_payloads.append(payload)
+
+        if outcome == "retry_recovery":
+            # WARNING (not INFO — the deployed worker filters INFO) so a burst
+            # the retry absorbed is still visible in logs.
+            logger.warning(
+                "suggestion_rejections insert recovered after transient-disconnect retry (symbol=%s reason=%s)",
+                symbol, reason,
+            )
+        elif outcome == "lost_after_retries":
+            # DISTINCT loss marker (mirrors alert_lost_after_retries) plus the
+            # unchanged fail-soft fallback line the operator greps for.
+            logger.error(
+                "rejection_row_lost_after_retries (symbol=%s reason=%s retries=%d): %s",
+                symbol, reason, len(self.PERSIST_RETRY_BACKOFFS), last_exc,
+            )
+            logger.warning(
+                "suggestion_rejections insert failed (symbol=%s reason=%s strategy=%s): %s",
+                symbol, reason, strategy, last_exc,
+            )
+        elif outcome == "permanent_failure":
+            logger.warning(
+                "suggestion_rejections insert failed (symbol=%s reason=%s strategy=%s): %s",
+                symbol, reason, strategy, last_exc,
+            )
+
+    def flush(self) -> Dict[str, int]:
+        """Final-flush at scan end (called once by scan_for_opportunities before
+        return): make ONE last attempt to persist rows that exhausted their
+        inline transient retries, using a FRESH client (the poisoned connection
+        has usually recovered by now). A recovered row reclassifies
+        lost_after_retries → retry_recovery; a row that turns out to have
+        committed inline (duplicate) reclassifies → duplicate_ack; a row still
+        lost stays lost (the job stays PARTIAL for it). Idempotent, fail-soft,
+        and safe to call multiple times. Returns the 5-counter snapshot."""
+        if self._supabase is None or self._cycle_date is None:
+            return self._persist_counter_snapshot()
+        with self._persist_failures_lock:
+            pending = list(self._lost_payloads)
+            self._lost_payloads = []
+        if not pending:
+            return self._persist_counter_snapshot()
+        client = self._refresh_client(self._supabase)
+        for payload in pending:
+            try:
+                client.table("suggestion_rejections").insert(payload).execute()
+                with self._persist_failures_lock:
+                    self._c_lost_after_retries -= 1
+                    self._c_retry_recovery += 1
+                logger.warning(
+                    "suggestion_rejections FINAL-FLUSH recovered a lost row (symbol=%s reason=%s)",
+                    payload.get("symbol"), payload.get("reason"),
+                )
+            except Exception as exc:  # noqa: BLE001 — final attempt, fail-soft
+                if _is_duplicate_key_violation(exc):
+                    # The inline attempt actually committed (the loss was a
+                    # response-lost-after-commit); the row exists exactly once.
+                    with self._persist_failures_lock:
+                        self._c_lost_after_retries -= 1
+                        self._c_duplicate_ack += 1
+                    continue
+                # Still lost after the final attempt — leave lost_after_retries
+                # in place so the job remains PARTIAL for this genuinely-lost row.
+                logger.error(
+                    "suggestion_rejections FINAL-FLUSH still lost (symbol=%s reason=%s): %s",
+                    payload.get("symbol"), payload.get("reason"), exc,
+                )
+        return self._persist_counter_snapshot()
+
+    def _persist_counter_snapshot(self) -> Dict[str, int]:
+        """Thread-safe snapshot of the five append-only persist counters."""
+        with self._persist_failures_lock:
+            return {
+                "persisted_new": self._c_persisted_new,
+                "duplicate_ack": self._c_duplicate_ack,
+                "retry_recovery": self._c_retry_recovery,
+                "lost_after_retries": self._c_lost_after_retries,
+                "permanent_failure": self._c_permanent_failure,
+            }
 
     def record(self, reason: str, strategy: Optional[str] = None) -> None:
         """Record a rejection reason (thread-safe).
@@ -513,12 +683,20 @@ class RejectionStats:
                 strat: dict(reasons)
                 for strat, reasons in self._per_strategy_counts.items()
             }
-            # FIX 2 (2026-05-18 H9 verification): both the legacy
-            # `counts` dict-of-reason-counts and `persist_failures` count
-            # are surfaced for cycle_metadata consumption.
+            # FIX 2 (2026-05-18 H9 verification) + P1-1 (2026-07-23): surface
+            # the five append-only persist outcome counters, plus the two
+            # backward-compat aliases the orchestrator/handlers already read.
+            # ``persist_failures`` is EXACTLY the partial driver
+            # (lost_after_retries + permanent_failure); duplicate_ack and
+            # retry_recovery deliberately do NOT feed it.
             with self._persist_failures_lock:
-                _pf = self._persist_failures
-                _prr = self._persist_retry_recoveries
+                _pn = self._c_persisted_new
+                _da = self._c_duplicate_ack
+                _rr = self._c_retry_recovery
+                _lar = self._c_lost_after_retries
+                _pf_perm = self._c_permanent_failure
+            _pf = _lar + _pf_perm
+            _prr = _rr
             return {
                 "rejection_counts": dict(self._counts),
                 "counts": dict(self._counts),  # FIX 1 alias for cycle_metadata reads
@@ -533,6 +711,14 @@ class RejectionStats:
                 "rejection_samples_cap": self._samples_cap,
                 "emission_counts_by_strategy": dict(self._emission_counts),
                 "rejection_counts_by_strategy_and_reason": per_strategy,
+                # P1-1 (2026-07-23) append-only persist taxonomy (durable in
+                # the cycle counts). Only the two loss counters partial the job.
+                "persisted_new": _pn,
+                "duplicate_ack": _da,
+                "retry_recovery": _rr,
+                "lost_after_retries": _lar,
+                "permanent_failure": _pf_perm,
+                # Backward-compat aliases (partial driver + recovery signal).
                 "persist_failures": _pf,
                 "persist_retry_recoveries": _prr,
             }
@@ -2851,6 +3037,7 @@ def scan_for_opportunities(
     global_snapshot: GlobalRegimeSnapshot = None,
     portfolio_cash: float = None,
     account_tier: Optional[str] = None,
+    job_run_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], RejectionStats]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -2878,9 +3065,23 @@ def scan_for_opportunities(
     # suggestion_rejections alongside the aggregate count.
     # Falls back to aggregate-only when supabase_client is None
     # (tests, dry-runs).
+    # P1-1 (2026-07-23): thread job_run_id (closes the 0/14,217 NULL-linkage
+    # gap — every NEW job-owned rejection row is now attributable) and a
+    # client_factory (get_admin_client builds a brand-new client so a
+    # transient retry never blindly reuses a poisoned keepalive session).
+    _rej_client_factory: Optional[Callable[[], Any]] = None
+    if supabase_client is not None:
+        try:
+            from packages.quantum.jobs.handlers.utils import (
+                get_admin_client as _rej_client_factory,
+            )
+        except Exception:  # noqa: BLE001 — refresh is best-effort
+            _rej_client_factory = None
     rejection_stats = RejectionStats(
         supabase=supabase_client,
         cycle_date=datetime.now().date(),
+        job_run_id=job_run_id,
+        client_factory=_rej_client_factory,
     )
 
     # Lane 4C (2026-07-17): per-cycle option-quote provenance recorder —
@@ -4669,5 +4870,19 @@ def scan_for_opportunities(
             logger.info("quote_provenance flush: %s", _prov_counts)
     except Exception:
         logger.warning("quote_provenance flush failed", exc_info=True)
+
+    # P1-1 (2026-07-23): final-flush of rejection rows that exhausted their
+    # inline transient retries — ONE last attempt on a fresh client at the scan
+    # boundary so no lost row is dropped silently at process exit. Fail-soft;
+    # never breaks the scan return. Recovered rows reclassify away from
+    # lost_after_retries so the job is only PARTIAL on genuinely-lost rows.
+    try:
+        _rej_flush = rejection_stats.flush()
+        if _rej_flush.get("lost_after_retries") or _rej_flush.get("permanent_failure"):
+            logger.warning("rejection_persist final-flush: %s", _rej_flush)
+        else:
+            logger.info("rejection_persist final-flush: %s", _rej_flush)
+    except Exception:
+        logger.warning("rejection_persist final-flush failed", exc_info=True)
 
     return candidates, rejection_stats

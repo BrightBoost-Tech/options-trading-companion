@@ -422,7 +422,7 @@ class TestHandlerWiring:
 
         eng = RiskBudgetEngine(_MockSB())
 
-        async def _fake_cycle(client, uid):
+        async def _fake_cycle(client, uid, *args, **kwargs):
             eng.compute("u", 100.0, "normal",
                         [_long_opt(1.0, max_loss_total=5000.0,
                                    max_loss_per_contract=10.0)])

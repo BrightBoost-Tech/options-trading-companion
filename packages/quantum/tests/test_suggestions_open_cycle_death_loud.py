@@ -27,11 +27,11 @@ from packages.quantum.jobs.handlers import suggestions_open
 _UID = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 
 
-async def _dying_cycle(client, uid):
+async def _dying_cycle(client, uid, *args, **kwargs):
     raise RuntimeError("cannot access local variable '_x' (simulated)")
 
 
-async def _healthy_cycle(client, uid):
+async def _healthy_cycle(client, uid, *args, **kwargs):
     return {"skipped": False, "reason": "ok", "counts": {}}
 
 

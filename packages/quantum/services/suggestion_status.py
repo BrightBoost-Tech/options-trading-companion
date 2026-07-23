@@ -48,6 +48,13 @@ _POSITIONS = "paper_positions"
 # not by this real-time stamp.
 _PROMOTABLE = ["pending", "staged", "queued"]
 
+# The canonical durable non-actionable status — the value the scan-time
+# quality gate (workflow_orchestrator) and the pre-rejection fork
+# (policy_lab.fork) already write for a candidate that will never execute.
+# Named here so execution-time callers transition to it THROUGH
+# ``stamp_not_executable`` instead of hand-writing the literal at each site.
+_NOT_EXECUTABLE = "NOT_EXECUTABLE"
+
 
 def funnel_status_truthful_enabled() -> bool:
     """``FUNNEL_STATUS_TRUTHFUL_ENABLED`` — default ON.
@@ -96,6 +103,55 @@ def stamp_executed(supabase, suggestion_id: Any) -> bool:
             f"{str(suggestion_id)[:8]}: {e}"
         )
         return False
+
+
+def stamp_not_executable(
+    supabase, suggestion_id: Any, blocked_reason: str, blocked_detail: str = "",
+) -> bool:
+    """Terminal-honesty counterpart to ``stamp_executed`` — transition an
+    in-flight suggestion to the canonical durable ``NOT_EXECUTABLE`` state at an
+    execution-time economic block.
+
+    The #1101 round-trip cost gate raises ``EntryRoundtripCostExceedsEV``
+    pre-broker-submit (gross EV does not survive the executable round-trip cross
+    vs the $15 floor). Such a candidate must NOT stay retryable ``pending``: the
+    next-morning ``suggestions_close`` sweep would relabel it ``dismissed`` and
+    the next execution cycle would re-attempt the same losing entry. This writes
+    ``status='NOT_EXECUTABLE'`` + ``blocked_reason`` + ``blocked_detail`` in ONE
+    durable update, promoting ONLY from an in-flight status (``_PROMOTABLE``) so
+    it can never clobber a terminal ``executed`` / ``dismissed`` row
+    (idempotent, symmetric with ``stamp_executed``).
+
+    Deliberately NOT fail-soft (the one difference from ``stamp_executed``): a
+    persist FAILURE is a real error the caller MUST surface (job partial) — the
+    exception PROPAGATES rather than being swallowed. A successful update that
+    promotes zero rows (the row was already terminal) is a benign idempotent
+    no-op and returns ``False``.
+
+    No-op (returns ``False``, no write) when the flag is off or
+    ``suggestion_id`` is falsy — legacy funnel behavior (the row stays pending;
+    the morning sweep reconciles it).
+    """
+    if not suggestion_id or not funnel_status_truthful_enabled():
+        return False
+    res = (
+        supabase.table(_TABLE)
+        .update({
+            "status": _NOT_EXECUTABLE,
+            "blocked_reason": blocked_reason,
+            "blocked_detail": str(blocked_detail)[:300],
+        })
+        .eq("id", suggestion_id)
+        .in_("status", _PROMOTABLE)
+        .execute()
+    )
+    promoted = bool(getattr(res, "data", None))
+    if promoted:
+        logger.info(
+            f"[FUNNEL_STATUS] suggestion {str(suggestion_id)[:8]} "
+            f"-> NOT_EXECUTABLE ({blocked_reason})"
+        )
+    return promoted
 
 
 def reconcile_stale_pending(

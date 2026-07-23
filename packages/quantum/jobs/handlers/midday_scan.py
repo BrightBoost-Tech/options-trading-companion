@@ -32,7 +32,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 _arm = None
                 try:
                     with rbs.arm_evidence_scope(cycle_id=f"midday_scan:{uid}") as _arm:
-                        cycle_result = await run_midday_cycle(client, uid)
+                        # P1-1 (2026-07-23): thread the owning job_run_id so
+                        # rejection rows from the manual/public midday route are
+                        # attributable too (the runner stamps payload._job_run_id).
+                        cycle_result = await run_midday_cycle(
+                            client, uid, job_run_id=payload.get("_job_run_id")
+                        )
                     processed += 1
                     # #1218 job-truth (2026-07-16): run_midday_cycle catches
                     # per-suggestion insert failures internally (it fires the

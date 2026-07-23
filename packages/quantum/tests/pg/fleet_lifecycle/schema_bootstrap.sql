@@ -42,14 +42,20 @@ CREATE TABLE policy_registrations (
     schema_version integer NOT NULL DEFAULT 1
 );
 
+-- IMPORTANT: this MUST match the REAL production paper_portfolios shape exactly
+-- so a migration referencing a non-existent column fails HERE instead of on
+-- production. Verified live (information_schema, 2026-07-23): the columns are
+-- id, user_id, name, cash_balance, net_liq, created_at, routing_mode — and there
+-- is NO updated_at column. Do NOT add columns production lacks.
 CREATE TABLE paper_portfolios (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL,
+    name text NOT NULL DEFAULT 'Main Paper',
     cash_balance numeric NOT NULL DEFAULT 2000,
     net_liq numeric NOT NULL DEFAULT 2000,
+    created_at timestamptz NOT NULL DEFAULT now(),
     routing_mode text NOT NULL DEFAULT 'shadow_only'
-        CHECK (routing_mode = ANY (ARRAY['live_eligible', 'shadow_only'])),
-    updated_at timestamptz DEFAULT now()
+        CHECK (routing_mode = ANY (ARRAY['live_eligible', 'shadow_only']))
 );
 
 CREATE TABLE shadow_fleets (

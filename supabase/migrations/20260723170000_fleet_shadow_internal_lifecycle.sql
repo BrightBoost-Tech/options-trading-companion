@@ -404,7 +404,9 @@ BEGIN
         round(p_max_loss_total, 2), p_expiry, p_filled_at
     ) RETURNING position_id INTO v_position_id;
 
-    UPDATE paper_portfolios SET cash_balance = v_after, updated_at = now()
+    -- production paper_portfolios has NO updated_at column
+    -- (id,user_id,name,cash_balance,net_liq,created_at,routing_mode).
+    UPDATE paper_portfolios SET cash_balance = v_after
      WHERE id = p_portfolio_id;
 
     INSERT INTO fleet_shadow_cash_events (
@@ -513,8 +515,9 @@ BEGIN
         terminal_payoff_total = v_payoff, realized_pnl = v_pnl, close_reason = p_close_reason
      WHERE position_id = p_position_id AND status = 'open';
 
+    -- production paper_portfolios has NO updated_at column (see open RPC note).
     UPDATE paper_portfolios SET
-        cash_balance = v_after, net_liq = net_liq + v_pnl, updated_at = now()
+        cash_balance = v_after, net_liq = net_liq + v_pnl
      WHERE id = v_position.portfolio_id;
 
     INSERT INTO fleet_shadow_outcomes (

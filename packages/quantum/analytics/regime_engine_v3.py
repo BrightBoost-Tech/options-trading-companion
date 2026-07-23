@@ -154,9 +154,20 @@ class RegimeEngineV3:
 
     def compute_global_snapshot(self,
                                 as_of_ts: datetime,
-                                universe_symbols: List[str] = None) -> GlobalRegimeSnapshot:
+                                universe_symbols: List[str] = None,
+                                capture_sink: dict = None) -> GlobalRegimeSnapshot:
         """
         Computes the global market regime state based on multi-factor analysis.
+
+        capture_sink (additive, default None → byte-identical): the Regime-V4
+        observe seam (REGIME_V4_OBSERVE_ENABLED, default OFF). When a dict is
+        provided, this method populates capture_sink["basket_closes"] (the 8×~100d
+        basket closes it ALREADY fetched) and capture_sink["basket_quotes"] (the
+        snapshot_many(BASKET) quotes it already fetched) right before returning —
+        PURE extraction of values V3 already computed, NOT a new provider call and
+        NOT parent-thread analysis. Those are the exact inputs the observe-only V4
+        child replays through a fetch-blocking shim (zero new provider calls). When
+        None, this method is byte-identical to before.
         """
         # 1. Fetch Data
         # We need daily bars for basket
@@ -252,6 +263,9 @@ class RegimeEngineV3:
         liquidity_z = 0.0
         median_spread_pct = None
         liquidity_issues = []
+        # Initialized here so the capture_sink block below can read it even if
+        # snapshot_many raises inside the try (byte-identical when capture is off).
+        basket_quotes = {}
 
         try:
             # Fetch basket quotes for spread calculation
@@ -376,6 +390,24 @@ class RegimeEngineV3:
                 )
         except Exception:
             pass  # observation must never affect the live regime cycle
+
+        # Regime-V4 observe seam (default OFF): capture the inputs THIS snapshot
+        # already fetched so the observe-only V4 child can replay them through a
+        # fetch-blocking shim (zero new provider calls). PURE extraction; when
+        # capture_sink is None this block is skipped → byte-identical. Fail-soft:
+        # a capture error must never affect the live regime cycle.
+        if capture_sink is not None:
+            try:
+                capture_sink["basket_closes"] = {
+                    sym: [
+                        b["close"] for b in bars
+                        if isinstance(b, dict) and b.get("close") is not None
+                    ]
+                    for sym, bars in basket_data.items()
+                }
+                capture_sink["basket_quotes"] = basket_quotes
+            except Exception:
+                pass  # capture must never affect the live regime cycle
 
         return GlobalRegimeSnapshot(
             as_of_ts=as_of_ts.isoformat(),

@@ -2300,6 +2300,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     )
     cash_service = CashService(supabase)
 
+    # Regime-V4 observe seam (REGIME_V4_OBSERVE_ENABLED, default OFF): sinks None
+    # when OFF → compute_global_snapshot + scan run byte-identical (§ observe arc).
+    try:
+        from packages.quantum.analytics.regime_v4_shadow_capture import observe_sinks
+        _rv4_on, _rv4_capture_sink, _rv4_symbol_sink = observe_sinks()
+    except Exception:
+        _rv4_on, _rv4_capture_sink, _rv4_symbol_sink = False, None, None
+
     # === PARALLEL READS: progression + capital + positions + regime ===
     t_reads = time.monotonic()
 
@@ -2374,7 +2382,9 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
     async def _compute_regime():
         return await asyncio.to_thread(
-            lambda: regime_engine.compute_global_snapshot(datetime.now())
+            lambda: regime_engine.compute_global_snapshot(
+                datetime.now(), capture_sink=_rv4_capture_sink
+            )
         )
 
     prog_state, deployable_capital, positions, global_snap = await asyncio.gather(
@@ -2646,9 +2656,31 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             portfolio_cash=deployable_capital,
             account_tier=_midday_tier.name,
             job_run_id=job_run_id,
+            regime_capture_sink=_rv4_symbol_sink,
         )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
+
+        # Regime-V4 observe seam (default OFF): assemble the capture envelope from
+        # the values the live cycle ALREADY produced (pure extraction). Rides on
+        # the returned cycle_result and is stripped by the suggestions_open tail
+        # before persistence, so the tape is never bloated.
+        _rv4_capture = None
+        if _rv4_on:
+            try:
+                from packages.quantum.analytics.regime_v4_shadow_capture import (
+                    build_capture_envelope,
+                )
+                _rv4_capture = build_capture_envelope(
+                    global_snap, _rv4_capture_sink, _rv4_symbol_sink,
+                    as_of=global_snap.as_of_ts,
+                )
+            except Exception as _rv4_cap_err:
+                logger.warning(
+                    "[REGIME_V4_OBSERVE] capture assembly failed (non-fatal): %s",
+                    _rv4_cap_err,
+                )
+                _rv4_capture = None
 
         for c in scout_results:
             c["window"] = "midday_entry"
@@ -4267,6 +4299,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 h7_prefilter_mode=h7_prefilter_mode,
                 tier_taper=_tier_taper_obs,
             ),
+            # Regime-V4 observe capture (default OFF → None). Placed AFTER
+            # cycle_metadata (additive tail key); stripped by the suggestions_open
+            # tail before persistence; never a decision input.
+            "regime_v4_capture": _rv4_capture,
             "debug": {
                 "quality_gate_mode": quality_gate_mode,
                 "trust_scanner_quotes": trust_scanner_quotes,
@@ -4720,6 +4756,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     else None
                 ),
             ),
+            # Regime-V4 observe capture (default OFF → None). Placed AFTER
+            # cycle_metadata (additive tail key); stripped by the suggestions_open
+            # tail before persistence; never a decision input.
+            "regime_v4_capture": _rv4_capture,
         }
 
 

@@ -315,10 +315,10 @@ class TestAllReturnPathsEmitCycleMetadata(unittest.TestCase):
     def test_happy_path_emits_cycle_metadata_with_none_exit_reason(self):
         body = self._slice_function()
         idx = body.index('"reason": None')
-        # window widened 2500→2700 for the additive #1327 H9-errors +
-        # candidate_disposition counts keys; asserts cycle_metadata PRESENCE,
-        # not byte offset.
-        window = body[idx:idx + 2700]
+        # window widened 2500→2700 (#1327 H9-errors + candidate_disposition
+        # keys) → 3400 (P1-1 2026-07-23 additive rejection persist-taxonomy
+        # counts keys); asserts cycle_metadata PRESENCE, not byte offset.
+        window = body[idx:idx + 3400]
         self.assertIn('"cycle_metadata":', window)
         self.assertIn("exit_reason=None", window)
 

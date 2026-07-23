@@ -167,7 +167,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         )
                         ctx.__enter__()
                         try:
-                            cycle_result = await run_midday_cycle(client, uid)
+                            cycle_result = await run_midday_cycle(
+                                client, uid, job_run_id=payload.get("_job_run_id")
+                            )
                             _commit_res = ctx.commit(client, status="ok")
                             # E16 seam 4 (2026-07-12) + PR-② (2026-07-13):
                             # surface a swallowed capture-commit failure OR a
@@ -207,7 +209,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         finally:
                             ctx.__exit__(None, None, None)
                     else:
-                        cycle_result = await run_midday_cycle(client, uid)
+                        cycle_result = await run_midday_cycle(
+                            client, uid, job_run_id=payload.get("_job_run_id")
+                        )
 
                     # Policy Lab: fork scored suggestions into cohort variants.
                     # E19-2 Blocker-1 (2026-07-13): the fork returns a typed

@@ -165,6 +165,10 @@ _REGISTRY: List[FlagSpec] = [
              "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#6 vol-signal observe"),
     FlagSpec("REGIME_FILTER_OBSERVE_ENABLED", "packages.quantum.analytics.regime_filter",
              "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#5 cross-asset regime"),
+    # ⑤ terminal-distribution score-on-scan observer (observe-only, default OFF).
+    # Gates both the scan-time envelope capture and the background scoring child.
+    FlagSpec("TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED", "packages.quantum.services.td_scan_capture",
+             "td_scan_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "⑤ score-on-scan observer"),
 
     # ---- Behavioral / opt-in but STRICT ==1 (the §3 footgun class) -----------
     FlagSpec("RISK_UTILIZATION_GATE_ENABLED", "packages.quantum.risk.utilization_gate",

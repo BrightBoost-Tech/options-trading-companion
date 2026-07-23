@@ -65,9 +65,9 @@ export default function DashboardLayout({ children, mockAlerts = [] }: Dashboard
             </Link>
             <Link
               href="/compose"
-              className={cn(buttonVariants({ variant: 'default' }), "bg-blue-600 hover:bg-blue-700")}
+              className={cn(buttonVariants({ variant: 'default' }), 'bg-blue-600 hover:bg-blue-700')}
             >
-              New Trade
+              Trade Draft
             </Link>
           </div>
         </div>

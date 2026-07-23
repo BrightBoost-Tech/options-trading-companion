@@ -4,6 +4,47 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-23 — JULY-23 PRIORITY ORCHESTRATOR (fable + opus; RTH read-only, post-close serialized) · status:shipped
+
+Full record: `docs/review/july-23-priority-and-disabled-runtime-results-2026-07-23.md` + the
+feature census `docs/review/disabled-and-inactive-runtime-audit-2026-07-23.md`. Five merges, final
+code main `2c9ab5f8` — #1360 P1-1 append-only idempotent rejection persistence (`event_id` DDL
+`20260723150000` APPLIED-BEFORE-MERGE, tracked `20260723204135`, receipt `975ad6ae`; counters
+persisted_new/duplicate_ack/retry_recovery/lost_after_retries/permanent_failure; job_run_id now
+stamped — was NULL on all 14,217 rows) · #1359 P1-2 typed terminal `ev_below_roundtrip_cost`
+(canonical `stamp_not_executable` added to suggestion_status.py; blocked≠error; persist-failure
+stays real) · #1356 dead Write-rule deletion · #1358 FLAG_ECHO 27→34 dark env controls via real
+parsers + operator RUNTIME_STATE_ECHO (no startup DB read) · #1357 `phase2_precheck` retired (251
+consecutive no-ops; F-A5-1 RESOLVED). **P1-0 (EXCLUDE from re-finding): the 07-22/07-23 nightly
+audits failed on the model WEEKLY-QUOTA limit in the child** (transcript-proven; runner hardening
+worked — ALERT files swept into this PR; self-healing after the 07-23 12pm CT reset; falsifier =
+the 07-24 05:00Z natural run). **SINGLE-LEG SHADOW EXPERIMENT ENABLED (shadow_only)**: control-RPC
+migration `20260722020000_single_leg_experiment_control_rpcs` applied by exact name (receipt
+`6e06695a`; one hand-transcription hash error in the first apply was CAUGHT by post-apply digest
+verification and corrected same-session to the reviewed file — all 6 bodies byte-verified) → 4-row
+DRAFT seed (own txn, 4/4 server-derived hashes == manifest) → T1 setup (fingerprint
+`a01319a12211592a7750842aa9ed1b98192995e50242459dabfec4abf9d2f3a6`, 2×$2,000 shadow portfolios,
+2 disabled bindings) → enforced NO-WRITE replay on natural tape `be9d5fe5-d9f4-488f-b86d-360238a66d7e`
+(HONEST-EMPTY, typed chain_unavailable coverage, 0 writes/provider/broker calls) → zero census →
+T2 approve (4) → T3 enable (`enabled/shadow_only/internal_paper/1/false`, 2 bindings). Kill switch:
+`rpc_pause_single_leg_experiment_v1`. **Migration-tracking finding (EXCLUDE): single-leg foundation
+files 1/2/3/5 are `APPLIED_UNTRACKED` (out-of-band, full object parity; files 1/2 have an
+unguarded-CREATE POLICY reapply hazard — NEVER reapply; no schema_migrations backfill performed —
+operator follow-up).** PR cleanup: #1352 (superseded by #1355), #1339/#1350 (dups of #1196) closed.
+Census highlights (EXCLUDE): risk-basis arm evidence IS accruing on the executor path ·
+`QUANT_AGENTS_ENABLED` has two divergent production parsers (seam, doc-noted) · free-look: v4
+ledger/nested-regime/autotune_history/live_approval_queue 0-row surfaces. `small_tier_v1` untouched
+(50, last-approved 07-19); fleet untouched; zero broker/env/live-control writes.
+PENDING VERIFICATIONS (2026-07-23 → next session):
+- **Friday natural scan**: parent unchanged · 1 idempotent child · 2 policies evaluated · controls
+  silent · typed attempt coverage (0 candidates OK) · any candidate 1-leg/1-contract/shadow_only ·
+  broker orders 0 · `rejection_persist_failures=0` + no duplicate event_ids · expected blocks in
+  blocked_count not errors.
+- **07-24 05:00Z nightly** — child quota healed; expect report + met=True + ping.
+- Operator follow-ups: schema_migrations name-backfill for single-leg files 1/2/3/5 (separate
+  authorization) · QUANT_AGENTS parser unification · v4-ledger/nested-regime/live_approval_queue
+  owner decisions.
+
 ## 2026-07-21 — OVERNIGHT PRIORITY SPRINT (fable + ≤7 opus parallel; serialized merges) · status:shipped
 
 Full record: `docs/review/overnight-priority-sprint-results-2026-07-21.md`. Ten serialized merges,

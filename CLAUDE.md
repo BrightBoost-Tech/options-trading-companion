@@ -680,6 +680,22 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   case-collision phantom blocks the operator-checkout ff (morning reconcile).
   Zero broker / fleet-activation / policy-registry / control / env / schedule /
   data-correction writes.
+  **07-23 PRIORITY RUN** (`docs/review/july-23-priority-and-disabled-runtime-results-2026-07-23.md`
+  + census `disabled-and-inactive-runtime-audit-2026-07-23.md`): five merges, final `2c9ab5f8` —
+  #1360 rejection persistence (`event_id` append-only idempotent INSERT..ON CONFLICT DO NOTHING;
+  DDL `20260723150000` applied BEFORE merge; job_run_id now stamped; five typed counters — only
+  real loss partials) · #1359 typed terminal `ev_below_roundtrip_cost` (canonical
+  `stamp_not_executable`; blocked≠error; persist-failure stays real) · #1356 · #1358 FLAG_ECHO
+  27→34 + operator RUNTIME_STATE_ECHO (env vs DB state split; no startup DB read) · #1357
+  phase2_precheck retired. **P1-0:** the 07-22/07-23 nightly failures were the audit child's
+  model WEEKLY-QUOTA outage (transcript-proven; runner hardening worked; self-healed 07-23 12pm CT).
+  **SINGLE-LEG SHADOW EXPERIMENT ENABLED** (`20260722020000` control RPCs applied — one first-apply
+  transcription hash error caught by digest verification and corrected to the reviewed file, all 6
+  bodies byte-verified; 4-row DRAFT seed → T1 setup fp `a01319a1…` → NO-WRITE replay on tape
+  `be9d5fe5-…` HONEST-EMPTY → T2 approve 4 → T3 enable: shadow_only/internal_paper/1-contract/
+  live_submit=false/2 bindings; kill switch `rpc_pause_single_leg_experiment_v1`; first evidence =
+  Friday's natural cycle ONLY). ⚠ Single-leg foundation files 1/2/3/5 are APPLIED_UNTRACKED
+  (files 1/2 NEVER reapply — unguarded CREATE POLICY); tracking backfill = operator follow-up.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -1120,7 +1136,15 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-21 overnight priority sprint)
+## Current overnight standing (2026-07-16; updated through the 07-23 priority run)
+
+- **07-23:** P1 fixes live (`2c9ab5f8`): rejection evidence is now append-only idempotent
+  (event_id) and expected economic blocks are terminal-blocked, never errors. The **single-leg
+  shadow experiment is ENABLED** — shadow_only / internal_paper / 1 contract /
+  live_submit_allowed=false / 2 bindings; evidence tables all zero until Friday's natural
+  scheduler cycle (never manufacture); pause via `rpc_pause_single_leg_experiment_v1`. The
+  nightly-audit child was quota-blocked 07-22/07-23 (healed; verify the 07-24 05:00Z run). Flag
+  echo now covers 34 env controls; DB-backed state has its own operator reader.
 
 - **07-21 sprint:** the durable reconciliation-receipt WRITER RPC + receipt-table
   privilege hardening are LIVE (`20260721010000` + `20260721010500` applied) —

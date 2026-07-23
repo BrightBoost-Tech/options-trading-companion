@@ -98,7 +98,9 @@ class TestEnrichmentOnThreadsRealOI(unittest.TestCase):
                    return_value=_fake_fetcher()), \
              patch("packages.quantum.services.oi_enrichment._global_limiter",
                    return_value=RateLimiter(max_calls_per_window=1000,
-                                            window_seconds=60, min_interval_ms=0)):
+                                            window_seconds=60, min_interval_ms=0)), \
+             patch("packages.quantum.services.quote_provenance._oi_reference_date",
+                   return_value=__import__("datetime").date(2026, 7, 20)):
             candidates, rej_stats = _run_scan(
                 fake,
                 truth=_fake_truth_layer(closes_profile="rising",

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
+import { Button } from '@/components/ui/button';
 
 export default function ComposePage() {
   const [symbol, setSymbol] = useState('');
@@ -9,6 +10,11 @@ export default function ComposePage() {
   const [strikes, setStrikes] = useState('');
   const [validating, setValidating] = useState(false);
   const [result, setResult] = useState<any>(null);
+
+  const symbolId = useId();
+  const strategyId = useId();
+  const expiryId = useId();
+  const strikesId = useId();
 
   const handleValidate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,8 +60,9 @@ export default function ComposePage() {
 
         <form onSubmit={handleValidate} className="bg-white rounded-lg shadow p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-2">Symbol</label>
+            <label htmlFor={symbolId} className="block text-sm font-medium mb-2">Symbol</label>
             <input
+              id={symbolId}
               type="text"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value.toUpperCase())}
@@ -66,8 +73,9 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">Strategy</label>
+            <label htmlFor={strategyId} className="block text-sm font-medium mb-2">Strategy</label>
             <select
+              id={strategyId}
               value={strategy}
               onChange={(e) => setStrategy(e.target.value)}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -81,8 +89,9 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">Expiry (YYYY-MM-DD)</label>
+            <label htmlFor={expiryId} className="block text-sm font-medium mb-2">Expiry (YYYY-MM-DD)</label>
             <input
+              id={expiryId}
               type="date"
               value={expiry}
               onChange={(e) => setExpiry(e.target.value)}
@@ -92,10 +101,11 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">
+            <label htmlFor={strikesId} className="block text-sm font-medium mb-2">
               Strikes (comma-separated)
             </label>
             <input
+              id={strikesId}
               type="text"
               value={strikes}
               onChange={(e) => setStrikes(e.target.value)}
@@ -105,13 +115,13 @@ export default function ComposePage() {
             />
           </div>
 
-          <button
+          <Button
             type="submit"
-            disabled={validating}
-            className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:bg-gray-400"
+            loading={validating}
+            className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
           >
             {validating ? 'Validating with AI...' : 'Validate Trade'}
-          </button>
+          </Button>
         </form>
 
         {result && (

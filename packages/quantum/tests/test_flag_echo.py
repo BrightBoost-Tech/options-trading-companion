@@ -167,6 +167,118 @@ class TestParserHonesty(unittest.TestCase):
             _set_env("GTC_PROFIT_EXIT_ENABLED", saved)
 
 
+class TestDarkControlEntries(unittest.TestCase):
+    """The 7 dark/observe/experimental env controls added 2026-07-23 (Lane D).
+    Each echo entry must reproduce its OWN production parser's polarity, both
+    ways, and the startup collect path must remain DB-free."""
+
+    # (flag_name, module, attr, production-call args) — the EXACT parser + call
+    # site the echo entry reproduces (never a second/reimplemented parse).
+    NEW = [
+        ("QUANT_AGENTS_ENABLED", "packages.quantum.agents.runner",
+         "is_agent_enabled", ("QUANT_AGENTS_ENABLED", False)),
+        ("OI_ENRICHMENT_ENABLED", "packages.quantum.services.oi_enrichment",
+         "is_oi_enrichment_enabled", ()),
+        ("VOL_SIGNAL_OBSERVE_ENABLED", "packages.quantum.analytics.vol_signal",
+         "is_observe_enabled", ()),
+        ("REGIME_FILTER_OBSERVE_ENABLED", "packages.quantum.analytics.regime_filter",
+         "is_observe_enabled", ()),
+        ("RISK_BASIS_MAX_LOSS_ENABLED", "packages.quantum.services.risk_basis_shadow",
+         "is_max_loss_basis_enabled", ()),
+        ("BUCKET_CONTROL_ENFORCE", "packages.quantum.risk.bucket_control",
+         "is_bucket_enforce_enabled", ()),
+        ("FLEET_RECEIPT_PRODUCER_ENABLED", "packages.quantum.jobs.handlers.alpaca_order_sync",
+         "_fleet_receipt_producer_enabled", ()),
+    ]
+
+    TRICKY = ["", "0", "false", "no", "off", "1", "true", "yes", "on", "1 ", "TRUE"]
+
+    def test_all_seven_registered(self):
+        names = set(registry_env_names())
+        for flag_name, *_ in self.NEW:
+            self.assertIn(flag_name, names, f"{flag_name} not registered")
+
+    def test_each_entry_matches_its_real_parser_both_ways(self):
+        """echo value == the flag's REAL production parser output across the
+        tricky truth-table — catches a mis-wired module/attr or a second parse."""
+        import importlib
+        for flag_name, module, attr, args in self.NEW:
+            parser = getattr(importlib.import_module(module), attr)
+            saved = os.environ.get(flag_name)
+            try:
+                for raw in self.TRICKY:
+                    _set_env(flag_name, raw)
+                    expected = parser(*args)
+                    got = collect_effective_flags()["flags"][flag_name]["value"]
+                    self.assertEqual(
+                        got, expected,
+                        f"{flag_name} raw={raw!r}: echo={got!r} != parser={expected!r}",
+                    )
+            finally:
+                _set_env(flag_name, saved)
+
+    def test_polarity_hand_computed_both_ways(self):
+        """Independent of the parser refs: the polarity truth-table, ON and OFF."""
+        strict = ["RISK_BASIS_MAX_LOSS_ENABLED", "BUCKET_CONTROL_ENFORCE",
+                  "FLEET_RECEIPT_PRODUCER_ENABLED"]
+        lenient = ["OI_ENRICHMENT_ENABLED", "VOL_SIGNAL_OBSERVE_ENABLED",
+                   "REGIME_FILTER_OBSERVE_ENABLED"]
+        cases = []
+        for f in strict:  # strict ==1: only '1' enables
+            cases += [(f, "1", True), (f, "true", False), (f, "yes", False),
+                      (f, "", False), (f, "0", False)]
+        for f in lenient:  # lenient full truthy: 1/true/yes/on
+            cases += [(f, "1", True), (f, "true", True), (f, "yes", True),
+                      (f, "on", True), (f, "", False), (f, "0", False)]
+        # agent tri-state: {1/true/yes}->on, {0/false/no}->off, 'on'/else->default(OFF)
+        cases += [("QUANT_AGENTS_ENABLED", "1", True),
+                  ("QUANT_AGENTS_ENABLED", "yes", True),
+                  ("QUANT_AGENTS_ENABLED", "true", True),
+                  ("QUANT_AGENTS_ENABLED", "no", False),
+                  ("QUANT_AGENTS_ENABLED", "on", False),  # NOT recognized -> default OFF
+                  ("QUANT_AGENTS_ENABLED", "", False)]
+        for name, raw, expected in cases:
+            saved = os.environ.get(name)
+            try:
+                _set_env(name, raw)
+                got = collect_effective_flags()["flags"][name]["value"]
+                self.assertEqual(got, expected,
+                                 f"{name} raw={raw!r} -> {got!r}, want {expected!r}")
+            finally:
+                _set_env(name, saved)
+
+    def test_new_entries_emit_bool_never_secret(self):
+        data = collect_effective_flags()
+        block = flag_echo._format_block("test", data)
+        for flag_name, *_ in self.NEW:
+            self.assertIn(flag_name, block, f"{flag_name} missing from block")
+            # every value is a parsed bool — never a raw env string that could
+            # carry a secret.
+            self.assertIn(data["flags"][flag_name]["value"], (True, False))
+
+    def test_startup_collect_makes_no_db_call(self):
+        """The startup echo path (collect_effective_flags) must never build a DB
+        client. Poison the supabase client constructor; collect must still return
+        every flag as a real bool with ZERO errors — proving the new DB-adjacent
+        controls are read via their ENV parser, not a startup DB read."""
+        import importlib
+        try:
+            supabase = importlib.import_module("supabase")
+        except Exception:  # pragma: no cover - supabase always present in CI
+            supabase = None
+        if supabase is not None and hasattr(supabase, "create_client"):
+            ctx = mock.patch.object(
+                supabase, "create_client",
+                side_effect=AssertionError("DB touched in startup echo"))
+        else:  # pragma: no cover
+            ctx = mock.patch.object(flag_echo, "logger", flag_echo.logger)
+        with ctx:
+            data = collect_effective_flags()
+        self.assertEqual(data["errors"], [], f"startup echo errored: {data['errors']}")
+        for flag_name, *_ in self.NEW:
+            self.assertIn(data["flags"][flag_name]["value"], (True, False))
+
+
 class TestScrub(unittest.TestCase):
     def test_no_registry_name_is_secret_shaped(self):
         bad = [n for n in registry_env_names() if _is_secret_name(n)]

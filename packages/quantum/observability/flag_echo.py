@@ -58,6 +58,9 @@ TRUTHY_1_TRUE_YES = "truthy(1/true/yes)"            # partial lenient (no 'on')
 TRUTHY_TRUE_1 = "truthy(true/1)"                    # LIVE_ENABLED's narrower set
 STRICT_EQ_1 = "strict(==1)"                         # strict — 'true' does NOT enable
 ENUM_MODE = "enum(mode-string)"
+# is_agent_enabled's tri-state: {1/true/yes}->on, {0/false/no}->off, else->default
+# (note: 'on'/'off' are NOT recognized — they fall through to the default).
+AGENT_TRISTATE = "tristate(1/true/yes|0/false/no|else default)"
 
 # Secret-shaped env-var names must never be echoed. Belt-and-suspenders on top
 # of the allowlist: even if a future registry entry names a secret-shaped var,
@@ -93,6 +96,10 @@ class FlagSpec:
     call: bool = True         # call attr() if True, else read it as a constant
     transform: Optional[Callable[[Any], Any]] = None  # e.g. enum -> .value
     read: str = "call"        # "call" | "import_constant"
+    args: tuple = ()          # positional args passed to attr() — used ONLY to
+                              # reproduce a production call site verbatim (e.g.
+                              # is_agent_enabled("QUANT_AGENTS_ENABLED", False)),
+                              # never to synthesize a new parse.
 
 
 # ── The allowlist / registry. Every ``name`` is verified to be read by prod ──
@@ -138,6 +145,27 @@ _REGISTRY: List[FlagSpec] = [
     FlagSpec("IV_RANK_NONE_ROUTING_ENABLED", "packages.quantum.observability.feature_flags",
              "is_iv_rank_none_routing_enabled", BEHAVIORAL_OPT_IN, TRUTHY_1_TRUE_YES, "docs/backlog #115"),
 
+    # ---- Dark / observe / experimental env controls (2026-07-23 census, Lane D) --
+    # These observe/enforce/enable toggles gate dark subsystems that are OFF today.
+    # None was in the echo, so an accidental arm would NOT surface at startup — the
+    # one place §3 says to read effective state. All default OFF; each entry CALLS
+    # the control's OWN production parser (anti-drift), never a reimplementation.
+    #   QUANT_AGENTS_ENABLED is the ONLY dark control that AFFECTS LIVE ENTRIES if
+    #   flipped (census #2). Its master-toggle parser is is_agent_enabled — the gate
+    #   build_agent_pipeline actually reads (runner.py:29). ⚠ SEAM: a SECOND, divergent
+    #   inline parser exists at workflow_orchestrator.py:3363
+    #   (os.getenv(...,"false").lower()=="true"); that one treats '1'/'yes' as OFF.
+    #   The echo reports the master-toggle value (the pipeline-build decision).
+    FlagSpec("QUANT_AGENTS_ENABLED", "packages.quantum.agents.runner",
+             "is_agent_enabled", BEHAVIORAL_OPT_IN, AGENT_TRISTATE, "census#2 (affects live entries)",
+             args=("QUANT_AGENTS_ENABLED", False)),
+    FlagSpec("OI_ENRICHMENT_ENABLED", "packages.quantum.services.oi_enrichment",
+             "is_oi_enrichment_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#7 OI enrichment"),
+    FlagSpec("VOL_SIGNAL_OBSERVE_ENABLED", "packages.quantum.analytics.vol_signal",
+             "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#6 vol-signal observe"),
+    FlagSpec("REGIME_FILTER_OBSERVE_ENABLED", "packages.quantum.analytics.regime_filter",
+             "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#5 cross-asset regime"),
+
     # ---- Behavioral / opt-in but STRICT ==1 (the §3 footgun class) -----------
     FlagSpec("RISK_UTILIZATION_GATE_ENABLED", "packages.quantum.risk.utilization_gate",
              "is_enabled", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "§4 #1044"),
@@ -146,6 +174,13 @@ _REGISTRY: List[FlagSpec] = [
              transform=lambda cfg: bool(cfg.get("enabled"))),
     FlagSpec("FLEET_ACTIVATION_AUTHORIZED", "packages.quantum.services.shadow_fleet_activation",
              "activation_authorized", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "§4 shadow-fleet"),
+    # ---- Dark / observe / enforce controls, STRICT ==1 (2026-07-23 census, Lane D) ----
+    FlagSpec("RISK_BASIS_MAX_LOSS_ENABLED", "packages.quantum.services.risk_basis_shadow",
+             "is_max_loss_basis_enabled", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "census#11 risk-basis"),
+    FlagSpec("BUCKET_CONTROL_ENFORCE", "packages.quantum.risk.bucket_control",
+             "is_bucket_enforce_enabled", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "census#12 bucket enforce"),
+    FlagSpec("FLEET_RECEIPT_PRODUCER_ENABLED", "packages.quantum.jobs.handlers.alpaca_order_sync",
+             "_fleet_receipt_producer_enabled", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "census#16 fleet receipts"),
     FlagSpec("RISK_ENVELOPE_ENFORCE", "packages.quantum.jobs.handlers.intraday_risk_monitor",
              "_ENFORCE_FORCE_CLOSE", GLOBAL_SWITCH, STRICT_EQ_1, "§5", call=False,
              read="import_constant"),
@@ -181,7 +216,7 @@ def _read_effective(spec: FlagSpec) -> Any:
     parser never sinks the block)."""
     mod = importlib.import_module(spec.module)
     obj = getattr(mod, spec.attr)
-    value = obj() if spec.call else obj
+    value = obj(*spec.args) if spec.call else obj
     if spec.transform is not None:
         value = spec.transform(value)
     return value

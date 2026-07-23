@@ -54,16 +54,24 @@ jobs:
           # so pytest collection succeeds regardless of pytest rootdir.
           PYTHONPATH: ${{ github.workspace }}
         run: |
+          set +e
           pytest packages/quantum/tests/ \
             --cov=packages/quantum \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            -v
+            --tb=short \
+            --disable-warnings \
+            -q > pytest-output.txt 2>&1
+          status=$?
+          tail -n 250 pytest-output.txt
+          exit $status
 
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage.xml
+          path: |
+            coverage.xml
+            pytest-output.txt
           retention-days: 14

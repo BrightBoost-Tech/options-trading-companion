@@ -361,6 +361,61 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             f"regime-v4 shadow enqueue error (non-fatal): {rv4_err}"
                         )
 
+                    # ⑤ terminal-distribution score-on-scan observer child
+                    # (OBSERVE-ONLY, default OFF). Scores every scan-time
+                    # research-candidate envelope (emitted AND rejected) against
+                    # the frozen baseline vs the lognormal challenger. Gated on
+                    # the flag + a complete scheduler-origin decision tape (whose
+                    # decision_id == the cycle_id the capture stamped). A no-op
+                    # while the flag is off / no tape exists; never touches parent
+                    # counts unless it errors.
+                    try:
+                        from packages.quantum.services.td_scan_observe import (
+                            maybe_enqueue_td_scan_observe,
+                        )
+
+                        origin_blob = payload.get("origin")
+                        parent_origin = (
+                            origin_blob.get("origin")
+                            if isinstance(origin_blob, dict)
+                            else None
+                        )
+                        _td_enq = maybe_enqueue_td_scan_observe(
+                            client,
+                            user_id=uid,
+                            source_job_run_id=payload.get("_job_run_id"),
+                            source_decision_id=source_decision_id,
+                            source_code_sha=source_code_sha,
+                            as_of=source_as_of,
+                            parent_origin=parent_origin,
+                        )
+                        cycle_result = cycle_result or {}
+                        cycle_result["td_scan_observe_enqueue"] = _td_enq
+                        _td_errors = int(_td_enq.get("errors") or 0)
+                        if _td_errors:
+                            _tdc = cycle_result.setdefault("counts", {})
+                            _tdc["errors"] = int(_tdc.get("errors") or 0) + _td_errors
+                            notes.append(
+                                f"td-scan-observe enqueue DEGRADED for "
+                                f"{uid[:8]}: {_td_enq.get('status')}"
+                            )
+                        elif _td_enq.get("enqueued"):
+                            notes.append(
+                                f"td-scan-observe child enqueued for "
+                                f"{uid[:8]}: {_td_enq.get('job_run_id')}"
+                            )
+                    except Exception as td_err:
+                        cycle_result = cycle_result or {}
+                        _tdc = cycle_result.setdefault("counts", {})
+                        _tdc["errors"] = int(_tdc.get("errors") or 0) + 1
+                        cycle_result["td_scan_observe_enqueue"] = {
+                            "status": "enqueue_seam_crashed",
+                            "enqueued": False,
+                            "errors": 1,
+                            "error_class": type(td_err).__name__,
+                            "error": str(td_err)[:200],
+                        }
+                        notes.append(f"td-scan-observe enqueue error: {td_err}")
                     # Capture cycle result for observability
                     if cycle_result:
                         cycle_results.append({"user_id": uid[:8], **cycle_result})

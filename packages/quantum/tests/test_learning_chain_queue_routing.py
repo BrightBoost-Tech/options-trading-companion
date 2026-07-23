@@ -63,7 +63,6 @@ EXPECTED = {
     "day_orchestrator_task":       (INTERNAL, OTC),
     "calibration_update_task":     (INTERNAL, OTC),
     "heartbeat_task":              (INTERNAL, OTC),
-    "phase2_precheck_task":        (INTERNAL, OTC),
     "walk_forward_autotune_task":  (INTERNAL, OTC),
     "iv_daily_refresh_task":       (INTERNAL, OTC),
     "vol_signal_snapshot_task":    (INTERNAL, OTC),

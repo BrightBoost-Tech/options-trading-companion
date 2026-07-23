@@ -1,5 +1,10 @@
 # PR #6 Observation-Window Monitoring Queries
 
+> **RETIRED 2026-07-23** — the `phase2_precheck` cron this runbook monitored
+> was removed (`chore/retire-phase2-precheck`) after its 2026-04-25 window
+> close. Kept as a historical record; the Q-CF cron-fire checks below no
+> longer apply.
+
 Operational queries run during the 48h observation window after
 Phase 1 migration apply. Saved here for rapid re-run during
 market hours without reconstructing from context.

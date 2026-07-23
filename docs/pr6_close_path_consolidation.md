@@ -184,6 +184,13 @@ value to avoid the crash.
 
 ### 3.2 phase2_precheck cron
 
+> **RETIRED 2026-07-23** (`chore/retire-phase2-precheck`). The observation
+> window closed 2026-04-25; the schedule then fired a guaranteed
+> `window_expired` no-op every 6h (251 such runs). The scheduler slot, the
+> `/internal/tasks/phase2-precheck` endpoint, and the handler have been
+> removed. The rest of this section is retained as the historical record of
+> how Phase 2 was verified.
+
 Defined in `packages/quantum/scheduler.py` as the `phase2_precheck`
 schedule: fires every 6 hours, every hour where `hour mod 6 == 0`.
 Handler: `packages/quantum/jobs/handlers/phase2_precheck.py`.

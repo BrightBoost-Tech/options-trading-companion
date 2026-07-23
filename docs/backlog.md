@@ -1721,8 +1721,11 @@ Full detail in `audit/ledger.md` (07-11/12 entries). Shipped this weekend:
   allowlist on the post-fill hook. **FALSIFIER: any GTC placed outside pilot in
   broker history — none confirmed (flag off; 6 resting orders all pilot-sweep).**
   · origin 07-11 v1.2 F-A2-1.
-- **NEW P3 (cosmetic/rider):** F-A5-1 dead `phase2_precheck` (past its 48h
-  self-expiry, no machine consumer — retire/re-scope) · F-A9-1 "Confidence N%"
+- **NEW P3 (cosmetic/rider):** ~~F-A5-1 dead `phase2_precheck`~~ **RESOLVED
+  2026-07-23** (dead scheduler slot + `/internal/tasks/phase2-precheck`
+  endpoint + handler retired via `chore/retire-phase2-precheck`; 251 no-op
+  `window_expired` runs since 04-27 confirmed dead; never in EXPECTED_JOBS so
+  the #1095 watchdog never paged for it) · F-A9-1 "Confidence N%"
   mislabel (`SuggestionCard.tsx:683`, a 0-100 score shown as confidence —
   relabel) · F-A8-1/2 rejection CATEGORY dimension (flat reason; economics/error
   conflated — rides the taxonomy PR) · F-A3-2 autotune logged-not-applied

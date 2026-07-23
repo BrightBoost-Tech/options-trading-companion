@@ -2300,21 +2300,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     )
     cash_service = CashService(supabase)
 
-    # Regime-V4 observe-only shadow comparison (REGIME_V4_OBSERVE_ENABLED,
-    # behavioral opt-in, default OFF). When ON, the parent captures the inputs
-    # V3 already fetched (basket closes/quotes + per-symbol regime/pool) into
-    # sinks and rides them to the suggestions_open enqueue tail. When OFF, both
-    # sinks are None → compute_global_snapshot + scan_for_opportunities run
-    # byte-identical, and nothing is captured or enqueued. Zero decision impact.
+    # Regime-V4 observe seam (REGIME_V4_OBSERVE_ENABLED, default OFF): sinks None
+    # when OFF → compute_global_snapshot + scan run byte-identical (§ observe arc).
     try:
-        from packages.quantum.analytics.regime_v4_shadow_capture import (
-            is_observe_enabled as _rv4_observe_enabled,
-        )
-        _rv4_on = _rv4_observe_enabled()
+        from packages.quantum.analytics.regime_v4_shadow_capture import observe_sinks
+        _rv4_on, _rv4_capture_sink, _rv4_symbol_sink = observe_sinks()
     except Exception:
-        _rv4_on = False
-    _rv4_capture_sink = {} if _rv4_on else None
-    _rv4_symbol_sink = {"per_symbol": {}} if _rv4_on else None
+        _rv4_on, _rv4_capture_sink, _rv4_symbol_sink = False, None, None
 
     # === PARALLEL READS: progression + capital + positions + regime ===
     t_reads = time.monotonic()
@@ -4257,9 +4249,6 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         return {
             "skipped": False,
             "reason": _exit_reason,
-            # Regime-V4 observe capture (default OFF → None). Stripped by the
-            # suggestions_open tail before persistence; never a decision input.
-            "regime_v4_capture": _rv4_capture,
             "budget": {
                 "deployable_capital": deployable_capital,
                 "cap": max_global,
@@ -4310,6 +4299,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 h7_prefilter_mode=h7_prefilter_mode,
                 tier_taper=_tier_taper_obs,
             ),
+            # Regime-V4 observe capture (default OFF → None). Placed AFTER
+            # cycle_metadata (additive tail key); stripped by the suggestions_open
+            # tail before persistence; never a decision input.
+            "regime_v4_capture": _rv4_capture,
             "debug": {
                 "quality_gate_mode": quality_gate_mode,
                 "trust_scanner_quotes": trust_scanner_quotes,
@@ -4680,9 +4673,6 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         return {
             "skipped": False,
             "reason": None,
-            # Regime-V4 observe capture (default OFF → None). Stripped by the
-            # suggestions_open tail before persistence; never a decision input.
-            "regime_v4_capture": _rv4_capture,
             "budget": {
                 "deployable_capital": deployable_capital,
                 "cap": max_global,
@@ -4766,6 +4756,10 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     else None
                 ),
             ),
+            # Regime-V4 observe capture (default OFF → None). Placed AFTER
+            # cycle_metadata (additive tail key); stripped by the suggestions_open
+            # tail before persistence; never a decision input.
+            "regime_v4_capture": _rv4_capture,
         }
 
 

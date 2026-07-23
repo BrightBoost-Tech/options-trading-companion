@@ -3529,22 +3529,15 @@ def scan_for_opportunities(
                     effective_regime=effective_regime_state.value,
                     phase_exclusions_out=_phase_exclusions,
                 )
-                for _excl in _phase_exclusions:
-                    # Typed + attributed: the phase gate KNOWS which
-                    # strategy it excluded, so the rejection row carries
-                    # strategy_key. Observability only — the candidate
-                    # set and HOLD semantics are untouched.
-                    rej_stats.record(
-                        "strategy_phase_excluded",
-                        strategy=_excl.get("strategy"),
-                    )
                 # Regime-V4 observe seam (default OFF): capture this symbol's V3
                 # regime inputs + the PURE get_candidates pool (before any agent
                 # override) so the observe-only V4 child can compute the
                 # counterfactual pool with sentiment/iv_rank held fixed. Keyed by
                 # symbol → idempotent across multi-strategy retries. Fail-soft:
                 # capture must never affect the scan. When the sink is None (flag
-                # off) this block is skipped → byte-identical.
+                # off) this block is skipped → byte-identical. Placed BEFORE the
+                # phase-exclusion loop so it does not widen any rej_stats→return
+                # instrumentation window.
                 if regime_capture_sink is not None:
                     try:
                         _rv4_earn = earnings_map.get(symbol)
@@ -3568,6 +3561,15 @@ def scan_for_opportunities(
                         }
                     except Exception:
                         pass  # capture must never affect the scan
+                for _excl in _phase_exclusions:
+                    # Typed + attributed: the phase gate KNOWS which
+                    # strategy it excluded, so the rejection row carries
+                    # strategy_key. Observability only — the candidate
+                    # set and HOLD semantics are untouched.
+                    rej_stats.record(
+                        "strategy_phase_excluded",
+                        strategy=_excl.get("strategy"),
+                    )
                 if not candidates:
                     if _phase_exclusions:
                         # Pool emptied (at least in part) by the phase

@@ -40,6 +40,16 @@ def is_observe_enabled() -> bool:
     return os.environ.get(FLAG_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def observe_sinks() -> tuple:
+    """One-call per-cycle setup for the parent capture seam. Returns
+    ``(on, capture_sink, symbol_sink)``: when the observe flag is OFF the two
+    sinks are ``None`` so ``compute_global_snapshot`` + ``scan_for_opportunities``
+    run byte-identical and nothing is captured/enqueued. Kept compact so the
+    orchestrator preamble stays small."""
+    on = is_observe_enabled()
+    return on, ({} if on else None), ({"per_symbol": {}} if on else None)
+
+
 def build_capture_envelope(
     global_snapshot: Any,
     capture_sink: Optional[Mapping[str, Any]],

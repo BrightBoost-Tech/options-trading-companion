@@ -527,7 +527,27 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
   fleet ACTIVATION gate (legacy-terminal attestation, 6 stale 04-09 rows) ·
   runtime falsifiers per ledger.
 
-## 2026-07-21 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+## 2026-07-23 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+
+Action surface after the July-23 run (final code main `2c9ab5f8`; shipped items live in
+`audit/ledger.md` 07-23 exclusion memory — #1360 rejection persistence, #1359 typed economic
+block, #1356 settings rule, #1358 flag/runtime echo, #1357 phase2_precheck retirement, single-leg
+epoch ENABLED shadow-only, #1352/#1339/#1350 closed). Merged/applied ≠ runtime-proven; falsifiers
+in the ledger.
+
+**Open / actionable:**
+- **Friday natural falsifiers** (ledger 07-23 list): first single-leg child run · rejection
+  persistence counters clean · blocked-vs-error taxonomy · 07-24 nightly (quota healed).
+- **Operator follow-ups:** schema_migrations name-backfill for the four APPLIED_UNTRACKED
+  single-leg foundation files (separate authorization; files 1/2 NEVER reapply) ·
+  `QUANT_AGENTS_ENABLED` divergent-parser unification · owner decisions on the 0-row surfaces
+  (v4 accounting ledger, nested-regime tables, autotune_history writer, live_approval_queue).
+- **Dark/owner-gated (unchanged, census-classified — see the 07-23 audit doc):** Quant Agents ·
+  OI enrichment/floor · tier-taper live · TCM v2 promotion · greek caps · risk-basis enforcement ·
+  bucket enforcement · Regime V4 (gates nothing — build-or-retire decision) · E19 execution ·
+  fleet activation + manual_review/orphan_run receipt producers · F-REDATE correction.
+
+## 2026-07-21 — POST-MERGE STANDING (superseded by the 2026-07-23 block above; retained as history)
 
 Current action surface after the 07-21 overnight priority sprint (final main `f28906ff`; ten merges +
 two applied receipt migrations — all shipped items are in `audit/ledger.md` 07-21 exclusion memory,

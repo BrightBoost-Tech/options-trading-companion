@@ -29,6 +29,8 @@ business writes, zero provider calls, zero broker path.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -325,32 +327,83 @@ class UniverseUnavailable(RuntimeError):
     """A failed universe read — never an empty universe (E8-3 []-sentinel)."""
 
 
+def _candidate_fingerprint(row: Mapping[str, Any]) -> str:
+    """Structural identity of one candidate, stable across the champion in-place
+    tag (cohort_name NULL -> champion). Distinct structures -> distinct
+    fingerprints (never collapses distinct candidates); a hypothetical
+    NULL+champion pair for the SAME structure collapses to one. Falls back to the
+    row id when no structure is present, so a candidate is never dropped."""
+    order_json = row.get("order_json") or {}
+    legs = order_json.get("legs")
+    if isinstance(legs, list) and legs:
+        key = {
+            "underlying": order_json.get("underlying"),
+            "strategy": order_json.get("strategy"),
+            "legs": sorted(
+                [str(leg.get("symbol")), str(leg.get("side")), leg.get("quantity")]
+                for leg in legs
+                if isinstance(leg, Mapping)
+            ),
+        }
+        canonical = json.dumps(key, sort_keys=True, separators=(",", ":"), default=str)
+        return "s:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return "id:" + str(row.get("id"))
+
+
+def _default_champion_resolver(client: Any, user_id: str) -> str:
+    from packages.quantum.policy_lab.champion import get_current_champion
+
+    return get_current_champion(user_id, client)
+
+
 def build_candidate_universe(
     client: Any,
     source_decision_id: str,
+    user_id: str,
+    *,
+    champion_resolver: Callable[[Any, str], str] = _default_champion_resolver,
 ) -> List[Dict[str, Any]]:
     """The complete set of fully-constructed, scored candidate structures the
-    scanner emitted for one decision event, read once from durable storage.
+    scanner emitted for one decision event, read once from durable storage,
+    INDEPENDENT of the champion fork's in-place tagging.
 
-    Source = ``trade_suggestions WHERE decision_id = event AND cohort_name IS
-    NULL``. The ``cohort_name IS NULL`` filter keeps this the SCANNER-emitted
-    constructed set (each candidate once) and excludes Policy-Lab fork clones
-    (cohort_name set), which are derived rows, not scanner construction — including
-    them would double-count. The fleet applies its OWN policy filter to this set
-    rather than inheriting champion selection (§3).
+    ``fork_suggestions_for_cohorts`` runs synchronously in the scan cycle BEFORE
+    this evaluator is even enqueued (suggestions_open.py) and UPDATEs the
+    emitted rows' ``cohort_name`` from NULL to the champion cohort in place
+    (fork.py:150-156) — so a ``cohort_name IS NULL``-only read is EMPTIED on real
+    events (VERIFIED-DB: recent decisions carry 0 NULL, all champion-tagged). We
+    therefore read ``cohort_name IS NULL OR cohort_name = <champion>``, resolving
+    the champion EXACTLY as fork does (``get_current_champion``), which is
+    precisely the scanner-emitted set whether or not tagging has run yet. The
+    neutral/conservative CLONES are separate INSERTed rows carrying non-champion
+    cohort names — still excluded. Rows are deduped to one per candidate
+    fingerprint (the champion tag is an in-place UPDATE, not a clone).
 
-    A read error raises ``UniverseUnavailable`` (fail-closed data_unavailable for
-    every policy). A successful zero-row result is an honest empty universe.
+    A champion-resolve or read error raises ``UniverseUnavailable`` (fail-closed
+    data_unavailable for every policy). A successful zero-row result is an honest
+    empty universe.
     """
 
     try:
-        result = (
+        champion = str(champion_resolver(client, user_id) or "").strip()
+    except Exception as exc:
+        raise UniverseUnavailable(
+            f"champion resolve failed: {type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+
+    try:
+        query = (
             client.table("trade_suggestions")
             .select("id,decision_id,cohort_name,sizing_metadata,order_json,ev,ev_raw")
             .eq("decision_id", source_decision_id)
-            .is_("cohort_name", "null")
-            .execute()
         )
+        if champion:
+            # Emitted set = untagged (pre-fork) OR champion-tagged (post-fork,
+            # in place). Clones (neutral/conservative) are excluded.
+            query = query.or_(f"cohort_name.is.null,cohort_name.eq.{champion}")
+        else:
+            query = query.is_("cohort_name", "null")
+        result = query.execute()
     except Exception as exc:
         raise UniverseUnavailable(
             f"universe read failed: {type(exc).__name__}: {str(exc)[:200]}"
@@ -358,10 +411,15 @@ def build_candidate_universe(
 
     rows = _rows(result)
     universe: List[Dict[str, Any]] = []
+    seen: set = set()
     for row in rows:
         sid = row.get("id")
         if not sid:
             continue
+        fingerprint = _candidate_fingerprint(row)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
         universe.append(
             {
                 "id": str(sid),
@@ -836,7 +894,7 @@ def run_fleet_policy_eval(
     # account (fail-closed) — never a silent empty universe.
     universe_unavailable = False
     try:
-        universe = universe_builder(client, source_decision_id)
+        universe = universe_builder(client, source_decision_id, user_id)
     except UniverseUnavailable as exc:
         universe = []
         universe_unavailable = True
@@ -898,14 +956,14 @@ def run_fleet_policy_eval(
             errors.append({"stage": "capital_basis", "policy_registration_id": policy_id})
             continue
 
-        open_positions = 0
-        if open_positions_loader is not None:
-            # C2 supplies a FAIL-CLOSED loader; a read failure raises and is
-            # caught below as evaluator_failed (never a silent 0). While inactive
-            # this branch is unreachable (no accounts).
-            open_positions = int(open_positions_loader(client, micro_id))
-
         try:
+            # C2 supplies a FAIL-CLOSED loader; a read failure raises and lands
+            # as THIS policy's evaluator_failed (never a silent 0, never a crash
+            # of the other 49). The call is INSIDE the per-policy try so its
+            # failure is isolated. While inactive this branch is unreachable.
+            open_positions = 0
+            if open_positions_loader is not None:
+                open_positions = int(open_positions_loader(client, micro_id))
             decisions = evaluate_policy(
                 universe,
                 account.get("policy_config") or {},

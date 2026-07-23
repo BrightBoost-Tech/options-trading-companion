@@ -122,11 +122,16 @@ def run_fleet_dry_replay(
     client: Any,
     *,
     decision_id: str,
+    user_id: str,
     fleet_epoch: str = FLEET_EPOCH,
     deployable_capital: float = CAPITAL_PER_ACCOUNT,
     universe_builder: Callable[..., List[Dict[str, Any]]] = build_candidate_universe,
 ) -> Dict[str, Any]:
-    """Simulate all approved policies against one stored universe, zero writes."""
+    """Simulate all approved policies against one stored universe, zero writes.
+
+    The universe resolves the champion (get_current_champion) exactly as the live
+    evaluator does, so it reflects the fork-tagged emitted set for the event.
+    """
 
     read_only = ReadOnlySupabase(client)
     policies = _load_approved_policies(read_only, fleet_epoch=fleet_epoch)
@@ -134,7 +139,7 @@ def run_fleet_dry_replay(
         raise ValueError(f"no approved {fleet_epoch} policies to simulate")
 
     try:
-        universe = universe_builder(read_only, decision_id)
+        universe = universe_builder(read_only, decision_id, user_id)
     except UniverseUnavailable as exc:
         raise ValueError(f"universe unavailable for {decision_id}: {exc}") from exc
 
@@ -197,6 +202,7 @@ def run_fleet_dry_replay(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--decision-id", required=True)
+    parser.add_argument("--user-id", required=True)
     parser.add_argument("--fleet-epoch", default=FLEET_EPOCH)
     parser.add_argument("--json-out")
     args = parser.parse_args()
@@ -210,6 +216,7 @@ def main() -> int:
     result = run_fleet_dry_replay(
         client,
         decision_id=args.decision_id,
+        user_id=args.user_id,
         fleet_epoch=args.fleet_epoch,
     )
     text = json.dumps(result, sort_keys=True, indent=2, default=str) + "\n"

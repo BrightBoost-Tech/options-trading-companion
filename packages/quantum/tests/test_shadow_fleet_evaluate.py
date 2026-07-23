@@ -359,7 +359,7 @@ def test_child_is_noop_when_readiness_not_ready():
     FakeWriter.instances = []
     calls = {"universe": 0}
 
-    def spy_universe(client, decision_id):
+    def spy_universe(client, decision_id, user_id):
         calls["universe"] += 1
         return []
 
@@ -382,7 +382,7 @@ def test_fifty_policies_share_ONE_universe_read():
     calls = {"universe": 0}
     uni = _universe(3)
 
-    def spy_universe(client, decision_id):
+    def spy_universe(client, decision_id, user_id):
         calls["universe"] += 1
         return uni
 
@@ -409,7 +409,7 @@ def test_fifty_policies_share_ONE_universe_read():
 def test_universe_read_failure_is_data_unavailable_for_all():
     FakeWriter.instances = []
 
-    def boom_universe(client, decision_id):
+    def boom_universe(client, decision_id, user_id):
         raise UniverseUnavailable("trade_suggestions read failed")
 
     result = run_fleet_policy_eval(
@@ -431,7 +431,7 @@ def test_empty_universe_is_no_candidate():
         _payload(),
         client=object(),
         readiness_loader=_readiness_with(_accounts(4)),
-        universe_builder=lambda c, d: [],
+        universe_builder=lambda c, d, u: [],
         writer_factory=FakeWriter,
     )
     assert result["status"] == "succeeded"
@@ -443,31 +443,25 @@ def test_empty_universe_is_no_candidate():
 def test_per_policy_failure_isolation():
     FakeWriter.instances = []
     uni = _universe(2)
-
-    # Inject a failure in ONE policy's evaluation via a poisoned config that
-    # blows up PolicyConfig arithmetic — the other policies are untouched.
     accounts = _accounts(3)
-    accounts[1]["policy_config"] = {"budget_cap_pct": "not-a-number", "min_score_threshold": 30.0}
 
-    def flaky_eval(universe, policy_config, *, open_positions, deployable_capital):
-        # Route the real evaluator but force one policy to raise.
-        if policy_config.get("budget_cap_pct") == "not-a-number":
-            raise ValueError("injected policy failure")
-        return evaluate_policy(universe, policy_config, open_positions=open_positions, deployable_capital=deployable_capital)
+    # Inject the failure at the EXACT open_positions_loader seam (defect fix):
+    # the loader read raises for ONE micro-account. It is called INSIDE the
+    # per-policy try, so it lands as THAT policy's evaluator_failed while the
+    # other two are untouched — never a crash of all 50.
+    def flaky_loader(client, micro_id):
+        if micro_id == "m2":
+            raise RuntimeError("open-position read failed")
+        return 0
 
-    # Monkeypatch the module-level evaluate_policy used inside run().
-    orig = sfe.evaluate_policy
-    sfe.evaluate_policy = flaky_eval
-    try:
-        result = run_fleet_policy_eval(
-            _payload(),
-            client=object(),
-            readiness_loader=_readiness_with(accounts),
-            universe_builder=lambda c, d: uni,
-            writer_factory=FakeWriter,
-        )
-    finally:
-        sfe.evaluate_policy = orig
+    result = run_fleet_policy_eval(
+        _payload(),
+        client=object(),
+        readiness_loader=_readiness_with(accounts),
+        universe_builder=lambda c, d, u: uni,
+        writer_factory=FakeWriter,
+        open_positions_loader=flaky_loader,
+    )
 
     assert result["status"] == "partial"
     assert result["counts"]["evaluator_failed_runs"] == 1
@@ -488,7 +482,7 @@ def test_capital_rejected_when_micro_account_cannot_afford():
         _payload(),
         client=object(),
         readiness_loader=_readiness_with(_accounts(1)),
-        universe_builder=lambda c, d: uni,
+        universe_builder=lambda c, d, u: uni,
         writer_factory=FakeWriter,
     )
     assert result["counts"]["capital_rejected"] == 1
@@ -505,7 +499,7 @@ def test_missing_max_loss_basis_is_capital_rejected_not_fabricated():
         _payload(),
         client=object(),
         readiness_loader=_readiness_with(_accounts(1)),
-        universe_builder=lambda c, d: uni,
+        universe_builder=lambda c, d, u: uni,
         writer_factory=FakeWriter,
     )
     d = FakeWriter.instances[0].decisions[0]
@@ -637,37 +631,104 @@ def test_universe_read_error_raises_not_empty():
         def table(self, name):
             raise RuntimeError("network")
 
+    # champion resolve on Boom falls back to 'aggressive' (get_current_champion
+    # is fail-safe); the trade_suggestions read then raises -> UniverseUnavailable.
     with pytest.raises(UniverseUnavailable):
-        build_candidate_universe(Boom(), DECISION)
+        build_candidate_universe(Boom(), DECISION, USER)
 
 
-def test_universe_excludes_fork_clones_and_sorts_by_score():
+def test_champion_resolve_failure_fails_closed():
+    def boom_resolver(client, user_id):
+        raise RuntimeError("champion resolve exploded")
+
+    with pytest.raises(UniverseUnavailable):
+        build_candidate_universe(object(), DECISION, USER, champion_resolver=boom_resolver)
+
+
+# Fake trade_suggestions client that APPLIES the .eq(decision_id) + .or_() cohort
+# filter, so the route test proves the actual query semantics (fork-tagged rows
+# in, clones out) rather than trusting a filter-blind stub.
+class _FilterTradeSuggestions:
+    def __init__(self, rows):
+        self._rows = rows
+        self._decision = None
+        self._or = None
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, col, val):
+        if col == "decision_id":
+            self._decision = val
+        return self
+
+    def is_(self, col, val):
+        self._or = f"{col}.is.null"
+        return self
+
+    def or_(self, expr):
+        self._or = expr
+        return self
+
+    def _match_cohort(self, cohort):
+        for pred in (self._or or "").split(","):
+            pred = pred.strip()
+            if pred == "cohort_name.is.null" and cohort is None:
+                return True
+            if pred.startswith("cohort_name.eq.") and cohort == pred.split(".eq.", 1)[1]:
+                return True
+        return False
+
+    def execute(self):
+        out = [
+            r for r in self._rows
+            if r.get("decision_id") == self._decision and self._match_cohort(r.get("cohort_name"))
+        ]
+        return _Resp(out)
+
+
+class _FilterClient:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, name):
+        assert name == "trade_suggestions"
+        return _FilterTradeSuggestions(self._rows)
+
+
+def test_universe_is_fork_tagged_emitted_set_not_empty():
+    # Reproduce the PRODUCTION sequence: fork ran first and tagged the emitted
+    # rows to the champion cohort (aggressive) IN PLACE, and INSERTed
+    # neutral/conservative clones. A `cohort_name IS NULL`-only read would be
+    # EMPTY here; the fix reads NULL-or-champion.
+    def oj(u):
+        return {"underlying": u, "strategy": "IC", "legs": [{"symbol": u + "1", "side": "buy", "quantity": 1}]}
+
     rows = [
-        {"id": "c-low", "sizing_metadata": {"score": 10.0}, "order_json": {}, "ev": 1, "ev_raw": 1},
-        {"id": "c-high", "sizing_metadata": {"score": 90.0}, "order_json": {}, "ev": 1, "ev_raw": 1},
+        {"id": "emit-hi", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 90.0}, "order_json": oj("SPY"), "ev": 1, "ev_raw": 1},
+        {"id": "emit-lo", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 10.0}, "order_json": oj("QQQ"), "ev": 1, "ev_raw": 1},
+        {"id": "clone-neu", "decision_id": DECISION, "cohort_name": "neutral", "sizing_metadata": {"score": 99.0}, "order_json": oj("IWM"), "ev": 1, "ev_raw": 1},
+        {"id": "clone-con", "decision_id": DECISION, "cohort_name": "conservative", "sizing_metadata": {"score": 99.0}, "order_json": oj("DIA"), "ev": 1, "ev_raw": 1},
     ]
+    universe = build_candidate_universe(
+        _FilterClient(rows), DECISION, USER, champion_resolver=lambda c, u: "aggressive"
+    )
+    # Champion-tagged emitted set, score desc; the two clones are excluded.
+    assert [c["id"] for c in universe] == ["emit-hi", "emit-lo"]
 
-    class Client:
-        def table(self, name):
-            assert name == "trade_suggestions"
-            return self
 
-        def select(self, *a, **k):
-            return self
-
-        def eq(self, *a, **k):
-            return self
-
-        def is_(self, col, val):
-            # The cohort_name IS NULL filter must be applied.
-            assert (col, val) == ("cohort_name", "null")
-            return self
-
-        def execute(self):
-            return _Resp(rows)
-
-    universe = build_candidate_universe(Client(), DECISION)
-    assert [c["id"] for c in universe] == ["c-high", "c-low"]  # score desc
+def test_universe_dedupes_null_and_champion_same_structure():
+    # If a candidate exists as BOTH a not-yet-tagged NULL row and its champion-
+    # tagged row (same structure), the fingerprint collapses them to one.
+    struct = {"underlying": "SPY", "strategy": "IC", "legs": [{"symbol": "L1", "side": "buy", "quantity": 1}]}
+    rows = [
+        {"id": "champ", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 50.0}, "order_json": struct, "ev": 1, "ev_raw": 1},
+        {"id": "null", "decision_id": DECISION, "cohort_name": None, "sizing_metadata": {"score": 50.0}, "order_json": struct, "ev": 1, "ev_raw": 1},
+    ]
+    universe = build_candidate_universe(
+        _FilterClient(rows), DECISION, USER, champion_resolver=lambda c, u: "aggressive"
+    )
+    assert len(universe) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

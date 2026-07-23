@@ -75,6 +75,11 @@ from packages.quantum.services.analytics.small_account_compounder import SmallAc
 from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
 from packages.quantum.agents.agents.sizing_agent import SizingAgent
 from packages.quantum.agents.agents.exit_plan_agent import ExitPlanAgent
+# E4 (2026-07-23): route the QUANT_AGENTS_ENABLED master toggle through the SAME
+# canonical tri-state parser the runner/build_agent_pipeline uses, so the sizing
+# path can never split-brain against the scanner/design path. See the inline
+# note at the read site below and observability/flag_echo.py (canonical master).
+from packages.quantum.agents.runner import is_agent_enabled
 
 from packages.quantum.services.decision_lineage_builder import DecisionLineageBuilder
 
@@ -3366,8 +3371,15 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         )
 
         # --- AGENT-BASED SIZING ---
-        # Defaults to classic logic, overridden if agent is enabled
-        QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
+        # Defaults to classic logic, overridden if agent is enabled.
+        # E4 (2026-07-23): use the canonical tri-state `is_agent_enabled`
+        # parser (shared with runner.build_agent_pipeline) instead of a
+        # divergent inline `== "true"` read. The prior inline parser treated
+        # `1`/`yes`/`" true "` as OFF while the runner treated them as ON — a
+        # split-brain that could half-enable agents (scanner/design ON, sizing
+        # OFF). `default=False` preserves the prior unset→OFF behavior exactly,
+        # and every value both parsers already agreed on is byte-identical.
+        QUANT_AGENTS_ENABLED = is_agent_enabled("QUANT_AGENTS_ENABLED", default=False)
 
         # Use SmallAccountCompounder for variable sizing (classic path).
         #

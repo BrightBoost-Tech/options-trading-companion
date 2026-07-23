@@ -318,6 +318,49 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         }
                         notes.append(f"single-leg shadow enqueue error: {sl_err}")
 
+                    # Regime-V4 parallel shadow comparison (observe-only, default
+                    # OFF). Mirrors the single-leg seam: scheduler-origin only,
+                    # own try/except, NEVER touches parent counts (note-only —
+                    # one failure never makes the parent partial). The bulky
+                    # capture rides on cycle_result and is POPPED here so it is
+                    # never persisted into job_runs.result (no tape bloat).
+                    try:
+                        _rv4_capture = (
+                            cycle_result.pop("regime_v4_capture", None)
+                            if isinstance(cycle_result, dict)
+                            else None
+                        )
+                        if _rv4_capture:
+                            from packages.quantum.analytics.regime_v4_shadow_capture import (
+                                maybe_enqueue_regime_v4_shadow_compare,
+                            )
+                            _rv4_origin_blob = payload.get("origin")
+                            _rv4_parent_origin = (
+                                _rv4_origin_blob.get("origin")
+                                if isinstance(_rv4_origin_blob, dict)
+                                else None
+                            )
+                            _rv4_enq = maybe_enqueue_regime_v4_shadow_compare(
+                                client,
+                                capture=_rv4_capture,
+                                user_id=uid,
+                                source_job_run_id=payload.get("_job_run_id"),
+                                source_decision_id=source_decision_id,
+                                source_code_sha=source_code_sha,
+                                as_of=source_as_of,
+                                parent_origin=_rv4_parent_origin,
+                            )
+                            if _rv4_enq.get("enqueued"):
+                                notes.append(
+                                    f"regime-v4 shadow compare enqueued for "
+                                    f"{uid[:8]}: {_rv4_enq.get('job_run_id')}"
+                                )
+                    except Exception as rv4_err:
+                        # OBSERVE-ONLY: never fold into counts; note-only.
+                        notes.append(
+                            f"regime-v4 shadow enqueue error (non-fatal): {rv4_err}"
+                        )
+
                     # Capture cycle result for observability
                     if cycle_result:
                         cycle_results.append({"user_id": uid[:8], **cycle_result})

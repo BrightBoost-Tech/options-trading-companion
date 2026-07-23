@@ -165,6 +165,8 @@ _REGISTRY: List[FlagSpec] = [
              "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#6 vol-signal observe"),
     FlagSpec("REGIME_FILTER_OBSERVE_ENABLED", "packages.quantum.analytics.regime_filter",
              "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "census#5 cross-asset regime"),
+    FlagSpec("REGIME_V4_OBSERVE_ENABLED", "packages.quantum.analytics.regime_v4_shadow_capture",
+             "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "Audit-B regime-v4 parallel observe"),
 
     # ---- Behavioral / opt-in but STRICT ==1 (the §3 footgun class) -----------
     FlagSpec("RISK_UTILIZATION_GATE_ENABLED", "packages.quantum.risk.utilization_gate",

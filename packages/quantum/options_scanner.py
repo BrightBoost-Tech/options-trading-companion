@@ -3038,6 +3038,7 @@ def scan_for_opportunities(
     portfolio_cash: float = None,
     account_tier: Optional[str] = None,
     job_run_id: Optional[str] = None,
+    regime_capture_sink: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], RejectionStats]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -3537,6 +3538,36 @@ def scan_for_opportunities(
                         "strategy_phase_excluded",
                         strategy=_excl.get("strategy"),
                     )
+                # Regime-V4 observe seam (default OFF): capture this symbol's V3
+                # regime inputs + the PURE get_candidates pool (before any agent
+                # override) so the observe-only V4 child can compute the
+                # counterfactual pool with sentiment/iv_rank held fixed. Keyed by
+                # symbol → idempotent across multi-strategy retries. Fail-soft:
+                # capture must never affect the scan. When the sink is None (flag
+                # off) this block is skipped → byte-identical.
+                if regime_capture_sink is not None:
+                    try:
+                        _rv4_earn = earnings_map.get(symbol)
+                        _rv4_earn_iso = (
+                            _rv4_earn.isoformat()
+                            if hasattr(_rv4_earn, "isoformat")
+                            else (str(_rv4_earn) if _rv4_earn else None)
+                        )
+                        regime_capture_sink.setdefault("per_symbol", {})[symbol] = {
+                            "symbol": symbol,
+                            "v3_symbol_state": symbol_snapshot.state.value,
+                            "v3_effective_regime": effective_regime_state.value,
+                            "sentiment": trend,
+                            "current_price": current_price,
+                            "iv_rank": iv_rank,
+                            "v3_selection": [
+                                c.get("strategy") for c in candidates
+                            ],
+                            "earnings_date": _rv4_earn_iso,
+                            "decision_event_id": None,
+                        }
+                    except Exception:
+                        pass  # capture must never affect the scan
                 if not candidates:
                     if _phase_exclusions:
                         # Pool emptied (at least in part) by the phase

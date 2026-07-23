@@ -19,6 +19,7 @@ is monkeypatched; the real enrichment logic (cap, limiter, merge, coerce) runs.
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from packages.quantum.services.oi_enrichment import OIRecord, RateLimiter
@@ -35,6 +36,15 @@ from packages.quantum.tests.test_quote_provenance_scanner_wiring import (
     _selector,
     _tight_spread_chain,
 )
+
+
+# Keep the fake provider date genuinely fresh without tying the test to a
+# calendar date that inevitably expires. Module-load time is shared by the
+# fetcher and assertion, while yesterday remains within the production 4-day
+# freshness horizon even if the test happens to straddle UTC midnight.
+FAKE_OI_OBSERVATION_DATE = (
+    datetime.now(timezone.utc).date() - timedelta(days=1)
+).isoformat()
 
 
 def _prov_rows(fake):
@@ -56,7 +66,7 @@ def _fake_fetcher():
     def _fetch(contract):
         oi = 1500 if "100" in contract else 300
         return OIRecord(contract=contract, oi=oi, source="alpaca_contracts",
-                        observation_date="2026-07-18",
+                        observation_date=FAKE_OI_OBSERVATION_DATE,
                         date_field="open_interest_date", status="ok")
     return _fetch
 
@@ -129,7 +139,7 @@ class TestEnrichmentOnThreadsRealOI(unittest.TestCase):
         # Provenance names the enrichment provider + genuine observation date.
         leg = oi["legs"][0]
         self.assertEqual(leg["oi_source"], "alpaca_contracts")
-        self.assertEqual(leg["oi_observation_date"], "2026-07-18")
+        self.assertEqual(leg["oi_observation_date"], FAKE_OI_OBSERVATION_DATE)
         self.assertEqual(leg["oi_freshness"], "fresh")
 
     def test_scan_decisions_byte_identical_on_vs_off(self):

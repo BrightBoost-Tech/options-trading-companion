@@ -17,6 +17,16 @@ MASKING_PATTERNS = [
     (re.compile(r'(postgres://[^:]+:)([^@]+)(@)'), r'\1****\3'),
     (re.compile(r'(postgresql://[^:]+:)([^@]+)(@)'), r'\1****\3'),
 
+    # Generic URL credentials for ANY scheme: scheme://user:password@host
+    # Covers redis:// / rediss:// / amqp:// / mongodb:// / http(s):// etc. — an
+    # rq/redis enqueue error routinely embeds the full broker URL
+    # (redis://default:<token>@host:port), which the scheme-specific patterns
+    # above did NOT catch. Group 1 = scheme://user:, group 2 = password,
+    # group 3 = @. IGNORECASE so 'Redis://' also matches. Requires a trailing
+    # '@' so a plain https://host/path URL is never touched.
+    (re.compile(r'([a-z][a-z0-9+.\-]*://[^/\s:@]+:)([^@\s]+)(@)', re.IGNORECASE),
+     r'\1****\3'),
+
     # OpenAI API Keys: sk-...
     # Keep first 7 chars (sk-xxxx), mask rest
     # Matches standard keys and new project keys (sk-proj-...)

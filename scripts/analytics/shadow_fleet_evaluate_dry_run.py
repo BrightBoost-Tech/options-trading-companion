@@ -1,11 +1,14 @@
-"""No-write replay for the recurring independent shadow-fleet evaluator.
+"""No-write replay for the recurring independent shadow-fleet evaluator (v2).
 
 The mandatory readiness proof between a merged-but-dark evaluator and any future
-fleet activation. It loads the 50 APPROVED small_tier_v1 policies and the shared
-candidate universe for one stored decision event, simulates every policy against
-that universe with writes disabled, and emits per-policy typed dispositions plus
-a distinct-config-hash count. It never creates a job, calls a provider, opens a
-position, invokes an RPC, or writes a single row.
+fleet activation. It loads the 50 APPROVED small_tier_v1 policies and the v2
+COMPLETE candidate universe for one stored decision event (the immutable
+scan-envelope set — every fully-constructed candidate, emitted AND rejected —
+enriched by the emitted subset's routing score/max-loss from trade_suggestions),
+simulates every policy against that shared universe with writes disabled, and
+emits per-policy typed dispositions plus a distinct-config-hash count. It never
+creates a job, calls a provider, opens a position, invokes an RPC, or writes a
+single row.
 
 The no-write claim is enforced, not asserted after the fact: the Supabase client
 is wrapped in a read-only capability that exposes SELECT builders only and raises
@@ -143,6 +146,10 @@ def run_fleet_dry_replay(
     except UniverseUnavailable as exc:
         raise ValueError(f"universe unavailable for {decision_id}: {exc}") from exc
 
+    emitted = sum(1 for c in universe if c.get("matched_emitted"))
+    rejected = len(universe) - emitted
+
+    _TYPED = ("selected", "policy_rejected", "capital_rejected", "data_unavailable")
     policy_results: List[Dict[str, Any]] = []
     disposition_totals: Counter = Counter()
     for policy in policies:
@@ -161,7 +168,7 @@ def run_fleet_dry_replay(
             f"universe={len(universe)} decisions={len(decisions)}"
         )
         for d in decisions:
-            assert d.disposition in ("selected", "policy_rejected", "capital_rejected"), (
+            assert d.disposition in _TYPED, (
                 f"untyped disposition {d.disposition} for {policy_id}"
             )
         policy_results.append(
@@ -172,6 +179,7 @@ def run_fleet_dry_replay(
                 "selected": per_policy.get("selected", 0),
                 "policy_rejected": per_policy.get("policy_rejected", 0),
                 "capital_rejected": per_policy.get("capital_rejected", 0),
+                "data_unavailable": per_policy.get("data_unavailable", 0),
             }
         )
 
@@ -187,13 +195,15 @@ def run_fleet_dry_replay(
         "database_write_attempts": read_only.write_attempts,
         "provider_calls": 0,
         "broker_calls": 0,
-        "data_source": "durable_trade_suggestions_universe",
+        "data_source": "complete_scan_envelope_universe_v2",
         "fleet_epoch": fleet_epoch,
         "source_decision_id": str(decision_id),
         "deployable_capital_per_account": deployable_capital,
         "policies_evaluated": len(policy_results),
         "distinct_config_hashes": distinct_hashes,
         "candidates_universe": len(universe),
+        "candidates_emitted": emitted,
+        "candidates_rejected": rejected,
         "disposition_totals": dict(disposition_totals),
         "policy_results": policy_results,
     }

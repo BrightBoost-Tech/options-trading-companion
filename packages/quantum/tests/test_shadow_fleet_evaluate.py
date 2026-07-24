@@ -1,9 +1,20 @@
-"""Unit tests for the recurring independent shadow-fleet evaluator (C1).
+"""Unit tests for the recurring independent shadow-fleet evaluator (C1, v2).
 
-Covers: dark no-op (enqueue + child), fail-closed reads, the ONE-universe
-50-policy load path, idempotent replay, per-policy failure isolation, typed
-dispositions, no-provider/no-broker isolation, and byte-identity of the filter
-precedence with the parent Policy-Lab fork.
+v2 universe = the COMPLETE, immutable scan-envelope set (every fully-constructed
+candidate — emitted AND rejected-before-persistence), with the emitted subset
+enriched by the real routing score + max-loss basis from trade_suggestions. This
+suite drives the real routes and asserts at the top:
+
+  * dark no-op (enqueue + child) and fail-closed reads
+  * the capture-surface readiness gate (decoupled from the td SCORING flag)
+  * v2 universe: rejected candidate present, champion subset no longer defines it,
+    clones excluded, fingerprint dedup, distinct structures preserved, query
+    scoped to the source decision (cross-user isolation)
+  * one shared universe read for 50 policies + per-policy failure isolation
+  * typed dispositions incl. candidate-grain data_unavailable (missing field,
+    never fabricated)
+  * idempotent replay, no-provider/no-broker isolation, byte-identity of the
+    SCORED filter precedence with the parent Policy-Lab fork.
 """
 
 from pathlib import Path
@@ -12,21 +23,28 @@ import pytest
 
 from packages.quantum.services import shadow_fleet_evaluate as sfe
 from packages.quantum.services.shadow_fleet_evaluate import (
+    ENRICHMENT_TABLE,
+    SCAN_ENVELOPE_TABLE,
     FleetPolicyEvidenceWriter,
     PolicyDecision,
     UniverseUnavailable,
     build_candidate_universe,
+    build_trade_suggestions_universe,
     evaluate_policy,
     load_fleet_readiness,
     maybe_enqueue_fleet_policy_eval,
     run_fleet_policy_eval,
 )
+from packages.quantum.services.options_utils import compute_legs_fingerprint
 
 USER = "44444444-4444-4444-4444-444444444444"
 DECISION = "33333333-3333-3333-3333-333333333333"
 JOB_RUN = "22222222-2222-2222-2222-222222222222"
 FLEET_ID = "11111111-1111-1111-1111-111111111111"
 AS_OF = "2026-07-23T16:00:00+00:00"
+
+_ON = lambda: True  # capture-gate stub: surface enabled
+_OFF = lambda: False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +125,7 @@ def test_readiness_inactive_fleet_reads_only_status_table():
     assert result["ready"] is False
     assert result["errors"] == 0
     assert result["accounts"] == []
-    # Readiness read FIRST: no micro-account / policy read happened.
+    # Readiness read FIRST: no micro-account / policy / envelope read happened.
     assert client.touched == ["shadow_fleets"]
 
 
@@ -128,7 +146,7 @@ def test_readiness_active_but_unbound_is_noop():
             ],
         }
     )
-    result = load_fleet_readiness(client, USER)
+    result = load_fleet_readiness(client, USER, capture_gate=_ON)
     assert result["status"] == "no_active_bound_accounts"
     assert result["accounts"] == []
 
@@ -143,12 +161,50 @@ def test_readiness_active_bound_returns_accounts():
             "policy_registrations": [APPROVED_POLICY],
         }
     )
-    result = load_fleet_readiness(client, USER)
+    result = load_fleet_readiness(client, USER, capture_gate=_ON)
     assert result["ready"] is True
     assert len(result["accounts"]) == 1
     acct = result["accounts"][0]
     assert acct["policy_registration_id"] == "aggressive_anchor"
     assert acct["deployable_capital"] == 2000.0
+
+
+def test_readiness_requires_capture_surface():
+    # ACTIVE + bound + approved, but the shared capture surface is OFF: readiness
+    # is NOT ready (config gate, errors=0). Never a silent empty universe / champion
+    # fallback. The gate runs LAST, so the fleet/micro/policy reads still happened.
+    client = FakeReadClient(
+        {
+            "shadow_fleets": [{"id": FLEET_ID, "user_id": USER, "status": "active"}],
+            "shadow_micro_accounts": [
+                {"id": "m1", "fleet_id": FLEET_ID, "slot_number": 1, "policy_registration_id": "aggressive_anchor", "state": "active", "initial_cash": 2000},
+            ],
+            "policy_registrations": [APPROVED_POLICY],
+        }
+    )
+    result = load_fleet_readiness(client, USER, capture_gate=_OFF)
+    assert result["status"] == "capture_surface_disabled"
+    assert result["ready"] is False
+    assert result["errors"] == 0
+    assert result["accounts"] == []
+
+
+def test_readiness_capture_gate_fault_fails_closed():
+    def boom_gate():
+        raise RuntimeError("gate read blew up")
+
+    client = FakeReadClient(
+        {
+            "shadow_fleets": [{"id": FLEET_ID, "user_id": USER, "status": "active"}],
+            "shadow_micro_accounts": [
+                {"id": "m1", "fleet_id": FLEET_ID, "slot_number": 1, "policy_registration_id": "aggressive_anchor", "state": "active", "initial_cash": 2000},
+            ],
+            "policy_registrations": [APPROVED_POLICY],
+        }
+    )
+    result = load_fleet_readiness(client, USER, capture_gate=boom_gate)
+    assert result["status"] == "capture_surface_disabled"
+    assert result["ready"] is False
 
 
 def test_readiness_fleet_read_failure_fails_closed():
@@ -160,6 +216,33 @@ def test_readiness_fleet_read_failure_fails_closed():
     assert result["status"] == "fleet_read_failed"
     assert result["ready"] is False
     assert result["errors"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Capture gate (decoupled from the td SCORING flag)
+# ─────────────────────────────────────────────────────────────────────────────
+def test_capture_gate_decoupled_from_td_scoring_flag(monkeypatch):
+    from packages.quantum.services.td_scan_capture import (
+        scan_candidate_capture_enabled,
+        td_scan_observe_enabled,
+    )
+
+    # Neither flag -> OFF.
+    monkeypatch.delenv("TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED", raising=False)
+    monkeypatch.delenv("SCAN_CANDIDATE_CAPTURE_ENABLED", raising=False)
+    assert scan_candidate_capture_enabled() is False
+
+    # Legacy td flag alone -> ON (backward-compatible with the old gate).
+    monkeypatch.setenv("TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED", "1")
+    assert scan_candidate_capture_enabled() is True
+    assert scan_candidate_capture_enabled() == td_scan_observe_enabled()
+
+    # Stable capture flag ALONE (td scoring off) -> ON. The fleet does not depend
+    # on td scoring staying enabled.
+    monkeypatch.delenv("TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED", raising=False)
+    monkeypatch.setenv("SCAN_CANDIDATE_CAPTURE_ENABLED", "yes")
+    assert td_scan_observe_enabled() is False
+    assert scan_candidate_capture_enabled() is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +308,25 @@ def test_enqueue_read_failure_fails_closed_no_enqueue():
     assert calls == []
 
 
+def test_capture_disabled_readiness_is_true_noop_at_enqueue():
+    calls = []
+    result = maybe_enqueue_fleet_policy_eval(
+        object(),
+        user_id=USER,
+        source_job_run_id=JOB_RUN,
+        source_decision_id=DECISION,
+        source_code_sha="b" * 40,
+        as_of=AS_OF,
+        parent_origin="scheduler",
+        readiness_loader=lambda *a, **k: {"status": "capture_surface_disabled", "ready": False, "errors": 0, "accounts": []},
+        enqueue_fn=lambda **kw: calls.append(kw),
+    )
+    assert result["status"] == "capture_surface_disabled"
+    assert result["enqueued"] is False
+    assert result["errors"] == 0
+    assert calls == []
+
+
 def test_operator_or_forced_parent_cannot_enqueue():
     calls = []
     result = maybe_enqueue_fleet_policy_eval(
@@ -286,6 +388,7 @@ class FakeWriter:
         self.kwargs = k
         self.run_id = f"run-{k['shadow_micro_account_id']}"
         self.decisions = []
+        self.snapshots = []
         self.finished = None
         self._counters = {"runs_started": 0, "decisions_written": 0, "write_failures": 0, "table_missing_noops": 0, "duplicate_acks": 0}
         type(self).instances.append(self)
@@ -294,8 +397,9 @@ class FakeWriter:
         self._counters["runs_started"] = 1
         return self.run_id
 
-    def record_decision(self, decision, **k):
+    def record_decision(self, decision, *, features_snapshot=None):
         self.decisions.append(decision)
+        self.snapshots.append(features_snapshot)
         self._counters["decisions_written"] += 1
         return True
 
@@ -329,19 +433,28 @@ def _readiness_with(accounts):
     return loader
 
 
+def _cand(fp, *, score=80.0, max_loss=50.0, emitted=True, matched=True, suggestion_id=None):
+    """A v2 universe candidate dict (post-join shape)."""
+    return {
+        "candidate_fingerprint": fp,
+        "suggestion_id": suggestion_id or (f"sug-{fp}" if matched else None),
+        "emitted": emitted,
+        "matched_emitted": matched,
+        "sizing_metadata": ({"score": score, "max_loss_total": max_loss} if matched else {}),
+        "order_json": {"contracts": 1, "legs": [{"symbol": fp}]},
+        "ev": 25.0,
+        "ev_raw": 25.0,
+        "symbol": "SPY",
+        "strategy": "IC",
+        "reject_reason": None if emitted else "unattributed_post_ev",
+        "reject_gate": None if emitted else "post_ev_gate",
+    }
+
+
 def _universe(n):
-    # Small, affordable structures. Aggressive anchor max_risk = 2000*0.035*1.2
-    # = $84, so a $50-max-loss structure affords 1 contract at the $2k tier.
-    return [
-        {
-            "id": f"cand-{i}",
-            "sizing_metadata": {"score": 80.0, "max_loss_total": 50.0},
-            "order_json": {"contracts": 1},
-            "ev": 25.0,
-            "ev_raw": 25.0,
-        }
-        for i in range(1, n + 1)
-    ]
+    # Small, affordable emitted structures. Aggressive anchor max_risk =
+    # 2000*0.035*1.2 = $84, so a $50-max-loss structure affords 1 contract.
+    return [_cand(f"fp-{i}") for i in range(1, n + 1)]
 
 
 def _payload():
@@ -404,13 +517,15 @@ def test_fifty_policies_share_ONE_universe_read():
     # aggressive anchor (min_score 30, max_positions 4, max_suggestions 4):
     # all 3 affordable candidates selected per policy.
     assert result["counts"]["selected"] == 150
+    assert result["counts"]["candidates_emitted"] == 3
+    assert result["counts"]["candidates_rejected"] == 0
 
 
 def test_universe_read_failure_is_data_unavailable_for_all():
     FakeWriter.instances = []
 
     def boom_universe(client, decision_id, user_id):
-        raise UniverseUnavailable("trade_suggestions read failed")
+        raise UniverseUnavailable("scan-envelope read failed")
 
     result = run_fleet_policy_eval(
         _payload(),
@@ -440,15 +555,46 @@ def test_empty_universe_is_no_candidate():
     assert all(w.finished["status"] == "no_candidate" for w in FakeWriter.instances)
 
 
+def test_rejected_candidate_is_data_unavailable_end_to_end():
+    # A universe with ONE emitted (scored) candidate + ONE rejected (no routing
+    # evidence). The emitted is selected; the rejected is candidate-grain
+    # data_unavailable (never fabricated, never a merit rejection), and the
+    # emitted/rejected status is stamped as PROVENANCE in features_snapshot.
+    FakeWriter.instances = []
+    uni = [_cand("emit", emitted=True, matched=True), _cand("rej", emitted=False, matched=False)]
+    result = run_fleet_policy_eval(
+        _payload(),
+        client=object(),
+        readiness_loader=_readiness_with(_accounts(1)),
+        universe_builder=lambda c, d, u: uni,
+        writer_factory=FakeWriter,
+    )
+    assert result["counts"]["selected"] == 1
+    assert result["counts"]["data_unavailable"] == 1
+    assert result["counts"]["candidates_emitted"] == 1
+    assert result["counts"]["candidates_rejected"] == 1
+    w = FakeWriter.instances[0]
+    by_fp = {d.candidate_fingerprint: d for d in w.decisions}
+    assert by_fp["emit"].disposition == "selected"
+    assert by_fp["emit"].suggestion_id == "sug-emit"
+    assert by_fp["rej"].disposition == "data_unavailable"
+    assert by_fp["rej"].reason_codes == ["routing_score_unavailable"]
+    assert by_fp["rej"].suggestion_id is None
+    # Provenance threaded to the decision row.
+    prov = {d.candidate_fingerprint: s for d, s in zip(w.decisions, w.snapshots)}
+    assert prov["rej"]["emitted"] is False
+    assert prov["rej"]["matched_emitted"] is False
+    assert prov["emit"]["emitted"] is True
+
+
 def test_per_policy_failure_isolation():
     FakeWriter.instances = []
     uni = _universe(2)
     accounts = _accounts(3)
 
-    # Inject the failure at the EXACT open_positions_loader seam (defect fix):
-    # the loader read raises for ONE micro-account. It is called INSIDE the
-    # per-policy try, so it lands as THAT policy's evaluator_failed while the
-    # other two are untouched — never a crash of all 50.
+    # Inject the failure at the EXACT open_positions_loader seam: the loader read
+    # raises for ONE micro-account. It is called INSIDE the per-policy try, so it
+    # lands as THAT policy's evaluator_failed while the other two are untouched.
     def flaky_loader(client, micro_id):
         if micro_id == "m2":
             raise RuntimeError("open-position read failed")
@@ -466,7 +612,6 @@ def test_per_policy_failure_isolation():
     assert result["status"] == "partial"
     assert result["counts"]["evaluator_failed_runs"] == 1
     assert result["counts"]["errors"] == 1
-    # The other two policies produced real decisions.
     assert result["counts"]["policies"] == 3
     failed = [w for w in FakeWriter.instances if w.finished["status"] == "evaluator_failed"]
     ok = [w for w in FakeWriter.instances if w.finished["status"] == "succeeded"]
@@ -477,7 +622,7 @@ def test_per_policy_failure_isolation():
 def test_capital_rejected_when_micro_account_cannot_afford():
     FakeWriter.instances = []
     # A structure whose per-contract max-loss ($3,000) exceeds the $2k tier.
-    uni = [{"id": "big", "sizing_metadata": {"score": 90.0, "max_loss_total": 3000.0}, "order_json": {"contracts": 1}, "ev": 1, "ev_raw": 1}]
+    uni = [_cand("big", score=90.0, max_loss=3000.0)]
     result = run_fleet_policy_eval(
         _payload(),
         client=object(),
@@ -492,9 +637,17 @@ def test_capital_rejected_when_micro_account_cannot_afford():
     assert d.reason_codes == ["insufficient_risk_budget"]
 
 
-def test_missing_max_loss_basis_is_capital_rejected_not_fabricated():
+def test_missing_max_loss_basis_is_data_unavailable_not_fabricated():
+    # An EMITTED (scored) candidate that passed the filter but carries NO canonical
+    # max-loss basis: cannot size without fabricating risk -> data_unavailable
+    # (doctrine §10), NOT a capital merit rejection.
     FakeWriter.instances = []
-    uni = [{"id": "nomaxloss", "sizing_metadata": {"score": 90.0}, "order_json": {"contracts": 1}, "ev": 1, "ev_raw": 1}]
+    uni = [{
+        "candidate_fingerprint": "nomaxloss", "suggestion_id": "sug-nml",
+        "emitted": True, "matched_emitted": True,
+        "sizing_metadata": {"score": 90.0}, "order_json": {"contracts": 1},
+        "ev": 1, "ev_raw": 1, "symbol": "SPY", "strategy": "IC",
+    }]
     result = run_fleet_policy_eval(
         _payload(),
         client=object(),
@@ -503,19 +656,21 @@ def test_missing_max_loss_basis_is_capital_rejected_not_fabricated():
         writer_factory=FakeWriter,
     )
     d = FakeWriter.instances[0].decisions[0]
-    assert d.disposition == "capital_rejected"
+    assert d.disposition == "data_unavailable"
     assert d.reason_codes == ["max_loss_basis_unavailable"]
+    assert result["counts"]["data_unavailable"] == 1
 
 
-def test_missing_score_is_routing_decision_unavailable():
+def test_missing_score_is_data_unavailable():
     decisions = evaluate_policy(
-        [{"id": "x", "sizing_metadata": {}, "order_json": {"contracts": 1}}],
+        [{"candidate_fingerprint": "x", "suggestion_id": None, "sizing_metadata": {}, "order_json": {"contracts": 1}}],
         APPROVED_POLICY["policy_config"],
         open_positions=0,
         deployable_capital=2000.0,
     )
-    assert decisions[0].disposition == "policy_rejected"
-    assert decisions[0].reason_codes == ["routing_decision_unavailable"]
+    assert decisions[0].disposition == "data_unavailable"
+    assert decisions[0].reason_codes == ["routing_score_unavailable"]
+    assert decisions[0].suggestion_id is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -549,6 +704,7 @@ class _DupTable:
             return _Resp([{"run_id": "run-1"}])
         if self._name == "fleet_policy_decisions":
             self._owner.decision_inserts += 1
+            self._owner.last_decision_payload = self._payload
             if self._owner.decision_inserts > 1:
                 raise RuntimeError("duplicate key value violates unique constraint (23505)")
             return _Resp([{"id": "d1"}])
@@ -558,6 +714,7 @@ class _DupTable:
 class _DupClient:
     def __init__(self):
         self.decision_inserts = 0
+        self.last_decision_payload = None
 
     def table(self, name):
         return _DupTable(self, name)
@@ -576,13 +733,42 @@ def test_writer_idempotent_replay_is_duplicate_ack_not_crash():
         user_id=USER,
     )
     assert writer.begin_run() == "run-1"
-    dec = PolicyDecision("cand-1", "selected", [], 1, 80.0, {"contracts": 1})
+    dec = PolicyDecision("fp-1", "sug-1", "selected", [], 1, 80.0, {"contracts": 1})
     assert writer.record_decision(dec) is True  # first insert
     assert writer.record_decision(dec) is True  # replay -> duplicate ack, no crash
     counters = writer.counters_dict()
     assert counters["decisions_written"] == 1
     assert counters["duplicate_acks"] == 1
     assert counters["write_failures"] == 0
+    # v2 identity: fingerprint always written; suggestion UUID mirrored on both
+    # identity columns (or both NULL for a reject).
+    p = client.last_decision_payload
+    assert p["candidate_fingerprint"] == "fp-1"
+    assert p["decision_event_id"] == "sug-1"
+    assert p["candidate_suggestion_id"] == "sug-1"
+
+
+def test_writer_records_rejected_candidate_with_null_suggestion_id():
+    client = _DupClient()
+    writer = FleetPolicyEvidenceWriter(
+        client,
+        fleet_id=FLEET_ID,
+        fleet_epoch="small_tier_v1",
+        shadow_micro_account_id="m1",
+        policy_registration_id="pol_1",
+        source_decision_id=DECISION,
+        source_job_run_id=JOB_RUN,
+        user_id=USER,
+    )
+    writer.begin_run()
+    # A rejected candidate: fingerprint only, no suggestion UUID.
+    dec = PolicyDecision("rejfp", None, "data_unavailable", ["routing_score_unavailable"], 3, None, {})
+    assert writer.record_decision(dec) is True
+    p = client.last_decision_payload
+    assert p["candidate_fingerprint"] == "rejfp"
+    assert p["decision_event_id"] is None
+    assert p["candidate_suggestion_id"] is None
+    assert p["disposition"] == "data_unavailable"
 
 
 def test_writer_table_missing_is_typed_noop():
@@ -624,30 +810,63 @@ def test_writer_table_missing_is_typed_noop():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Universe builder: fail-closed vs honest-empty
+# v2 universe builder: complete scan-envelope source + emitted enrichment.
 # ─────────────────────────────────────────────────────────────────────────────
-def test_universe_read_error_raises_not_empty():
-    class Boom:
-        def table(self, name):
-            raise RuntimeError("network")
-
-    # champion resolve on Boom falls back to 'aggressive' (get_current_champion
-    # is fail-safe); the trade_suggestions read then raises -> UniverseUnavailable.
-    with pytest.raises(UniverseUnavailable):
-        build_candidate_universe(Boom(), DECISION, USER)
+def _legs(sym):
+    # A real 2-leg option structure so compute_legs_fingerprint is well-defined.
+    return [
+        {"symbol": f"{sym}260717C00500000", "side": "buy", "quantity": 1, "type": "call", "strike": 500, "expiry": "2026-07-17"},
+        {"symbol": f"{sym}260717C00510000", "side": "sell", "quantity": 1, "type": "call", "strike": 510, "expiry": "2026-07-17"},
+    ]
 
 
-def test_champion_resolve_failure_fails_closed():
-    def boom_resolver(client, user_id):
-        raise RuntimeError("champion resolve exploded")
-
-    with pytest.raises(UniverseUnavailable):
-        build_candidate_universe(object(), DECISION, USER, champion_resolver=boom_resolver)
+def _fp(sym):
+    return compute_legs_fingerprint({"legs": _legs(sym)})
 
 
-# Fake trade_suggestions client that APPLIES the .eq(decision_id) + .or_() cohort
-# filter, so the route test proves the actual query semantics (fork-tagged rows
-# in, clones out) rather than trusting a filter-blind stub.
+def _envrow(sym, emitted, *, cycle=DECISION):
+    return {
+        "candidate_fingerprint": _fp(sym),
+        "emitted": emitted,
+        "reject_reason": None if emitted else "unattributed_post_ev",
+        "reject_gate": None if emitted else "post_ev_gate",
+        "symbol": sym,
+        "strategy": "CALL_DEBIT_SPREAD",
+        "cycle_id": cycle,
+        "envelope": {"legs": _legs(sym), "contracts": 1, "production_ev": 12.0},
+    }
+
+
+def _sugrow(sym, score, *, sid=None, cohort="aggressive", max_loss=50.0, decision=DECISION):
+    return {
+        "id": sid or f"sug-{sym}",
+        "decision_id": decision,
+        "cohort_name": cohort,
+        "legs_fingerprint": _fp(sym),
+        "sizing_metadata": {"score": score, "max_loss_total": max_loss},
+        "order_json": {"contracts": 1, "legs": _legs(sym)},
+        "ev": 10.0,
+        "ev_raw": 10.0,
+    }
+
+
+class _EnvQuery:
+    def __init__(self, rows):
+        self._rows = rows
+        self._cycle = None
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, col, val):
+        if col == "cycle_id":
+            self._cycle = val
+        return self
+
+    def execute(self):
+        return _Resp([r for r in self._rows if r.get("cycle_id") == self._cycle])
+
+
 class _FilterTradeSuggestions:
     def __init__(self, rows):
         self._rows = rows
@@ -687,54 +906,177 @@ class _FilterTradeSuggestions:
         return _Resp(out)
 
 
-class _FilterClient:
+class _TwoTableClient:
+    """Exercises the REAL default loaders (_load_scan_envelopes +
+    _load_emitted_enrichment): applies the cycle_id filter on td_scan_envelopes
+    and the decision_id + cohort filter on trade_suggestions."""
+
+    def __init__(self, envelopes, suggestions):
+        self._env = envelopes
+        self._sug = suggestions
+        self.touched = []
+
+    def table(self, name):
+        self.touched.append(name)
+        if name == SCAN_ENVELOPE_TABLE:
+            return _EnvQuery(self._env)
+        if name == ENRICHMENT_TABLE:
+            return _FilterTradeSuggestions(self._sug)
+        raise AssertionError(f"unexpected table {name}")
+
+
+def test_v2_universe_is_complete_envelope_set_enriched_by_emitted():
+    # Envelopes: SPY emitted, QQQ REJECTED-before-persistence (no suggestion).
+    envelopes = [_envrow("SPY", True), _envrow("QQQ", False)]
+    # trade_suggestions has ONLY the emitted SPY (champion) + a neutral CLONE.
+    suggestions = [
+        _sugrow("SPY", 88.0, cohort="aggressive"),
+        _sugrow("SPY", 99.0, cohort="neutral"),  # clone: excluded by cohort filter
+    ]
+    client = _TwoTableClient(envelopes, suggestions)
+    universe = build_candidate_universe(
+        client, DECISION, USER, champion_resolver=lambda c, u: "aggressive"
+    )
+    by_fp = {c["candidate_fingerprint"]: c for c in universe}
+    assert set(by_fp) == {_fp("SPY"), _fp("QQQ")}
+    # Emitted SPY enriched from the CHAMPION row (score 88), not the neutral clone.
+    spy = by_fp[_fp("SPY")]
+    assert spy["matched_emitted"] is True
+    assert spy["sizing_metadata"]["score"] == 88.0
+    assert spy["suggestion_id"] == "sug-SPY"
+    # REJECTED QQQ present with NO routing evidence (the champion subset does NOT
+    # define the universe) — never fabricated.
+    qqq = by_fp[_fp("QQQ")]
+    assert qqq["matched_emitted"] is False
+    assert qqq["sizing_metadata"] == {}
+    assert qqq["suggestion_id"] is None
+    assert qqq["emitted"] is False
+    # Both tables were read (envelope primary + enrichment); order envelope-first.
+    assert client.touched == [SCAN_ENVELOPE_TABLE, ENRICHMENT_TABLE]
+
+
+def test_v2_universe_dedupes_same_structure_preserves_distinct():
+    envelopes = [_envrow("SPY", True), _envrow("SPY", True), _envrow("IWM", False)]
+    suggestions = [_sugrow("SPY", 70.0)]
+    universe = build_candidate_universe(
+        _TwoTableClient(envelopes, suggestions), DECISION, USER,
+        champion_resolver=lambda c, u: "aggressive",
+    )
+    fps = [c["candidate_fingerprint"] for c in universe]
+    # Same structure collapsed to one; distinct structure preserved.
+    assert fps.count(_fp("SPY")) == 1
+    assert _fp("IWM") in fps
+    assert len(universe) == 2
+
+
+def test_v2_universe_scoped_to_source_decision_cross_user_isolation():
+    # An envelope + suggestion for a DIFFERENT decision (a different user's cycle)
+    # must NOT leak into this decision's universe. The reads are keyed on the
+    # source decision id (globally-unique cycle identity).
+    other = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    envelopes = [_envrow("SPY", True), _envrow("QQQ", True, cycle=other)]
+    suggestions = [_sugrow("SPY", 60.0), _sugrow("QQQ", 95.0, decision=other)]
+    universe = build_candidate_universe(
+        _TwoTableClient(envelopes, suggestions), DECISION, USER,
+        champion_resolver=lambda c, u: "aggressive",
+    )
+    fps = {c["candidate_fingerprint"] for c in universe}
+    assert fps == {_fp("SPY")}
+    assert _fp("QQQ") not in fps
+
+
+def test_v2_universe_sorted_scored_first_rejected_last():
+    envelopes = [_envrow("SPY", True), _envrow("QQQ", True), _envrow("IWM", False)]
+    suggestions = [_sugrow("SPY", 40.0), _sugrow("QQQ", 90.0)]
+    universe = build_candidate_universe(
+        _TwoTableClient(envelopes, suggestions), DECISION, USER,
+        champion_resolver=lambda c, u: "aggressive",
+    )
+    order = [c["candidate_fingerprint"] for c in universe]
+    # score desc among scored (QQQ 90 before SPY 40), unscored reject last.
+    assert order[0] == _fp("QQQ")
+    assert order[1] == _fp("SPY")
+    assert order[2] == _fp("IWM")
+
+
+def test_v2_envelope_read_error_raises_not_empty():
+    def boom_env(client, decision_id):
+        raise RuntimeError("network")
+
+    with pytest.raises(UniverseUnavailable):
+        build_candidate_universe(
+            object(), DECISION, USER,
+            champion_resolver=lambda c, u: "aggressive",
+            envelope_loader=boom_env,
+        )
+
+
+def test_v2_enrichment_read_error_raises_not_empty():
+    def boom_enrich(client, decision_id, champion):
+        raise RuntimeError("enrichment down")
+
+    with pytest.raises(UniverseUnavailable):
+        build_candidate_universe(
+            object(), DECISION, USER,
+            champion_resolver=lambda c, u: "aggressive",
+            envelope_loader=lambda c, d: [_envrow("SPY", True)],
+            enrichment_loader=boom_enrich,
+        )
+
+
+def test_v2_champion_resolve_failure_fails_closed():
+    def boom_resolver(client, user_id):
+        raise RuntimeError("champion resolve exploded")
+
+    with pytest.raises(UniverseUnavailable):
+        build_candidate_universe(
+            object(), DECISION, USER,
+            champion_resolver=boom_resolver,
+            envelope_loader=lambda c, d: [_envrow("SPY", True)],
+        )
+
+
+def test_v2_empty_envelope_set_is_honest_empty_not_error():
+    universe = build_candidate_universe(
+        _TwoTableClient([], []), DECISION, USER,
+        champion_resolver=lambda c, u: "aggressive",
+    )
+    assert universe == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEGACY trade_suggestions universe: activation-blocked compatibility fallback.
+# ─────────────────────────────────────────────────────────────────────────────
+class _LegacyFilterClient:
     def __init__(self, rows):
         self._rows = rows
 
     def table(self, name):
-        assert name == "trade_suggestions"
+        assert name == ENRICHMENT_TABLE
         return _FilterTradeSuggestions(self._rows)
 
 
-def test_universe_is_fork_tagged_emitted_set_not_empty():
-    # Reproduce the PRODUCTION sequence: fork ran first and tagged the emitted
-    # rows to the champion cohort (aggressive) IN PLACE, and INSERTed
-    # neutral/conservative clones. A `cohort_name IS NULL`-only read would be
-    # EMPTY here; the fix reads NULL-or-champion.
-    def oj(u):
-        return {"underlying": u, "strategy": "IC", "legs": [{"symbol": u + "1", "side": "buy", "quantity": 1}]}
-
+def test_legacy_universe_is_champion_emitted_only():
+    # The pre-v2 surface: champion-tagged emitted rows ONLY, clones excluded. It
+    # CANNOT see the rejected candidates — that is exactly why it is not the v2
+    # universe and is activation-blocked.
     rows = [
-        {"id": "emit-hi", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 90.0}, "order_json": oj("SPY"), "ev": 1, "ev_raw": 1},
-        {"id": "emit-lo", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 10.0}, "order_json": oj("QQQ"), "ev": 1, "ev_raw": 1},
-        {"id": "clone-neu", "decision_id": DECISION, "cohort_name": "neutral", "sizing_metadata": {"score": 99.0}, "order_json": oj("IWM"), "ev": 1, "ev_raw": 1},
-        {"id": "clone-con", "decision_id": DECISION, "cohort_name": "conservative", "sizing_metadata": {"score": 99.0}, "order_json": oj("DIA"), "ev": 1, "ev_raw": 1},
+        _sugrow("SPY", 90.0, sid="emit-hi", cohort="aggressive"),
+        _sugrow("QQQ", 10.0, sid="emit-lo", cohort="aggressive"),
+        _sugrow("IWM", 99.0, sid="clone-neu", cohort="neutral"),
     ]
-    universe = build_candidate_universe(
-        _FilterClient(rows), DECISION, USER, champion_resolver=lambda c, u: "aggressive"
+    universe = build_trade_suggestions_universe(
+        _LegacyFilterClient(rows), DECISION, USER, champion_resolver=lambda c, u: "aggressive"
     )
-    # Champion-tagged emitted set, score desc; the two clones are excluded.
-    assert [c["id"] for c in universe] == ["emit-hi", "emit-lo"]
-
-
-def test_universe_dedupes_null_and_champion_same_structure():
-    # If a candidate exists as BOTH a not-yet-tagged NULL row and its champion-
-    # tagged row (same structure), the fingerprint collapses them to one.
-    struct = {"underlying": "SPY", "strategy": "IC", "legs": [{"symbol": "L1", "side": "buy", "quantity": 1}]}
-    rows = [
-        {"id": "champ", "decision_id": DECISION, "cohort_name": "aggressive", "sizing_metadata": {"score": 50.0}, "order_json": struct, "ev": 1, "ev_raw": 1},
-        {"id": "null", "decision_id": DECISION, "cohort_name": None, "sizing_metadata": {"score": 50.0}, "order_json": struct, "ev": 1, "ev_raw": 1},
-    ]
-    universe = build_candidate_universe(
-        _FilterClient(rows), DECISION, USER, champion_resolver=lambda c, u: "aggressive"
-    )
-    assert len(universe) == 1
+    sids = [c["suggestion_id"] for c in universe]
+    assert sids == ["emit-hi", "emit-lo"]  # score desc, clone excluded
+    assert all(c["matched_emitted"] for c in universe)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Parent byte-identity: the filter precedence matches Policy-Lab fork exactly.
+# Parent byte-identity: the SCORED filter precedence matches Policy-Lab fork.
 # ─────────────────────────────────────────────────────────────────────────────
-def test_filter_precedence_byte_identical_to_fork():
+def test_scored_filter_precedence_byte_identical_to_fork():
     from packages.quantum.policy_lab.config import PolicyConfig
     from packages.quantum.policy_lab.fork import _evaluate_cohort_policy
 
@@ -748,12 +1090,9 @@ def test_filter_precedence_byte_identical_to_fork():
             "budget_cap_pct": 0.35,
         }
     )
-    # Ordered so each branch is exercised BEFORE capacity is exhausted (capacity
-    # binds first in fork, so any candidate after the 2nd accept is a capacity
-    # rejection regardless of its score).
+    # SCORED candidates only (fork never faces a scoreless candidate in prod).
     suggestions = [
         {"id": "s1", "sizing_metadata": {"score": 90.0}},   # accepted (slot 1)
-        {"id": "s2", "sizing_metadata": {}},                # missing score
         {"id": "s3", "sizing_metadata": {"score": 40.0}},   # score_below_min
         {"id": "s4", "sizing_metadata": {"score": 70.0}},   # accepted (slot 2)
         {"id": "s5", "sizing_metadata": {"score": 80.0}},   # capacity exhausted
@@ -761,20 +1100,48 @@ def test_filter_precedence_byte_identical_to_fork():
     fork_decisions = _evaluate_cohort_policy(suggestions, config, open_positions=0)
 
     # Large capital so sizing NEVER capital-rejects -> 'selected' == fork accepted.
-    universe = [dict(s, order_json={"contracts": 1}, sizing_metadata=dict(s["sizing_metadata"], max_loss_total=100.0)) for s in suggestions]
+    universe = [
+        {
+            "candidate_fingerprint": s["id"],
+            "suggestion_id": s["id"],
+            "order_json": {"contracts": 1},
+            "sizing_metadata": dict(s["sizing_metadata"], max_loss_total=100.0),
+        }
+        for s in suggestions
+    ]
     mine = evaluate_policy(universe, config.to_dict(), open_positions=0, deployable_capital=1_000_000.0)
 
     fork_accepted = [d.suggestion_id for d in fork_decisions if d.accepted]
-    mine_selected = [d.candidate_id for d in mine if d.disposition == "selected"]
+    mine_selected = [d.suggestion_id for d in mine if d.disposition == "selected"]
     assert mine_selected == fork_accepted == ["s1", "s4"]
 
-    # Rejection reasons line up candidate-for-candidate (score/capacity/missing).
+    # Reason codes for the SCORED rejections line up candidate-for-candidate.
     fork_reasons = {d.suggestion_id: d.reason_codes for d in fork_decisions if not d.accepted}
-    mine_reasons = {d.candidate_id: d.reason_codes for d in mine if d.disposition != "selected"}
+    mine_reasons = {d.suggestion_id: d.reason_codes for d in mine if d.disposition == "policy_rejected"}
     assert mine_reasons == fork_reasons
-    assert mine_reasons["s2"] == ["routing_decision_unavailable"]
     assert mine_reasons["s3"] == ["score_below_min"]
     assert mine_reasons["s5"] == ["daily_limit_reached"]
+
+
+def test_unscored_candidate_is_data_unavailable_not_a_capacity_rejection():
+    # v2 divergence (honest): a scoreless candidate is unmeasurable, NOT a merit
+    # rejection. It never consumes a capacity slot, so the SELECTED set is
+    # unchanged vs fork; only its label differs (data_unavailable, not a fork
+    # rejection). Ordered scoreless-last as the builder sorts it.
+    from packages.quantum.policy_lab.config import PolicyConfig
+
+    config = PolicyConfig.from_dict({"max_positions_open": 2, "max_suggestions_per_day": 3, "min_score_threshold": 50.0})
+    universe = [
+        {"candidate_fingerprint": "s1", "suggestion_id": "s1", "order_json": {"contracts": 1}, "sizing_metadata": {"score": 90.0, "max_loss_total": 100.0}},
+        {"candidate_fingerprint": "s4", "suggestion_id": "s4", "order_json": {"contracts": 1}, "sizing_metadata": {"score": 70.0, "max_loss_total": 100.0}},
+        {"candidate_fingerprint": "rej", "suggestion_id": None, "order_json": {"contracts": 1}, "sizing_metadata": {}},
+    ]
+    decisions = evaluate_policy(universe, config.to_dict(), open_positions=0, deployable_capital=1_000_000.0)
+    by = {d.candidate_fingerprint: d for d in decisions}
+    assert by["s1"].disposition == "selected"
+    assert by["s4"].disposition == "selected"
+    assert by["rej"].disposition == "data_unavailable"
+    assert by["rej"].reason_codes == ["routing_score_unavailable"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -790,6 +1157,6 @@ def test_evaluator_imports_no_broker_or_live_provider():
         "MarketDataTruthLayer",
         "PolygonService",
         "snapshot_many",
-        "option_chain",
+        ".option_chain",
     ):
         assert forbidden not in src, f"evaluator must not reference {forbidden}"

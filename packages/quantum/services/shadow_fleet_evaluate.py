@@ -38,14 +38,24 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 from packages.quantum.brokers.execution_router import SHADOW_ONLY_ROUTING
 from packages.quantum.policy_lab.config import PolicyConfig
 from packages.quantum.policy_lab.shadow_fleet import FLEET_EPOCH
+from packages.quantum.services.options_utils import compute_legs_fingerprint
+from packages.quantum.services.td_scan_capture import (
+    ENVELOPE_TABLE as SCAN_ENVELOPE_TABLE,
+    scan_candidate_capture_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "shadow_fleet_evaluate"
-EVALUATOR_VERSION = "fleet_policy_eval@1"
+EVALUATOR_VERSION = "fleet_policy_eval@2"  # v2: complete scan-envelope universe
 NATURAL_PARENT_ORIGIN = "scheduler"
 ACTIVE_FLEET_STATUS = "active"
 ACTIVE_MICRO_STATE = "active"
+
+# The v2 universe reads the champion-emitted enrichment from trade_suggestions
+# (routing score + canonical max-loss basis) but is DEFINED by the complete
+# immutable scan-envelope set. trade_suggestions is NEVER the primary universe.
+ENRICHMENT_TABLE = "trade_suggestions"
 
 # Score basis label mirrored from fork.py:580 (`sizing_metadata.score`), the
 # canonical 0-100 routing quantity. Dollar `ev` is NEVER a routing input.
@@ -76,10 +86,21 @@ def load_fleet_readiness(
     user_id: str,
     *,
     fleet_epoch: str = FLEET_EPOCH,
+    capture_gate: Callable[[], bool] = scan_candidate_capture_enabled,
 ) -> Dict[str, Any]:
     """DB-authoritative fleet readiness. The fleet status read happens FIRST so a
     dark (inactive) deployment is a true no-op — a non-active status returns
     before any micro-account / policy / suggestion read.
+
+    v2: an ACTIVE, bound, approved fleet is additionally gated on the shared
+    candidate-CAPTURE surface (``capture_gate``). The fleet consumes the complete
+    scan-envelope universe (``td_scan_envelopes``); if capture is disabled the
+    current event has no envelopes, so readiness returns ``capture_surface_disabled``
+    (ready=False, errors=0) rather than silently evaluating an empty universe or
+    falling back to champion rows. This gate is decoupled from the terminal-
+    distribution SCORING flag: capture is ON if the stable capture opt-in OR the
+    legacy td-observe flag is truthy. The check runs LAST (only for a fleet that
+    would otherwise evaluate), so the dark-state no-op is untouched.
     """
 
     try:
@@ -212,6 +233,24 @@ def load_fleet_readiness(
             "accounts": [],
         }
 
+    # v2 capture-surface gate (LAST — only for a fleet that would evaluate). The
+    # fleet's universe is the complete scan-envelope set; without capture ON the
+    # current event carries no envelopes. Fail SAFE to not-ready (config gate,
+    # errors=0) — never a silent empty universe, never a champion-row fallback.
+    try:
+        capture_on = bool(capture_gate())
+    except Exception:
+        # A gate-read fault is treated as capture OFF (fail-closed to not-ready).
+        capture_on = False
+    if not capture_on:
+        return {
+            "status": "capture_surface_disabled",
+            "ready": False,
+            "errors": 0,
+            "fleet_id": fleet_id,
+            "accounts": [],
+        }
+
     return {
         "status": "ready",
         "ready": True,
@@ -320,19 +359,208 @@ def maybe_enqueue_fleet_policy_eval(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# The ONE shared candidate universe (§4). Built once, read-only across all 50
-# policies. Champion-independent, never re-scanned, never a live fetch.
+# The ONE shared candidate universe (§4), v2. Built once, read-only across all 50
+# policies. Champion-INDEPENDENT membership: the COMPLETE immutable scan-envelope
+# set (every fully-constructed candidate — emitted AND rejected-before-
+# persistence). Never re-scanned, never a live fetch.
 # ─────────────────────────────────────────────────────────────────────────────
 class UniverseUnavailable(RuntimeError):
     """A failed universe read — never an empty universe (E8-3 []-sentinel)."""
 
 
-def _candidate_fingerprint(row: Mapping[str, Any]) -> str:
-    """Structural identity of one candidate, stable across the champion in-place
-    tag (cohort_name NULL -> champion). Distinct structures -> distinct
-    fingerprints (never collapses distinct candidates); a hypothetical
-    NULL+champion pair for the SAME structure collapses to one. Falls back to the
-    row id when no structure is present, so a candidate is never dropped."""
+def _default_champion_resolver(client: Any, user_id: str) -> str:
+    from packages.quantum.policy_lab.champion import get_current_champion
+
+    return get_current_champion(user_id, client)
+
+
+def _envelope_fingerprint(env: Mapping[str, Any]) -> Optional[str]:
+    """Immutable candidate identity. Prefer the envelope's stored
+    ``candidate_fingerprint`` (compute_legs_fingerprint, structure-only, == the
+    trade_suggestions.legs_fingerprint by construction); defensively re-derive
+    from the envelope legs if a stub omitted it. Never invents an id-based
+    fingerprint (that would break the enrichment join)."""
+    fp = env.get("candidate_fingerprint")
+    if fp:
+        return str(fp)
+    blob = env.get("envelope") if isinstance(env.get("envelope"), Mapping) else {}
+    legs = blob.get("legs")
+    if isinstance(legs, list) and legs:
+        try:
+            return compute_legs_fingerprint({"legs": legs})
+        except Exception:
+            return None
+    return None
+
+
+def _load_scan_envelopes(client: Any, source_decision_id: str) -> List[Dict[str, Any]]:
+    """The complete immutable candidate set for one cycle from ``td_scan_envelopes``
+    (cycle_id == source_decision_id). Any read error — including the table being
+    absent (migration unapplied) — raises ``UniverseUnavailable`` (fail-closed
+    data_unavailable for every policy), NEVER a silent empty universe or a
+    champion-row fallback."""
+    try:
+        result = (
+            client.table(SCAN_ENVELOPE_TABLE)
+            .select(
+                "candidate_fingerprint,emitted,reject_reason,reject_gate,"
+                "symbol,strategy,envelope"
+            )
+            .eq("cycle_id", source_decision_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise UniverseUnavailable(
+            f"scan-envelope read failed (surface absent or unreadable): "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+    return _rows(result)
+
+
+def _load_emitted_enrichment(
+    client: Any, source_decision_id: str, champion: str
+) -> Dict[str, Dict[str, Any]]:
+    """Routing evidence for the EMITTED subset, keyed by legs_fingerprint. The
+    fork tags the emitted rows to the champion cohort IN PLACE (fork.py:150-156),
+    so the champion/NULL cohort read is exactly the champion-emitted set. This is
+    ENRICHMENT, not the universe: it supplies the real ``sizing_metadata.score``
+    (0-100 routing quantity) and ``max_loss_total`` (canonical per-contract
+    max-loss basis) that live ONLY on persisted suggestions and are genuinely
+    absent for pre-persistence rejects. Never fabricates either field."""
+    query = (
+        client.table(ENRICHMENT_TABLE)
+        .select("id,decision_id,cohort_name,legs_fingerprint,sizing_metadata,order_json,ev,ev_raw")
+        .eq("decision_id", source_decision_id)
+    )
+    if champion:
+        query = query.or_(f"cohort_name.is.null,cohort_name.eq.{champion}")
+    else:
+        query = query.is_("cohort_name", "null")
+    rows = _rows(query.execute())
+    index: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        fp = row.get("legs_fingerprint")
+        if not fp:
+            continue
+        # The champion tag is an in-place UPDATE, so one row per structure; first
+        # writer wins on the rare transient NULL+champion pair (same evidence).
+        index.setdefault(str(fp), row)
+    return index
+
+
+def build_candidate_universe(
+    client: Any,
+    source_decision_id: str,
+    user_id: str,
+    *,
+    champion_resolver: Callable[[Any, str], str] = _default_champion_resolver,
+    envelope_loader: Optional[Callable[[Any, str], List[Dict[str, Any]]]] = None,
+    enrichment_loader: Optional[Callable[[Any, str, str], Dict[str, Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
+    """The COMPLETE, immutable candidate universe for one decision event (v2).
+
+    Membership is DEFINED by ``td_scan_envelopes`` (cycle_id == source_decision_id)
+    — every fully-constructed candidate the scanner built this cycle, EMITTED and
+    REJECTED-before-persistence. The EMITTED subset is then enriched with its real
+    routing score + canonical max-loss basis from ``trade_suggestions``, joined by
+    ``candidate_fingerprint == legs_fingerprint`` (both compute_legs_fingerprint)
+    within the champion/NULL cohort. A rejected candidate carries NO routing
+    evidence (empty ``sizing_metadata``) — the policy returns ``data_unavailable``
+    (never a fabricated score/max-loss, never a champion-row shortcut). The
+    ``emitted`` flag is retained as PROVENANCE, never an eligibility shortcut.
+
+    ``trade_suggestions`` is enrichment ONLY; it is NEVER the primary universe.
+    A failed envelope read, enrichment read, or champion resolve raises
+    ``UniverseUnavailable`` (fail-closed data_unavailable for every policy). A
+    successful zero-envelope result is an honest-empty universe (no_candidate).
+    """
+    env_loader = envelope_loader or _load_scan_envelopes
+    enrich_loader = enrichment_loader or _load_emitted_enrichment
+
+    # 1. Complete immutable candidate set (PRIMARY universe).
+    try:
+        envelopes = env_loader(client, source_decision_id)
+    except UniverseUnavailable:
+        raise
+    except Exception as exc:
+        raise UniverseUnavailable(
+            f"scan-envelope read failed: {type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+
+    # 2. Champion-emitted enrichment (routing score + max-loss basis).
+    try:
+        champion = str(champion_resolver(client, user_id) or "").strip()
+    except Exception as exc:
+        raise UniverseUnavailable(
+            f"champion resolve failed: {type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+    try:
+        enrichment = enrich_loader(client, source_decision_id, champion)
+    except Exception as exc:
+        raise UniverseUnavailable(
+            f"enrichment read failed: {type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+
+    # 3. Join by immutable candidate fingerprint + dedupe (distinct structures
+    #    preserved; identical structures collapse to one).
+    universe: List[Dict[str, Any]] = []
+    seen: set = set()
+    for env in envelopes:
+        fp = _envelope_fingerprint(env)
+        if not fp or fp in seen:
+            continue
+        seen.add(fp)
+        match = enrichment.get(fp)
+        blob = env.get("envelope") if isinstance(env.get("envelope"), Mapping) else {}
+        if match:
+            sizing_metadata = dict(match.get("sizing_metadata") or {})
+            order_json = dict(match.get("order_json") or {})
+            ev = match.get("ev")
+            ev_raw = match.get("ev_raw")
+            suggestion_id = str(match.get("id")) if match.get("id") else None
+        else:
+            # Rejected / unmatched: NO routing evidence (never fabricated).
+            sizing_metadata = {}
+            order_json = {
+                "legs": blob.get("legs") or [],
+                "contracts": blob.get("contracts") or 1,
+            }
+            ev = blob.get("production_ev")
+            ev_raw = None
+            suggestion_id = None
+        universe.append(
+            {
+                "candidate_fingerprint": fp,
+                "suggestion_id": suggestion_id,
+                "emitted": bool(env.get("emitted")),
+                "matched_emitted": bool(match),
+                "sizing_metadata": sizing_metadata,
+                "order_json": order_json,
+                "ev": ev,
+                "ev_raw": ev_raw,
+                "symbol": env.get("symbol"),
+                "strategy": env.get("strategy"),
+                "reject_reason": env.get("reject_reason"),
+                "reject_gate": env.get("reject_gate"),
+            }
+        )
+    # Deterministic order: scored candidates by score desc (routing quantity),
+    # unscored (rejected) last, then fingerprint — stable rank_at_decision across
+    # the 50 policies and across retries.
+    universe.sort(
+        key=lambda s: (
+            -(_finite((s["sizing_metadata"] or {}).get("score")) or float("-inf")),
+            s["candidate_fingerprint"],
+        )
+    )
+    return universe
+
+
+def _legacy_candidate_fingerprint(row: Mapping[str, Any]) -> str:
+    """(LEGACY) Structural identity used by the pre-v2 trade_suggestions-only
+    universe. Kept only for ``build_trade_suggestions_universe`` — the v2 universe
+    dedupes on the envelope's ``candidate_fingerprint`` (compute_legs_fingerprint)
+    so it joins the enrichment surface."""
     order_json = row.get("order_json") or {}
     legs = order_json.get("legs")
     if isinstance(legs, list) and legs:
@@ -350,40 +578,23 @@ def _candidate_fingerprint(row: Mapping[str, Any]) -> str:
     return "id:" + str(row.get("id"))
 
 
-def _default_champion_resolver(client: Any, user_id: str) -> str:
-    from packages.quantum.policy_lab.champion import get_current_champion
-
-    return get_current_champion(user_id, client)
-
-
-def build_candidate_universe(
+def build_trade_suggestions_universe(
     client: Any,
     source_decision_id: str,
     user_id: str,
     *,
     champion_resolver: Callable[[Any, str], str] = _default_champion_resolver,
 ) -> List[Dict[str, Any]]:
-    """The complete set of fully-constructed, scored candidate structures the
-    scanner emitted for one decision event, read once from durable storage,
-    INDEPENDENT of the champion fork's in-place tagging.
+    """LEGACY (pre-v2) champion-emitted universe from ``trade_suggestions`` ONLY.
 
-    ``fork_suggestions_for_cohorts`` runs synchronously in the scan cycle BEFORE
-    this evaluator is even enqueued (suggestions_open.py) and UPDATEs the
-    emitted rows' ``cohort_name`` from NULL to the champion cohort in place
-    (fork.py:150-156) — so a ``cohort_name IS NULL``-only read is EMPTIED on real
-    events (VERIFIED-DB: recent decisions carry 0 NULL, all champion-tagged). We
-    therefore read ``cohort_name IS NULL OR cohort_name = <champion>``, resolving
-    the champion EXACTLY as fork does (``get_current_champion``), which is
-    precisely the scanner-emitted set whether or not tagging has run yet. The
-    neutral/conservative CLONES are separate INSERTed rows carrying non-champion
-    cohort names — still excluded. Rows are deduped to one per candidate
-    fingerprint (the champion tag is an in-place UPDATE, not a clone).
-
-    A champion-resolve or read error raises ``UniverseUnavailable`` (fail-closed
-    data_unavailable for every policy). A successful zero-row result is an honest
-    empty universe.
-    """
-
+    ⚠ ACTIVATION-BLOCKED COMPATIBILITY FALLBACK. This reads ONLY the persisted
+    (emitted) champion/NULL cohort rows — it CANNOT see candidates rejected before
+    trade_suggestions, so it is NOT the complete universe and is NEVER wired into
+    ``run_fleet_policy_eval`` (the active fleet path uses
+    ``build_candidate_universe``). Retained for the dry-run's optional
+    v1-vs-v2 comparison and to preserve the pre-v2 semantics. Producing fleet
+    activation evidence from this surface is forbidden by the small-tier evidence
+    contract (an experiment may claim only what it observes)."""
     try:
         champion = str(champion_resolver(client, user_id) or "").strip()
     except Exception as exc:
@@ -393,13 +604,11 @@ def build_candidate_universe(
 
     try:
         query = (
-            client.table("trade_suggestions")
+            client.table(ENRICHMENT_TABLE)
             .select("id,decision_id,cohort_name,sizing_metadata,order_json,ev,ev_raw")
             .eq("decision_id", source_decision_id)
         )
         if champion:
-            # Emitted set = untagged (pre-fork) OR champion-tagged (post-fork,
-            # in place). Clones (neutral/conservative) are excluded.
             query = query.or_(f"cohort_name.is.null,cohort_name.eq.{champion}")
         else:
             query = query.is_("cohort_name", "null")
@@ -416,26 +625,26 @@ def build_candidate_universe(
         sid = row.get("id")
         if not sid:
             continue
-        fingerprint = _candidate_fingerprint(row)
+        fingerprint = _legacy_candidate_fingerprint(row)
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
         universe.append(
             {
-                "id": str(sid),
+                "candidate_fingerprint": fingerprint,
+                "suggestion_id": str(sid),
+                "emitted": True,
+                "matched_emitted": True,
                 "sizing_metadata": dict(row.get("sizing_metadata") or {}),
                 "order_json": dict(row.get("order_json") or {}),
                 "ev": row.get("ev"),
                 "ev_raw": row.get("ev_raw"),
             }
         )
-    # Deterministic order: the persisted rank is not guaranteed by the query;
-    # order by score desc (routing quantity), then id, so rank_at_decision is
-    # stable and reproducible across the 50 policies and across retries.
     universe.sort(
         key=lambda s: (
-            -( _finite((s["sizing_metadata"] or {}).get("score")) or float("-inf") ),
-            s["id"],
+            -(_finite((s["sizing_metadata"] or {}).get("score")) or float("-inf")),
+            s["candidate_fingerprint"],
         )
     )
     return universe
@@ -447,10 +656,16 @@ def build_candidate_universe(
 # trade_suggestions and WITHOUT champion contamination.
 # ─────────────────────────────────────────────────────────────────────────────
 class PolicyDecision:
-    """One candidate's typed disposition under one policy (candidate-grain)."""
+    """One candidate's typed disposition under one policy (candidate-grain).
+
+    v2 identity: ``candidate_fingerprint`` is the immutable candidate identity
+    (present for EVERY candidate — emitted and rejected). ``suggestion_id`` is the
+    source suggestion UUID, present ONLY for an emitted candidate matched to a
+    persisted row (NULL for a pre-persistence reject)."""
 
     __slots__ = (
-        "candidate_id",
+        "candidate_fingerprint",
+        "suggestion_id",
         "disposition",
         "reason_codes",
         "rank_at_decision",
@@ -460,19 +675,27 @@ class PolicyDecision:
 
     def __init__(
         self,
-        candidate_id: str,
+        candidate_fingerprint: str,
+        suggestion_id: Optional[str],
         disposition: str,
         reason_codes: List[str],
         rank_at_decision: int,
         score_value: Optional[float],
         sizing: Dict[str, Any],
     ) -> None:
-        self.candidate_id = candidate_id
+        self.candidate_fingerprint = candidate_fingerprint
+        self.suggestion_id = suggestion_id
         self.disposition = disposition
         self.reason_codes = reason_codes
         self.rank_at_decision = rank_at_decision
         self.score_value = score_value
         self.sizing = sizing
+
+    @property
+    def candidate_id(self) -> str:
+        """Back-compat label: the suggestion UUID when emitted, else the immutable
+        fingerprint. Never the fabricated identity of an unscored candidate."""
+        return self.suggestion_id or self.candidate_fingerprint
 
 
 def _size_candidate(
@@ -564,11 +787,28 @@ def evaluate_policy(
     decisions: List[PolicyDecision] = []
     accepted = 0
     for rank, candidate in enumerate(universe, start=1):
-        cid = str(candidate.get("id"))
+        fp = str(candidate.get("candidate_fingerprint") or "")
+        suggestion_id = candidate.get("suggestion_id")
         sizing_meta = candidate.get("sizing_metadata") or {}
-        score_value = sizing_meta.get("score")
+        score_f = _finite(sizing_meta.get("score"))
 
-        # 1) Capacity binds FIRST (fork's inline filter `break`s here).
+        # 1) NO routing score -> the candidate was never scored (rejected before
+        #    persistence, or corrupt). We CANNOT rank/filter it: typed
+        #    ``data_unavailable`` (never fabricated, never folded into a merit
+        #    rejection). An unscored candidate consumes NO capacity slot — the
+        #    universe sorts it last, so scored candidates bind capacity first.
+        if score_f is None:
+            decisions.append(
+                PolicyDecision(
+                    fp, suggestion_id, "data_unavailable",
+                    ["routing_score_unavailable"], rank, None, {}
+                )
+            )
+            continue
+
+        # 2) Capacity binds FIRST among SCORED candidates (fork parity: the
+        #    accepted set is byte-identical because an unscored candidate never
+        #    consumes a slot in either path).
         if accepted >= max_new:
             reason = (
                 "max_positions_reached"
@@ -576,52 +816,43 @@ def evaluate_policy(
                 else "daily_limit_reached"
             )
             decisions.append(
-                PolicyDecision(cid, "policy_rejected", [reason], rank, _finite(score_value), {})
-            )
-            continue
-
-        # 2) Missing predicate evidence -> typed unavailable, never fabricated.
-        if score_value is None:
-            decisions.append(
-                PolicyDecision(
-                    cid, "policy_rejected", ["routing_decision_unavailable"], rank, None, {}
-                )
-            )
-            continue
-
-        score_f = _finite(score_value)
-        if score_f is None:
-            decisions.append(
-                PolicyDecision(
-                    cid, "policy_rejected", ["routing_decision_unavailable"], rank, None, {}
-                )
+                PolicyDecision(fp, suggestion_id, "policy_rejected", [reason], rank, score_f, {})
             )
             continue
 
         # 3) Score below the policy bar (0-100 vs 0-100).
         if score_f < config.min_score_threshold:
             decisions.append(
-                PolicyDecision(cid, "policy_rejected", ["score_below_min"], rank, score_f, {})
+                PolicyDecision(fp, suggestion_id, "policy_rejected", ["score_below_min"], rank, score_f, {})
             )
             continue
 
         # 4) Survived the policy filter -> size against the micro-account's $2k.
         sizing = _size_candidate(candidate, config, deployable_capital)
+        # 4a) NO canonical max-loss basis -> cannot size without fabricating risk
+        #     (doctrine §10 canonical-payoff). This is a MEASUREMENT gap, not a
+        #     merit capital-rejection: typed ``data_unavailable``.
+        if str(sizing.get("reason") or "") == "max_loss_basis_unavailable":
+            decisions.append(
+                PolicyDecision(
+                    fp, suggestion_id, "data_unavailable",
+                    ["max_loss_basis_unavailable"], rank, score_f, sizing
+                )
+            )
+            continue
+        # 4b) Real basis, but the $2k tier affords < 1 contract -> capital_rejected.
         if not sizing.get("affordable"):
             decisions.append(
                 PolicyDecision(
-                    cid,
-                    "capital_rejected",
+                    fp, suggestion_id, "capital_rejected",
                     [str(sizing.get("reason") or "insufficient_risk_budget")],
-                    rank,
-                    score_f,
-                    sizing,
+                    rank, score_f, sizing,
                 )
             )
             continue
 
         accepted += 1
-        decisions.append(PolicyDecision(cid, "selected", [], rank, score_f, sizing))
+        decisions.append(PolicyDecision(fp, suggestion_id, "selected", [], rank, score_f, sizing))
 
     return decisions
 
@@ -766,15 +997,22 @@ class FleetPolicyEvidenceWriter:
     ) -> bool:
         if not self.run_id:
             return False
-        candidate_id = str(decision.candidate_id)
+        # v2: the immutable candidate identity is the fingerprint (present for
+        # EVERY candidate). The source suggestion UUID is present ONLY for an
+        # emitted candidate matched to a persisted row — NULL for a pre-persistence
+        # reject (never fabricated). decision_event_id == candidate_suggestion_id
+        # (both the suggestion UUID or both NULL) to satisfy the table CHECK.
+        fingerprint = str(decision.candidate_fingerprint or "")
+        suggestion_id = decision.suggestion_id
         payload = {
             "run_id": self.run_id,
             "fleet_id": self.fleet_id,
             "fleet_epoch": self.fleet_epoch,
             "shadow_micro_account_id": self.shadow_micro_account_id,
             "policy_registration_id": self.policy_registration_id,
-            "decision_event_id": candidate_id,
-            "candidate_suggestion_id": candidate_id,
+            "candidate_fingerprint": fingerprint,
+            "decision_event_id": suggestion_id,
+            "candidate_suggestion_id": suggestion_id,
             "disposition": decision.disposition,
             "rank_at_decision": decision.rank_at_decision,
             "reason_codes": list(decision.reason_codes or []),
@@ -842,9 +1080,12 @@ def run_fleet_policy_eval(
     counts: Dict[str, int] = {
         "policies": 0,
         "candidates_universe": 0,
+        "candidates_emitted": 0,
+        "candidates_rejected": 0,
         "selected": 0,
         "policy_rejected": 0,
         "capital_rejected": 0,
+        "data_unavailable": 0,
         "runs_written": 0,
         "decisions_written": 0,
         "no_candidate_runs": 0,
@@ -901,6 +1142,23 @@ def run_fleet_policy_eval(
         errors.append({"stage": "build_universe", "error": str(exc)[:200]})
         counts["errors"] += 1
     counts["candidates_universe"] = len(universe)
+    counts["candidates_emitted"] = sum(1 for c in universe if c.get("matched_emitted"))
+    counts["candidates_rejected"] = len(universe) - counts["candidates_emitted"]
+
+    # Per-candidate PROVENANCE (emitted/rejected status is evidence, NOT an
+    # eligibility shortcut) — stamped into each decision's features_snapshot.
+    provenance: Dict[str, Dict[str, Any]] = {
+        str(c.get("candidate_fingerprint")): {
+            "emitted": bool(c.get("emitted")),
+            "matched_emitted": bool(c.get("matched_emitted")),
+            "symbol": c.get("symbol"),
+            "strategy": c.get("strategy"),
+            "reject_reason": c.get("reject_reason"),
+            "reject_gate": c.get("reject_gate"),
+            "score_basis": SCORE_BASIS,
+        }
+        for c in universe
+    }
 
     for account in accounts:
         policy_id = str(account.get("policy_registration_id"))
@@ -991,10 +1249,14 @@ def run_fleet_policy_eval(
             "selected": 0,
             "policy_rejected": 0,
             "capital_rejected": 0,
+            "data_unavailable": 0,
             "candidates_seen": len(universe),
         }
         for decision in decisions:
-            ok = writer.record_decision(decision)
+            ok = writer.record_decision(
+                decision,
+                features_snapshot=provenance.get(str(decision.candidate_fingerprint)),
+            )
             policy_counts[decision.disposition] = policy_counts.get(decision.disposition, 0) + 1
             if not ok:
                 errors.append(
@@ -1018,6 +1280,7 @@ def run_fleet_policy_eval(
         counts["selected"] += policy_counts["selected"]
         counts["policy_rejected"] += policy_counts["policy_rejected"]
         counts["capital_rejected"] += policy_counts["capital_rejected"]
+        counts["data_unavailable"] += policy_counts["data_unavailable"]
         counts["decisions_written"] += int(wc.get("decisions_written") or 0)
         counts["table_missing_noops"] += table_missing
         counts["errors"] += writer_errors + table_missing

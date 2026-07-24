@@ -35,11 +35,17 @@ _DSN = dict(
 
 _HERE = Path(__file__).resolve().parent
 _BOOTSTRAP_SQL = _HERE / "schema_bootstrap.sql"
-_MIGRATION_SQL = (
+_MIG_DIR = (
     _HERE.parents[4]  # fleet -> pg -> tests -> quantum -> packages -> repo root
     / "supabase" / "migrations"
-    / "20260723160000_fleet_policy_decision_foundation.sql"
 )
+# Production migration chain that shapes fleet_policy_decisions, in timestamp
+# order: the C1 foundation THEN the v2 candidate-fingerprint identity evolution
+# (nullable suggestion UUID + data_unavailable disposition + fingerprint dedup).
+_MIGRATIONS = [
+    _MIG_DIR / "20260723160000_fleet_policy_decision_foundation.sql",
+    _MIG_DIR / "20260724010000_fleet_decisions_candidate_fingerprint_identity.sql",
+]
 
 
 def _pg_reachable() -> bool:
@@ -56,7 +62,10 @@ def _pg_reachable() -> bool:
 
 
 if not _pg_reachable():
-    collect_ignore = ["test_fleet_policy_decision_pg.py"]
+    collect_ignore = [
+        "test_fleet_policy_decision_pg.py",
+        "test_fleet_decisions_v2_identity_pg.py",
+    ]
 
 
 def _connect():
@@ -73,7 +82,8 @@ def fleet_pg_schema():
     conn = _connect()
     cur = conn.cursor()
     cur.execute(_BOOTSTRAP_SQL.read_text(encoding="utf-8"))
-    cur.execute(_MIGRATION_SQL.read_text(encoding="utf-8"))
+    for mig in _MIGRATIONS:
+        cur.execute(mig.read_text(encoding="utf-8"))
     cur.close()
     conn.close()
     yield

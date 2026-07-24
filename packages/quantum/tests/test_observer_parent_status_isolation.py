@@ -220,7 +220,7 @@ class TestTdEnqueueFailureIsolated(_ObserverIsolationBase):
 
         # Research failure is durable + counted in its OWN channel.
         self.assertEqual(result["counts"]["research_observer_failures"], 1)
-        td = result["research_observers"][ros.OBSERVER_TERMINAL_DISTRIBUTION]
+        td = result["research_observers"][ros.OBSERVER_TD_SCAN]
         self.assertEqual(td["errors"], 1)
         self.assertEqual(td["status"], "enqueue_failed")
         # Fleet was a clean no-op (fleet_absent).
@@ -241,7 +241,7 @@ class TestTdEnqueueFailureIsolated(_ObserverIsolationBase):
         calls = self._research_alerts(alert_mock)
         self.assertEqual(len(calls), 1)
         meta = calls[0].kwargs["metadata"]
-        self.assertEqual(meta["observer_name"], ros.OBSERVER_TERMINAL_DISTRIBUTION)
+        self.assertEqual(meta["observer_name"], ros.OBSERVER_TD_SCAN)
         self.assertEqual(meta["source_job_run_id"], "parent-job-1")
         self.assertEqual(meta["code_sha"], "shaTEST")
         self.assertEqual(meta["detector_version"],
@@ -313,7 +313,7 @@ class TestFleetReadinessFailureIsolated(_ObserverIsolationBase):
         self.assertEqual(fleet["errors"], 1)
         self.assertEqual(fleet["status"], "fleet_read_failed")
         # td stayed a no-op (flag off).
-        td = result["research_observers"][ros.OBSERVER_TERMINAL_DISTRIBUTION]
+        td = result["research_observers"][ros.OBSERVER_TD_SCAN]
         self.assertEqual(td["errors"], 0)
 
         self.assertEqual(len(self._research_alerts(alert_mock)), 1)
@@ -338,7 +338,7 @@ class TestBothObserversFailIsolated(_ObserverIsolationBase):
         # Two typed research failures, both durable.
         self.assertEqual(result["counts"]["research_observer_failures"], 2)
         self.assertEqual(
-            result["research_observers"][ros.OBSERVER_TERMINAL_DISTRIBUTION]["errors"], 1)
+            result["research_observers"][ros.OBSERVER_TD_SCAN]["errors"], 1)
         self.assertEqual(
             result["research_observers"][ros.OBSERVER_SHADOW_FLEET]["errors"], 1)
 
@@ -347,7 +347,7 @@ class TestBothObserversFailIsolated(_ObserverIsolationBase):
         observers = {c.kwargs["metadata"]["observer_name"] for c in ra}
         self.assertEqual(
             observers,
-            {ros.OBSERVER_TERMINAL_DISTRIBUTION, ros.OBSERVER_SHADOW_FLEET},
+            {ros.OBSERVER_TD_SCAN, ros.OBSERVER_SHADOW_FLEET},
         )
         self.assertEqual(self._cycle_death_alerts(alert_mock), [])
 
@@ -385,7 +385,7 @@ class TestDisabledObserversNoAlert(_ObserverIsolationBase):
         # No alert of ANY kind.
         self.assertEqual(alert_mock.call_args_list, [])
         # The block is present and honest (both no-op, zero errors).
-        for name in (ros.OBSERVER_TERMINAL_DISTRIBUTION, ros.OBSERVER_SHADOW_FLEET):
+        for name in (ros.OBSERVER_TD_SCAN, ros.OBSERVER_SHADOW_FLEET):
             self.assertEqual(result["research_observers"][name]["errors"], 0)
 
 
@@ -500,7 +500,7 @@ class TestAlertRefireDedup(unittest.TestCase):
         return {"status": "enqueue_failed", "enqueued": False, "errors": 1,
                 "error": "RuntimeError: rq down"}
 
-    def _prior_row(self, *, signature, observer="terminal_distribution",
+    def _prior_row(self, *, signature, observer="td_scan",
                    sha="shaTEST", job="parent-job-1"):
         return {"id": "prior-1", "created_at": "2026-07-23T16:00:00+00:00",
                 "metadata": {"source_job_run_id": job, "observer_name": observer,
@@ -512,12 +512,12 @@ class TestAlertRefireDedup(unittest.TestCase):
     def test_first_emit_then_identical_refire_suppressed(self):
         enq = self._enq()
         sig = ros.research_observer_failure_signature(
-            ros.OBSERVER_TERMINAL_DISTRIBUTION, "enqueue_failed", "RuntimeError")
+            ros.OBSERVER_TD_SCAN, "enqueue_failed", "RuntimeError")
         # No prior → emit.
         client_empty = self._client_with_prior([])
         with patch("packages.quantum.observability.alerts.alert") as m1:
             r1 = ros.emit_research_observer_failure_alert(
-                client_empty, observer_name=ros.OBSERVER_TERMINAL_DISTRIBUTION,
+                client_empty, observer_name=ros.OBSERVER_TD_SCAN,
                 enq_result=enq, source_job_run_id="parent-job-1", code_sha="shaTEST")
             self.assertTrue(r1["emitted"])
             m1.assert_called_once()
@@ -525,7 +525,7 @@ class TestAlertRefireDedup(unittest.TestCase):
         client_dup = self._client_with_prior([self._prior_row(signature=sig)])
         with patch("packages.quantum.observability.alerts.alert") as m2:
             r2 = ros.emit_research_observer_failure_alert(
-                client_dup, observer_name=ros.OBSERVER_TERMINAL_DISTRIBUTION,
+                client_dup, observer_name=ros.OBSERVER_TD_SCAN,
                 enq_result=enq, source_job_run_id="parent-job-1", code_sha="shaTEST")
             self.assertFalse(r2["emitted"])
             self.assertEqual(r2["reason"], "duplicate")
@@ -533,11 +533,11 @@ class TestAlertRefireDedup(unittest.TestCase):
 
     def test_different_signature_reemits(self):
         # A prior row for a DIFFERENT failure signature must not suppress.
-        stale = self._prior_row(signature="terminal_distribution|status=other|error_class=X")
+        stale = self._prior_row(signature="td_scan|status=other|error_class=X")
         client = self._client_with_prior([stale])
         with patch("packages.quantum.observability.alerts.alert") as m:
             r = ros.emit_research_observer_failure_alert(
-                client, observer_name=ros.OBSERVER_TERMINAL_DISTRIBUTION,
+                client, observer_name=ros.OBSERVER_TD_SCAN,
                 enq_result=self._enq(), source_job_run_id="parent-job-1",
                 code_sha="shaTEST")
             self.assertTrue(r["emitted"])

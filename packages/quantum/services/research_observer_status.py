@@ -47,8 +47,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Canonical observer names — stable identity strings used both as the
-# ``result.research_observers`` keys AND as the dedup ``observer_name``.
-OBSERVER_TERMINAL_DISTRIBUTION = "terminal_distribution"
+# ``result.research_observers`` keys AND as the dedup ``observer_name``. The
+# td key is "td_scan" (matching the child job td_scan_score_observe + the
+# td_scan_* tables) — deliberately NOT the observe-only package name, which a
+# production module may not even mention (import-lock guardrail).
+OBSERVER_TD_SCAN = "td_scan"
 OBSERVER_SHADOW_FLEET = "shadow_fleet"
 
 RESEARCH_OBSERVER_ALERT_TYPE = "research_observer_enqueue_failed"
@@ -64,7 +67,7 @@ def new_research_observers_block() -> Dict[str, Dict[str, Any]]:
     """A fresh ``result.research_observers`` accumulator with both known
     observers pre-seeded to a no-op shape ``{status, errors, job_run_id}``."""
     return {
-        OBSERVER_TERMINAL_DISTRIBUTION: {"status": None, "errors": 0, "job_run_id": None},
+        OBSERVER_TD_SCAN: {"status": None, "errors": 0, "job_run_id": None},
         OBSERVER_SHADOW_FLEET: {"status": None, "errors": 0, "job_run_id": None},
     }
 

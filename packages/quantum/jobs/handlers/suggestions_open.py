@@ -26,7 +26,7 @@ from packages.quantum.jobs.handlers.utils import (
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.db import _to_jsonable
 from packages.quantum.services.research_observer_status import (
-    OBSERVER_TERMINAL_DISTRIBUTION,
+    OBSERVER_TD_SCAN,
     OBSERVER_SHADOW_FLEET,
     new_research_observers_block,
     record_observer_seam,
@@ -428,7 +428,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     cycle_result["td_scan_observe_enqueue"] = _td_enq
                     research_observer_failures += record_observer_seam(
                         client=client,
-                        observer_name=OBSERVER_TERMINAL_DISTRIBUTION,
+                        observer_name=OBSERVER_TD_SCAN,
                         enq_result=_td_enq,
                         research_observers=research_observers,
                         source_job_run_id=payload.get("_job_run_id"),

@@ -40,7 +40,10 @@ proven legacy collision is pinned by hash + receipt.
 
 ## 2. Collision inventory (all duplicate prefixes, repo-wide)
 
-Scan of all 149 files in `supabase/migrations/`. Duplicate 14-digit prefixes:
+Scan scope: flat, lowercase `*.sql` files DIRECTLY under `supabase/migrations/`
+(non-recursive), mirroring the Supabase CLI's own migration discovery.
+Subdirectories (e.g. the gated `pg/` real-pg suite) and non-`.sql` files are
+excluded. Scan of all 149 such files. Duplicate 14-digit prefixes:
 
 ```
 $ ls supabase/migrations/ | sed -E 's/^([0-9]{14})_.*/\1/' | sort | uniq -d
@@ -54,14 +57,27 @@ tree). `VERIFIED-RUNTIME`.
 
 ### Full SHA-256 fingerprints (the three collision files)
 
-| file | sha256 | bytes |
-|---|---|---|
-| `20260723160000_td_scan_observe_tables.sql` | `2cca2cd13b975edfb8e2ecfb74e9b153a27d6e861ecd29f882d95fd6c5fcc073` | 7057 |
-| `20260723160000_regime_v4_comparisons.sql` | `2221fbec8e1b4f92f55bd0971082864a7acb36e0c3031218b9e9d3c231c13e77` | 6300 |
-| `20260723160000_fleet_policy_decision_foundation.sql` | `559ce90e48a1700b0ccd12cc85e9cd3bd89761c00198791f5c84007ebebec4cd` | 9463 |
+**Hash basis: SHA-256 over CRLF->LF-normalized bytes** (each `\r\n` replaced by
+`\n` before hashing). This equals the LF git-blob digest, so the pin is identical
+on Windows (`core.autocrlf` CRLF checkout) and Linux CI (`ubuntu-latest`,
+actions/checkout LF checkout). `size_bytes` is the normalized-LF count.
 
-`VERIFIED-RUNTIME` (sha256sum). These hashes are pinned in
-`scripts/migrations/legacy_duplicate_version_allowlist.json`.
+| file | sha256 (normalized-LF) | bytes (LF) |
+|---|---|---|
+| `20260723160000_td_scan_observe_tables.sql` | `52f7bf2d2f046bb3c5800024095dd63707bec8998bf2fce95f67d37860302553` | 6904 |
+| `20260723160000_regime_v4_comparisons.sql` | `4efc5ea84f49f27225322d5124b87f9a8197f5631521b158fc3b36c27e086a94` | 6173 |
+| `20260723160000_fleet_policy_decision_foundation.sql` | `278c87107bf4cdf70d5e775bf97741db61f37fce55b57b1ca6127d5a2ff3211a` | 9272 |
+
+`VERIFIED-RUNTIME` — reproduced via `git cat-file blob HEAD:<path> | sha256sum`
+(the LF blob CI checks out) and via `sha256_normalized`. These hashes are pinned in
+`scripts/migrations/legacy_duplicate_version_allowlist.json` and re-asserted against
+the on-disk normalized-LF hash by `test_real_collision_pins_match_git_lf_blobs`.
+
+> Note: an earlier draft of this report pinned CRLF working-tree digests
+> (`2cca2cd1…`/`2221fbec…`/`559ce90e…`, sizes 7057/6300/9463 = LF + line-count) and
+> labeled them `VERIFIED-RUNTIME` without stating the platform-dependent basis.
+> That was corrected here: the pins are now on the platform-independent
+> normalized-LF basis, and hashing normalizes line endings before digesting.
 
 ---
 
@@ -233,3 +249,14 @@ python -m scripts.migrations.migration_version_audit \
 
 The audit performs ZERO network/DB calls — `test_audit_module_imports_no_db_or_network`
 AST-scans the module and asserts no `supabase`/`psycopg`/`requests`/`socket`/… import.
+
+### Allowlist additions are a HUMAN-REVIEW gate (not a cryptographic one)
+
+The offline linter verifies the sha256 pin and that the receipt-id field is
+present, but it **cannot** cryptographically prove that a claimed
+`apply_receipt_risk_alert_id` / `applied_version` actually exists in production.
+Any NEW allowlist entry MUST therefore be justified by re-running the documented
+read-only production SELECTs (§3: `schema_migrations` by name + `risk_alerts`
+`alert_type='migration_apply'` by `migration_name`) and a human reviewer must
+confirm those receipts before approving. The JSON alone is not proof; this is
+stated in the allowlist's `_human_review_requirement` field.

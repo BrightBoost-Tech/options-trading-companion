@@ -109,8 +109,8 @@ def test_legacy_allowlisted_collision_passes_with_exact_hashes(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     assert _lint(m, allowlist) == []
@@ -128,8 +128,8 @@ def test_hash_drift_fails(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     # Drift one file's content after pinning the allowlist hash.
@@ -153,8 +153,8 @@ def test_missing_receipt_entry_fails(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     # Strip the durable apply receipt from one entry.
@@ -174,8 +174,8 @@ def test_missing_applied_version_also_fails_receipt_check(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     allowlist["collisions"][0]["files"][1]["applied_version"] = None
@@ -211,7 +211,7 @@ def test_partial_allowlist_group_flags_unlisted_sibling(tmp_path):
     b = _write(m, "20260723160000_two.sql", "CREATE TABLE IF NOT EXISTS t_two();\n")
     # Only 'one' is allowlisted; 'two' shares the version but is unlisted.
     allowlist = _allowlist_for(
-        "20260723160000", [(a.name, mva.sha256_bytes(a.read_bytes()))]
+        "20260723160000", [(a.name, mva.sha256_normalized(a.read_bytes()))]
     )
     violations = _lint(m, allowlist)
     assert any(
@@ -229,8 +229,8 @@ def test_missing_allowlisted_file_fails(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
             ("20260723160000_three.sql", "cafebabe"),  # allowlisted but not on disk
         ],
     )
@@ -306,8 +306,8 @@ def test_audit_with_remote_snapshot_is_pure_and_offline(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     snapshot = {
@@ -334,13 +334,59 @@ def test_audit_without_snapshot_reports_unknown_offline(tmp_path):
     allowlist = _allowlist_for(
         "20260723160000",
         [
-            (a.name, mva.sha256_bytes(a.read_bytes())),
-            (b.name, mva.sha256_bytes(b.read_bytes())),
+            (a.name, mva.sha256_normalized(a.read_bytes())),
+            (b.name, mva.sha256_normalized(b.read_bytes())),
         ],
     )
     files = mva.scan_migrations(m)
     report = mva.audit(files, allowlist, migrations_dir=str(m))
     assert {r.remote_state for r in report.file_rows} == {"unknown_offline"}
+
+
+# ---------------------------------------------------------------------------
+# 8b. HASH BASIS — CRLF vs LF must hash identically (regression for the defect
+#     where CRLF working-tree pins failed on the LF CI checkout).
+# ---------------------------------------------------------------------------
+def test_crlf_and_lf_hash_identically():
+    lf = b"CREATE TABLE IF NOT EXISTS t (id int);\nSELECT 1;\n"
+    crlf = lf.replace(b"\n", b"\r\n")
+    assert crlf != lf  # sanity: the raw bytes really do differ
+    assert mva.sha256_normalized(lf) == mva.sha256_normalized(crlf)
+    # And the normalized length is the LF length, not the CRLF length.
+    assert len(mva.normalize_line_endings(crlf)) == len(lf)
+
+
+def test_scan_is_line_ending_agnostic(tmp_path):
+    """A file written CRLF vs LF yields the same MigrationFile.sha256/size."""
+    m_lf = tmp_path / "lf"
+    m_crlf = tmp_path / "crlf"
+    m_lf.mkdir()
+    m_crlf.mkdir()
+    body = "CREATE TABLE IF NOT EXISTS t (id int);\nSELECT 1;\n"
+    (m_lf / "20260101000000_x.sql").write_bytes(body.encode())
+    (m_crlf / "20260101000000_x.sql").write_bytes(body.replace("\n", "\r\n").encode())
+
+    f_lf = mva.scan_migrations(m_lf)[0]
+    f_crlf = mva.scan_migrations(m_crlf)[0]
+    assert f_lf.sha256 == f_crlf.sha256
+    assert f_lf.size_bytes == f_crlf.size_bytes
+
+
+def test_real_collision_pins_match_git_lf_blobs():
+    """The shipped allowlist hashes equal the normalized-LF digests of the files
+    as committed (the basis Linux CI checks out) -- guards the CRLF-pin defect."""
+    migrations_dir = mva.default_migrations_dir()
+    allowlist = mva.load_allowlist(mva.default_allowlist_path())
+    index = {
+        fe["filename"]: fe
+        for group in allowlist["collisions"]
+        for fe in group["files"]
+    }
+    for f in mva.scan_migrations(migrations_dir):
+        if f.filename in index:
+            assert index[f.filename]["sha256"] == f.sha256, (
+                f"{f.filename}: allowlist pin != normalized-LF hash"
+            )
 
 
 # ---------------------------------------------------------------------------

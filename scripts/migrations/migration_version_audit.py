@@ -18,9 +18,13 @@ assigns each file its own apply-timestamp ``version`` and stores the file name i
 
 WHAT THIS MODULE DOES
 ---------------------
-* Scans ``supabase/migrations/*.sql`` and parses each file's CLI version.
+* Scans flat, lowercase ``*.sql`` files directly under ``supabase/migrations/``
+  (non-recursive, mirroring the Supabase CLI's discovery) and parses each file's
+  CLI version.
 * Detects duplicate versions (two+ files sharing one parsed version).
-* Fingerprints every file with SHA-256.
+* Fingerprints every file with SHA-256 over CRLF->LF-normalized bytes, so the
+  digest is identical on Windows (``core.autocrlf`` CRLF checkout) and Linux CI
+  (LF checkout) alike. The allowlist pins are on this normalized-LF basis.
 * Reconciles duplicates against a reviewed *legacy allowlist* of PROVEN collisions,
   each pinned to exact hashes + an apply receipt + a never-reapply marker.
 * Optionally compares against an OFFLINE JSON snapshot of remote history
@@ -143,15 +147,39 @@ def is_canonical_version(version: Optional[str]) -> bool:
     return bool(version) and len(version) == _CANONICAL_VERSION_LEN and version.isdigit()
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def normalize_line_endings(data: bytes) -> bytes:
+    """Canonicalize CRLF -> LF so a file's hash is identical on every platform.
+
+    Git stores blobs LF-normalized; a checkout on a machine with
+    ``core.autocrlf=true`` (Windows) smudges them to CRLF in the working tree,
+    while Linux CI (ubuntu-latest, actions/checkout default) checks out LF. Hashing
+    the raw working-tree bytes therefore yields platform-dependent digests. Hashing
+    CRLF->LF-normalized bytes yields the SAME digest as the LF git blob CI sees,
+    with no .gitattributes dependency.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
+def sha256_normalized(data: bytes) -> str:
+    """SHA-256 over CRLF->LF-normalized bytes (platform-independent).
+
+    This is the canonical hashing basis for the allowlist pins.
+    """
+    return hashlib.sha256(normalize_line_endings(data)).hexdigest()
 
 
 def scan_migrations(migrations_dir: Path) -> List[MigrationFile]:
-    """Fingerprint every ``*.sql`` file in ``migrations_dir`` (sorted by name)."""
+    """Fingerprint every migration in ``migrations_dir`` (sorted by name).
+
+    Scan scope: flat, lowercase ``*.sql`` files DIRECTLY under
+    ``supabase/migrations/`` (non-recursive), mirroring the Supabase CLI's own
+    migration discovery. Subdirectories (e.g. the gated ``pg/`` real-pg suite) and
+    non-``.sql`` files are ignored. Hash and size are on the CRLF->LF-normalized
+    basis so they are identical regardless of checkout smudging.
+    """
     files: List[MigrationFile] = []
     for path in sorted(migrations_dir.glob("*.sql")):
-        data = path.read_bytes()
+        normalized = normalize_line_endings(path.read_bytes())
         version = parse_version(path.name)
         m = _FULL_NAME_RE.match(path.name)
         slug = m.group("slug") if m else None
@@ -161,8 +189,8 @@ def scan_migrations(migrations_dir: Path) -> List[MigrationFile]:
                 filename=path.name,
                 version=version,
                 slug=slug,
-                sha256=sha256_bytes(data),
-                size_bytes=len(data),
+                sha256=sha256_normalized(normalized),
+                size_bytes=len(normalized),
                 malformed=malformed,
             )
         )

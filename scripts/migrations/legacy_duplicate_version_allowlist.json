@@ -1,5 +1,7 @@
 {
-  "_README": "Reviewed allowlist of PROVEN, already-applied duplicate migration-version collisions. A file appears here ONLY after: (1) full SHA-256 pin, (2) an independent durable apply receipt (risk_alerts alert_type='migration_apply'), (3) a distinct production schema_migrations version (apply-timestamp assigned by mcp apply_migration), (4) an object-parity note confirming disjoint DDL from its siblings, and (5) never_reapply=true. The linter (scripts/migrations/migration_version_audit.py, enforced by packages/quantum/tests/test_migration_version_collision.py) PASSES a duplicate version only when every on-disk file in the group matches an entry here by exact hash. NEVER rename, reapply, or squash an applied file. To ADD a legacy collision, verify each fact against production and record the receipt id here; to PREVENT a new collision, rename the not-yet-applied file to a unique 14-digit prefix BEFORE applying it.",
+  "_README": "Reviewed allowlist of PROVEN, already-applied duplicate migration-version collisions. A file appears here ONLY after: (1) full SHA-256 pin on the normalized-LF basis (see hash_basis), (2) an independent durable apply receipt (risk_alerts alert_type='migration_apply'), (3) a distinct production schema_migrations version (apply-timestamp assigned by mcp apply_migration), (4) an object-parity note confirming disjoint DDL from its siblings, and (5) never_reapply=true. The linter (scripts/migrations/migration_version_audit.py, enforced by packages/quantum/tests/test_migration_version_collision.py) PASSES a duplicate version only when every on-disk file in the group matches an entry here by exact hash. NEVER rename, reapply, or squash an applied file. To ADD a legacy collision, verify each fact against production and record the receipt id here; to PREVENT a new collision, rename the not-yet-applied file to a unique 14-digit prefix BEFORE applying it.",
+  "_human_review_requirement": "ADDING an entry to this allowlist is a HUMAN-REVIEW gate. The offline linter can verify the sha256 pin and the presence of the receipt-id field, but it CANNOT cryptographically verify that the apply_receipt_risk_alert_id / applied_version actually exist in production. Any new entry MUST be justified by re-running the documented read-only production SELECTs (supabase_migrations.schema_migrations by name + risk_alerts alert_type='migration_apply' by migration_name; see docs/migration_procedure.md and the reconciliation report) and the reviewer must confirm those receipts before approving. Do not trust the JSON alone.",
+  "hash_basis": "sha256 over CRLF->LF-normalized file bytes (each b'\\r\\n' replaced by b'\\n' before hashing). This equals the LF git-blob digest, so the pin matches on Windows (core.autocrlf CRLF checkout) and Linux CI (LF checkout) identically. size_bytes_lf is the normalized-LF byte count. Recompute with `git cat-file blob HEAD:<path> | sha256sum` or scripts/migrations/migration_version_audit.py::sha256_normalized.",
   "_doctrine_refs": [
     "docs/migration_procedure.md (apply by exact NAME via mcp apply_migration; DO NOT use supabase db push)",
     "CLAUDE.md section 8: match files to tracking by NAME not version prefix",
@@ -14,7 +16,8 @@
       "files": [
         {
           "filename": "20260723160000_td_scan_observe_tables.sql",
-          "sha256": "2cca2cd13b975edfb8e2ecfb74e9b153a27d6e861ecd29f882d95fd6c5fcc073",
+          "sha256": "52f7bf2d2f046bb3c5800024095dd63707bec8998bf2fce95f67d37860302553",
+          "size_bytes_lf": 6904,
           "applied_version": "20260723232856",
           "apply_receipt_risk_alert_id": "715f36a9-c5b0-4866-97b1-94a8d61ff87f",
           "applied_at": "2026-07-23T23:29:29Z",
@@ -25,7 +28,8 @@
         },
         {
           "filename": "20260723160000_regime_v4_comparisons.sql",
-          "sha256": "2221fbec8e1b4f92f55bd0971082864a7acb36e0c3031218b9e9d3c231c13e77",
+          "sha256": "4efc5ea84f49f27225322d5124b87f9a8197f5631521b158fc3b36c27e086a94",
+          "size_bytes_lf": 6173,
           "applied_version": "20260723234851",
           "apply_receipt_risk_alert_id": "56b3f3aa-bceb-4488-a722-d2884305cebe",
           "applied_at": "2026-07-23T23:49:05Z",
@@ -36,7 +40,8 @@
         },
         {
           "filename": "20260723160000_fleet_policy_decision_foundation.sql",
-          "sha256": "559ce90e48a1700b0ccd12cc85e9cd3bd89761c00198791f5c84007ebebec4cd",
+          "sha256": "278c87107bf4cdf70d5e775bf97741db61f37fce55b57b1ca6127d5a2ff3211a",
+          "size_bytes_lf": 9272,
           "applied_version": "20260724003507",
           "apply_receipt_risk_alert_id": "b2f09517-a830-4a0d-b3a4-06f89fe22253",
           "applied_at": "2026-07-24T00:35:32Z",

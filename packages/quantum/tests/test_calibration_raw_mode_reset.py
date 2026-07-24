@@ -17,8 +17,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.analytics import calibration_service as cs
 from packages.quantum.jobs.handlers import calibration_update as cu

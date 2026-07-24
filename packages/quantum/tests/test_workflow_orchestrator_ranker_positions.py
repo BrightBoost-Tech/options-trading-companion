@@ -31,14 +31,11 @@ import sys
 import types
 import unittest
 
-# Stub the alpaca-py surface the repo's modules import lazily (not
-# needed here but matches the pattern used by neighbouring test files).
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+# Bind the canonical alpaca-py package before importing repo modules that
+# import it lazily, so collection order can never shadow it. See _alpaca_stub.py.
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))

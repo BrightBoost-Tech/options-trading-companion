@@ -152,10 +152,12 @@ _REGISTRY: List[FlagSpec] = [
     # the control's OWN production parser (anti-drift), never a reimplementation.
     #   QUANT_AGENTS_ENABLED is the ONLY dark control that AFFECTS LIVE ENTRIES if
     #   flipped (census #2). Its master-toggle parser is is_agent_enabled — the gate
-    #   build_agent_pipeline actually reads (runner.py:29). ⚠ SEAM: a SECOND, divergent
-    #   inline parser exists at workflow_orchestrator.py:3363
-    #   (os.getenv(...,"false").lower()=="true"); that one treats '1'/'yes' as OFF.
-    #   The echo reports the master-toggle value (the pipeline-build decision).
+    #   build_agent_pipeline actually reads (runner.py:29). SEAM RESOLVED (E4,
+    #   2026-07-23): the formerly-divergent inline parser at
+    #   workflow_orchestrator.py:3370 (os.getenv(...,"false").lower()=="true", which
+    #   treated '1'/'yes'/' true ' as OFF) now routes through this SAME
+    #   is_agent_enabled parser, so the echo value == the orchestrator sizing gate ==
+    #   the pipeline-build decision for every input.
     FlagSpec("QUANT_AGENTS_ENABLED", "packages.quantum.agents.runner",
              "is_agent_enabled", BEHAVIORAL_OPT_IN, AGENT_TRISTATE, "census#2 (affects live entries)",
              args=("QUANT_AGENTS_ENABLED", False)),

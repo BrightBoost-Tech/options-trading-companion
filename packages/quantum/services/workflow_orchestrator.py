@@ -3398,8 +3398,26 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         )
 
         # --- AGENT-BASED SIZING ---
-        # Defaults to classic logic, overridden if agent is enabled
-        QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
+        # Defaults to classic logic, overridden if agent is enabled.
+        # E4 (2026-07-23): use the canonical tri-state `is_agent_enabled`
+        # parser (shared with runner.build_agent_pipeline) instead of a
+        # divergent inline `== "true"` read. The prior inline parser treated
+        # `1`/`yes`/`" true "` as OFF while the runner treated them as ON — a
+        # split-brain that could half-enable agents (scanner/design ON, sizing
+        # OFF). `default=False` preserves the prior unset→OFF behavior exactly,
+        # and every value both parsers already agreed on is byte-identical.
+        #
+        # The import is deliberately FUNCTION-LOCAL (not module-level): it
+        # rebinds no module-level name (so it does not trip the
+        # test_midday_scoping_regression no-shadowing guard), and it keeps
+        # workflow_orchestrator's module-level import block byte-identical to
+        # `origin/main` — a module-level add here shifts the collection/import
+        # order and tips a pre-existing, order-sensitive test-isolation seam in
+        # the executor suites (leaked non-package `alpaca` sys.modules stub in
+        # test_alpaca_authoritative_equity.py). `runner` is already imported at
+        # module load via `options_scanner` below, so this is a cached lookup.
+        from packages.quantum.agents.runner import is_agent_enabled
+        QUANT_AGENTS_ENABLED = is_agent_enabled("QUANT_AGENTS_ENABLED", default=False)
 
         # Use SmallAccountCompounder for variable sizing (classic path).
         #

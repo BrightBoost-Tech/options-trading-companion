@@ -26,8 +26,9 @@ import types
 import unittest
 
 # Stub alpaca-py so paper_endpoints imports resolve in the test venv.
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum import paper_endpoints as pe  # noqa: E402
 from packages.quantum.risk.position_model import (  # noqa: E402

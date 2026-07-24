@@ -30,13 +30,17 @@ hours; see the PR for that pending validation.
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Minimal Alpaca SDK stubs so submit_option_order's function-level
-# imports resolve without the real alpaca-py installed. submit_option_order
-# imports these at call time, so stubbing in sys.modules is sufficient.
+# imports resolve to a RECORDING stand-in (so the test can assert on the
+# limit_price that reaches the broker request). submit_option_order imports
+# these at call time, so overriding them in sys.modules for the duration of
+# the test is sufficient. They are installed via patch.dict so they are
+# restored — never left shadowing the real alpaca-py for later-collected
+# tests (the sys.modules stub-leak class; Lane D).
 # ─────────────────────────────────────────────────────────────────────
 
 class _FakeEnumMember:
@@ -82,27 +86,44 @@ class _RecordingRequest:
         self.__dict__.update(kwargs)
 
 
-def _install_alpaca_stubs():
-    alpaca = sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-    trading = sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-    alpaca.trading = trading
+def _build_alpaca_stub_modules():
+    """Build FRESH stub module objects carrying the recording request +
+    fake enums. Returned as a {name: module} dict for ``patch.dict`` so the
+    override is scoped and restored — nothing is mutated on a shared/real
+    module and nothing leaks past the test."""
+    alpaca = types.ModuleType("alpaca")
+    trading = types.ModuleType("alpaca.trading")
+    requests_mod = types.ModuleType("alpaca.trading.requests")
+    enums_mod = types.ModuleType("alpaca.trading.enums")
 
-    requests_mod = sys.modules.setdefault(
-        "alpaca.trading.requests", types.ModuleType("alpaca.trading.requests")
-    )
-    # SET (not setdefault) so we win regardless of an earlier test that
-    # left an empty stub module in place.
+    alpaca.trading = trading
+    trading.requests = requests_mod
+    trading.enums = enums_mod
+
     requests_mod.OptionLegRequest = _RecordingRequest
     requests_mod.LimitOrderRequest = _RecordingRequest
 
-    enums_mod = sys.modules.setdefault(
-        "alpaca.trading.enums", types.ModuleType("alpaca.trading.enums")
-    )
     enums_mod.OrderSide = _OrderSide
     enums_mod.TimeInForce = _TimeInForce
     enums_mod.OrderType = _OrderType
     enums_mod.OrderClass = _OrderClass
     enums_mod.PositionIntent = _PositionIntent
+
+    return {
+        "alpaca": alpaca,
+        "alpaca.trading": trading,
+        "alpaca.trading.requests": requests_mod,
+        "alpaca.trading.enums": enums_mod,
+    }
+
+
+def _install_alpaca_stubs(testcase):
+    """Install the recording alpaca stubs in sys.modules for the duration of
+    ``testcase`` ONLY (restored via addCleanup, so an assertion failure or
+    exception cannot leak the stubs to later-collected tests)."""
+    patcher = patch.dict(sys.modules, _build_alpaca_stub_modules())
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
 
 
 def _make_client(submit_return=None):
@@ -158,7 +179,7 @@ class TestCreditCloseCrossesBuildSubmitSeam(unittest.TestCase):
     and reach the broker request — not be rejected by the guard."""
 
     def setUp(self):
-        _install_alpaca_stubs()
+        _install_alpaca_stubs(self)
         from packages.quantum.brokers.alpaca_order_handler import (
             build_alpaca_order_request,
         )
@@ -206,7 +227,7 @@ class TestMagnitudeGuardStillRejectsInvalid(unittest.TestCase):
     negative'."""
 
     def setUp(self):
-        _install_alpaca_stubs()
+        _install_alpaca_stubs(self)
 
     def _minimal_req(self, limit_price):
         return {

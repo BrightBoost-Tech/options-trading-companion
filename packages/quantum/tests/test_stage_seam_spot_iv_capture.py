@@ -29,8 +29,9 @@ import types
 import unittest
 from unittest import mock
 
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum import paper_endpoints as pe  # noqa: E402
 from packages.quantum.models import TradeTicket, OptionLeg  # noqa: E402

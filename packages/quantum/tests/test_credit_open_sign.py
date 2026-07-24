@@ -21,9 +21,9 @@ import types
 import unittest
 
 # Stub alpaca-py so imports resolve in the test venv.
-sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-sys.modules.setdefault("alpaca.trading.requests", types.ModuleType("alpaca.trading.requests"))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.brokers.alpaca_order_handler import (  # noqa: E402
     build_alpaca_order_request,

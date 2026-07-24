@@ -25,11 +25,9 @@ from unittest.mock import MagicMock, patch
 
 # Stub alpaca-py so imports resolve in the test venv (matches the
 # convention from test_h9_legacy_sweep.py).
-sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-sys.modules.setdefault(
-    "alpaca.trading.requests", types.ModuleType("alpaca.trading.requests")
-)
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 
 class _AlertCapture:

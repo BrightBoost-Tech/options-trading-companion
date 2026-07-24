@@ -1,0 +1,51 @@
+{
+  "_README": "Reviewed allowlist of PROVEN, already-applied duplicate migration-version collisions. A file appears here ONLY after: (1) full SHA-256 pin, (2) an independent durable apply receipt (risk_alerts alert_type='migration_apply'), (3) a distinct production schema_migrations version (apply-timestamp assigned by mcp apply_migration), (4) an object-parity note confirming disjoint DDL from its siblings, and (5) never_reapply=true. The linter (scripts/migrations/migration_version_audit.py, enforced by packages/quantum/tests/test_migration_version_collision.py) PASSES a duplicate version only when every on-disk file in the group matches an entry here by exact hash. NEVER rename, reapply, or squash an applied file. To ADD a legacy collision, verify each fact against production and record the receipt id here; to PREVENT a new collision, rename the not-yet-applied file to a unique 14-digit prefix BEFORE applying it.",
+  "_doctrine_refs": [
+    "docs/migration_procedure.md (apply by exact NAME via mcp apply_migration; DO NOT use supabase db push)",
+    "CLAUDE.md section 8: match files to tracking by NAME not version prefix",
+    "CLAUDE.md section 10: model identity and deploy identity are different provenance axes"
+  ],
+  "collisions": [
+    {
+      "version": "20260723160000",
+      "reason": "Three parallel research / shadow-fleet lanes each authored a migration with the same 14-digit prefix on 2026-07-23 (PRs #1364 / #1365 / #1366, merged as commits 55be29b3 / 6883a422 / b96107a3). The files create pairwise-DISJOINT object sets and were each applied to production by exact NAME via mcp apply_migration, receiving three distinct MCP-assigned schema_migrations versions and three independent apply receipts. Production history therefore has NO version collision; the collision is strictly repo-side (the Supabase CLI keys local migration identity on the 14-digit filename prefix, so `supabase migration list --local` shows this version three times, and the local schema_migrations PRIMARY KEY is `version` alone). VERIFIED via SELECT against production schema_migrations + risk_alerts and `supabase migration list --local` (CLI 2.72.7) on 2026-07-23/24.",
+      "cli_collision": "BLOCKED_TOOLING_COLLISION: a fresh `supabase db push` / `db reset` cannot record all three (version-PK conflict). The repo's supported bootstrap is name-based per-file apply, under which each file lands exactly once (production proof below).",
+      "object_parity": "Pairwise-disjoint. td_scan_observe_tables -> {td_scan_envelopes, td_scan_scores}; regime_v4_comparisons -> {regime_v4_comparisons}; fleet_policy_decision_foundation -> {fleet_policy_decision_runs, fleet_policy_decisions}. No shared table / index / function / trigger / policy name across the three. All five tables confirmed present in production.",
+      "files": [
+        {
+          "filename": "20260723160000_td_scan_observe_tables.sql",
+          "sha256": "2cca2cd13b975edfb8e2ecfb74e9b153a27d6e861ecd29f882d95fd6c5fcc073",
+          "applied_version": "20260723232856",
+          "apply_receipt_risk_alert_id": "715f36a9-c5b0-4866-97b1-94a8d61ff87f",
+          "applied_at": "2026-07-23T23:29:29Z",
+          "pr": 1364,
+          "merge_commit": "55be29b3",
+          "objects": ["td_scan_envelopes", "td_scan_scores"],
+          "never_reapply": true
+        },
+        {
+          "filename": "20260723160000_regime_v4_comparisons.sql",
+          "sha256": "2221fbec8e1b4f92f55bd0971082864a7acb36e0c3031218b9e9d3c231c13e77",
+          "applied_version": "20260723234851",
+          "apply_receipt_risk_alert_id": "56b3f3aa-bceb-4488-a722-d2884305cebe",
+          "applied_at": "2026-07-23T23:49:05Z",
+          "pr": 1365,
+          "merge_commit": "6883a422",
+          "objects": ["regime_v4_comparisons"],
+          "never_reapply": true
+        },
+        {
+          "filename": "20260723160000_fleet_policy_decision_foundation.sql",
+          "sha256": "559ce90e48a1700b0ccd12cc85e9cd3bd89761c00198791f5c84007ebebec4cd",
+          "applied_version": "20260724003507",
+          "apply_receipt_risk_alert_id": "b2f09517-a830-4a0d-b3a4-06f89fe22253",
+          "applied_at": "2026-07-24T00:35:32Z",
+          "pr": 1366,
+          "merge_commit": "b96107a3",
+          "objects": ["fleet_policy_decision_runs", "fleet_policy_decisions"],
+          "never_reapply": true
+        }
+      ]
+    }
+  ]
+}

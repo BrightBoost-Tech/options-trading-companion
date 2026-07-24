@@ -1,0 +1,13 @@
+{
+  "_README": "STATIC OFFLINE snapshot of production supabase_migrations.schema_migrations (version -> name), captured by a read-only SELECT on 2026-07-23/24. This file exists so the audit CLI can classify applied/untracked state WITHOUT a live DB call: `python -m scripts.migrations.migration_version_audit --remote-snapshot scripts/migrations/remote_history_snapshot.example.json`. It is a fixture, not a live source. Production tracks migrations by NAME (the .sql filename minus extension); `version` is the MCP-assigned apply timestamp. Refresh only by re-running the documented SELECT; never wire CI to a live database.",
+  "_captured_at": "2026-07-24T00:40:00Z",
+  "_source": "SELECT version, name FROM supabase_migrations.schema_migrations (read-only MCP SELECT)",
+  "schema_migrations": [
+    { "version": "20260723204135", "name": "20260723150000_suggestion_rejections_event_id" },
+    { "version": "20260723205911", "name": "20260722020000_single_leg_experiment_control_rpcs" },
+    { "version": "20260723232856", "name": "20260723160000_td_scan_observe_tables" },
+    { "version": "20260723234851", "name": "20260723160000_regime_v4_comparisons" },
+    { "version": "20260724003507", "name": "20260723160000_fleet_policy_decision_foundation" },
+    { "version": "20260724004315", "name": "20260723170000_fleet_shadow_internal_lifecycle" }
+  ]
+}

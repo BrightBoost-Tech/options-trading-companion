@@ -696,6 +696,28 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   live_submit=false/2 bindings; kill switch `rpc_pause_single_leg_experiment_v1`; first evidence =
   Friday's natural cycle ONLY). ⚠ Single-leg foundation files 1/2/3/5 are APPLIED_UNTRACKED
   (files 1/2 NEVER reapply — unguarded CREATE POLICY); tracking backfill = operator follow-up.
+  **07-23/24 COUNTERFACTUAL-RESEARCH RUN** (`docs/review/
+  counterfactual-research-and-fleet-evaluator-results-2026-07-23.md`): six merges,
+  final `8de051f0` — #1364 ⑤ terminal-distribution score-on-scan observer
+  (OBSERVE-ONLY; every fully-constructed candidate incl. rejected credit
+  spreads/condors; tables `td_scan_envelopes`/`td_scan_scores` applied; flag
+  `TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED` **SET =1 on both workers**) ·
+  #1365 Regime-V4 shadow compare (OBSERVE-ONLY beside live V3; fetch-blocking
+  shim, zero provider calls; `regime_v4_comparisons` applied; flag
+  `REGIME_V4_OBSERVE_ENABLED` **SET =1**; V3 remains the sole live authority;
+  the dead `REGIME_V4_ENABLED` untouched) · #1363 unified paginated research
+  reader · #1366/#1367 the **recurring 50-policy fleet evaluator + isolated
+  internal-paper lifecycle** (`20260723160000_fleet_policy_decision_foundation`
+  + `20260723170000_fleet_shadow_internal_lifecycle` applied; true no-op while
+  the fleet is inactive — double-guarded; 50-policy NO-WRITE replay PASS on tape
+  `be9d5fe5-…`: 50/50 typed dispositions, 0 writes/provider/broker; **fleet
+  STILL `pending_legacy_terminal`, 0 active/0 bindings — activation remains
+  owner-gated**) · #1362 QUANT_AGENTS parser unified (canonical tri-state at
+  both sites). First research evidence = Friday's natural scan ONLY. ⚠ Echo-line
+  read-back of the two set flags NOT-PROVEN (log-search API defect) — operator:
+  view worker deployment `345ae118`. New known-liar for §8: PG-suite bootstraps
+  MUST mirror production shape (a bootstrap-added `updated_at` masked a phantom
+  column ref until the adversarial review caught it pre-apply).
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -1136,8 +1158,23 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-23 priority run)
+## Current overnight standing (2026-07-16; updated through the 07-23/24 counterfactual-research run)
 
+- **07-23/24 (counterfactual research):** six merges live at `8de051f0` — the
+  **terminal-distribution score-on-scan observer** and the **Regime-V4 shadow
+  comparison** are ENABLED (both flags `=1` on both workers; observe-only; V3
+  stays the sole live authority; first evidence = Friday 07-24's natural 16:00Z
+  scan, all nine new tables 0 rows tonight); the **recurring 50-policy fleet
+  evaluator + isolated internal-paper lifecycle are BUILT and DORMANT** (true
+  typed no-op while the fleet is inactive; 50-policy NO-WRITE replay PASS; the
+  fleet itself UNCHANGED — `pending_legacy_terminal`, 0 active, 0 bindings,
+  activation still owner-gated). Four migrations applied by exact name (NEVER
+  REAPPLY): `20260723160000_td_scan_observe_tables` ·
+  `20260723160000_regime_v4_comparisons` ·
+  `20260723160000_fleet_policy_decision_foundation` ·
+  `20260723170000_fleet_shadow_internal_lifecycle`. Echo-line read-back of the
+  two new flags NOT-PROVEN (log-search defect) — operator: worker deployment
+  `345ae118`. PRs #754/#762/#740 closed as diff-verified duplicates.
 - **07-23:** P1 fixes live (`2c9ab5f8`): rejection evidence is now append-only idempotent
   (event_id) and expected economic blocks are terminal-blocked, never errors. The **single-leg
   shadow experiment is ENABLED** — shadow_only / internal_paper / 1 contract /
@@ -1219,12 +1256,13 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 - Treat both drafts as **unshipped** until adversarial review, fresh CI, merge,
   deployment attestation, and their named natural falsifiers. Do not report a
   draft, green unit test, or merged schema as live behavior.
-- The next safe code work remains: fleet provisioning/activation mechanics
-  behind a broker+DB-proven legacy-terminal boundary; the independent terminal-
-  distribution probability source; multi-basis cost phase 2; canonical-position
-  greeks/stress/reconciliation; and funnel terminal dispositions. None of those
-  authorizes a live flag, gate, threshold, stop, universe, width, or cadence
-  change.
+- The next safe code work remains: C2 fleet-lifecycle intraday triggers +
+  settle-cadence wiring; the alpaca `sys.modules` test-stub-leak fix;
+  multi-basis cost phase 2; canonical-position greeks/stress/reconciliation;
+  and funnel terminal dispositions. (The independent terminal-distribution
+  scoring source and the fleet evaluator SHIPPED 07-23/24 — observe-only /
+  dormant respectively.) None of those authorizes a live flag, gate,
+  threshold, stop, universe, width, or cadence change.
 
 ---
 

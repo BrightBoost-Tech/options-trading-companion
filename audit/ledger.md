@@ -4,6 +4,46 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-23/24 — COUNTERFACTUAL RESEARCH + FLEET EVALUATOR (fable + opus; post-close serialized) · status:shipped
+
+Full record: `docs/review/counterfactual-research-and-fleet-evaluator-results-2026-07-23.md`.
+Six merges, final code main `8de051f0` — #1364 ⑤ **terminal-distribution score-on-scan observer**
+(scan-time envelope capture at the post-EV seam incl. REJECTED credit spreads/condors; per-leg IV
+threaded; `td_scan_envelopes`+`td_scan_scores` applied `20260723160000_td_scan_observe_tables`;
+import lock intact; parent byte-identity route-proven; flag
+`TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED`) · #1365 **Regime-V4 shadow compare** (fetch-blocking
+shim over V3's captured basket bars — zero provider calls; global+symbol scopes; pure
+counterfactual selection; `regime_v4_comparisons` applied; the dead `REGIME_V4_ENABLED` untouched;
+flag `REGIME_V4_OBSERVE_ENABLED`; unwired-pin honestly allowlisted with a STRONGER
+zero-V4-in-live-path assertion) · #1363 unified paginated research reader · #1366/#1367 **recurring
+50-policy fleet evaluator + isolated internal-paper lifecycle** (two-grain decision evidence
+`20260723160000_fleet_policy_decision_foundation`; isolated `fleet_shadow_*` + 2 atomic RPCs
+`20260723170000_fleet_shadow_internal_lifecycle`, 5 fn bodies digest-verified; **adversarial
+review FAIL→fix→PASS** — caught pre-apply: the phantom `paper_portfolios.updated_at` (masked by a
+bootstrap/production divergence, EXCLUDE-class: PG bootstraps must mirror production shape), the
+fork-tagging-empties-`IS NULL`-universe defect, and a loader outside the per-policy try) · #1362
+QUANT_AGENTS parser unification (function-local import; red-merge root cause = the PRE-EXISTING
+order-sensitive alpaca `sys.modules` stub leak in test infra — NEW BACKLOG ITEM, do not re-find).
+**Phase 6:** both observe flags SET `=1` on both workers (targeted; recycles SUCCESS at
+`8de051f0`); echo-line read-back NOT-PROVEN (Railway log-search defect; operator: view deployment
+`345ae118` logs); **fleet 50-policy NO-WRITE replay PASS** (tape `be9d5fe5-…`: 50 evaluated / 50
+distinct hashes / 50 complete typed dispositions [0 sel / 15 policy_rej / 35 capital_rej] /
+0 db+provider+broker). PRs closed: #754/#762→#885, #740→#1103 (diff-verified); #751/#1213/#1146
+KEPT (07-21 diff-based triage outranks the inferred list). E1/E2/E3 confirmed ALREADY SHIPPED
+(strike from any backlog carry-forward). All nine new evidence tables 0 rows; fleet inactive;
+single-leg `enabled` untouched; zero broker/live-control/small-tier writes.
+PENDING VERIFICATIONS (2026-07-24 → next session):
+- **Friday 16:00Z natural scan:** td-scan observer run (coverage incl. credit spreads/condors,
+  typed abstentions, zero live change) · regime-V4 rows (V3 authority unchanged) · fleet
+  `fleet_inactive` typed no-op with zero writes · single-leg child first run ·
+  rejection-persistence counters (`duplicate_ack`/`retry_recovery` OK, no dup event_ids) ·
+  economic blocks in `blocked_count` not errors.
+- **07-24 05:00Z nightly** (child quota healed since 07-23 17:00Z).
+- Operator: confirm the two `[FLAG_ECHO] … = True` lines on worker deployment `345ae118` ·
+  tracking-backfill packet (4 single-leg foundation files, NAME-only rows) · fleet activation
+  (owner-gated; evaluator now built + replay-proven) · C2 intraday-trigger + settle-cadence
+  follow-up · alpaca sys.modules stub-leak test-infra fix.
+
 ## 2026-07-23 — JULY-23 PRIORITY ORCHESTRATOR (fable + opus; RTH read-only, post-close serialized) · status:shipped
 
 Full record: `docs/review/july-23-priority-and-disabled-runtime-results-2026-07-23.md` + the

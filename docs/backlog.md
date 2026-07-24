@@ -527,7 +527,37 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
   fleet ACTIVATION gate (legacy-terminal attestation, 6 stale 04-09 rows) ·
   runtime falsifiers per ledger.
 
-## 2026-07-23 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+## 2026-07-24 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+
+Action surface after the counterfactual-research/fleet-evaluator sprint (final code main
+`8de051f0`; shipped items in the ledger 07-23/24 entry). Ranked queue:
+
+**BUILD:**
+- C2 lifecycle remainder: intraday stop/TP/DTE trigger management on corroborated UPL +
+  `settle_expired_fleet_positions` cadence wiring (expiry-only v1 shipped).
+- Test-infra: fix the order-sensitive alpaca `sys.modules` stub leak
+  (`test_alpaca_authoritative_equity.py` + siblings — no teardown; any import-order change can
+  re-trigger; E4's red merge was this).
+- td-scan v2 (optional): per-gate reject attribution (v1 = `unattributed_post_ev`, honest).
+
+**OWNER DECISION:**
+- Fleet activation (evaluator BUILT + 50-policy no-write replay PASS; activation remains the
+  only gate; still requires a receipt via the writer + owner token).
+- Quant Agents enable · OI floor · taper enforcement · TCM promotion · greek caps ·
+  risk-basis/bucket enforcement · E19 execution · F-REDATE correction ·
+  APPLIED_UNTRACKED tracking backfill (packet drafted) · v4-ledger/nested-regime/
+  live_approval_queue 0-row surfaces.
+
+**NATURAL EVIDENCE (Friday 07-24):** td-scan observer first run · regime-V4 comparison rows ·
+fleet `fleet_inactive` typed no-op · single-leg child first run · rejection-persistence
+counters · blocked-vs-error taxonomy · the 05:00Z nightly (quota healed) · operator FLAG_ECHO
+visual confirm (deployment `345ae118`).
+
+**RETIRE/REMOVE CANDIDATE:** the dead `REGIME_V4_ENABLED` no-op flag (superseded by
+`REGIME_V4_OBSERVE_ENABLED`; V4 wiring-gate decision owner-gated) · struck-through: E1/E2/E3
+carry-forwards (confirmed shipped 07-20).
+
+## 2026-07-23 — POST-MERGE STANDING (superseded by the 2026-07-24 block above; retained as history)
 
 Action surface after the July-23 run (final code main `2c9ab5f8`; shipped items live in
 `audit/ledger.md` 07-23 exclusion memory — #1360 rejection persistence, #1359 typed economic

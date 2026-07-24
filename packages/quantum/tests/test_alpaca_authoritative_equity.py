@@ -31,24 +31,13 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# See test_equity_state_helpers.py for rationale — stub alpaca-py so the
-# production module's lazy `from alpaca.trading.requests import ...`
-# resolves without the real package installed.
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
+# Bind the canonical alpaca-py package (real, or a complete stub when it is
+# genuinely absent) before importing equity_state, whose lazy
+# `from alpaca.trading.requests import GetPortfolioHistoryRequest` must resolve
+# deterministically regardless of collection order. See _alpaca_stub.py.
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
 
-
-class _StubPortfolioHistoryRequest:
-    def __init__(self, period=None, timeframe=None, **_):
-        self.period = period
-        self.timeframe = timeframe
-
-
-_alpaca_trading_requests.GetPortfolioHistoryRequest = _StubPortfolioHistoryRequest
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+_ensure_alpaca()
 
 from packages.quantum.services import equity_state  # noqa: E402
 

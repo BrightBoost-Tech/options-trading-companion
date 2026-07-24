@@ -20,8 +20,9 @@ from unittest.mock import MagicMock, patch
 
 # Stub alpaca-py per the repo convention (paper_exit_evaluator pulls market-data
 # deps transitively).
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.analytics import exit_mark_corroboration as emc
 from packages.quantum.services import paper_exit_evaluator as pxe

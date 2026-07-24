@@ -23,8 +23,9 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.jobs.handlers import intraday_risk_monitor as irm
 from packages.quantum.risk.risk_envelope import check_loss_envelopes, EnvelopeConfig

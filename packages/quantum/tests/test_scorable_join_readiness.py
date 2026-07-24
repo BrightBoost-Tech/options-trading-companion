@@ -33,8 +33,9 @@ import pytest
 
 # alpaca is import-guarded exactly like test_stage_seam_spot_iv_capture (the
 # production submit branch's lazy imports resolve against these stubs).
-for _m in ("alpaca", "alpaca.trading", "alpaca.trading.requests"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum import paper_endpoints as pe  # noqa: E402
 from packages.quantum.options_scanner import (  # noqa: E402

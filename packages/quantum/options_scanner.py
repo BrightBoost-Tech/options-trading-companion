@@ -24,6 +24,7 @@ from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.quote_provenance import QuoteProvenanceRecorder
+from packages.quantum.services.td_scan_capture import ScanEnvelopeRecorder
 from packages.quantum.services.oi_enrichment import enrich_selected_legs
 from packages.quantum.analytics import option_liquidity as _option_liquidity
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
@@ -3038,6 +3039,7 @@ def scan_for_opportunities(
     portfolio_cash: float = None,
     account_tier: Optional[str] = None,
     job_run_id: Optional[str] = None,
+    regime_capture_sink: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], RejectionStats]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -3093,6 +3095,16 @@ def scan_for_opportunities(
     provenance_recorder = QuoteProvenanceRecorder(
         supabase=supabase_client,
         cycle_date=datetime.now().date(),
+    )
+
+    # ⑤ score-on-scan observer (OBSERVE-ONLY, default OFF): per-cycle recorder
+    # that captures the scorable envelope of EVERY fully-constructed candidate
+    # (emitted AND rejected) at the scan seam and writes them fail-soft in one
+    # batched flush before return. Threaded exactly like the provenance recorder
+    # (per-cycle object, no globals); disabled (flag off / no client) → every
+    # method is a no-op, so the scanner is byte-identical and adds zero latency.
+    td_scan_recorder = ScanEnvelopeRecorder.create(
+        supabase_client, cycle_date=str(datetime.now().date())
     )
 
     # Initialize services
@@ -3528,6 +3540,38 @@ def scan_for_opportunities(
                     effective_regime=effective_regime_state.value,
                     phase_exclusions_out=_phase_exclusions,
                 )
+                # Regime-V4 observe seam (default OFF): capture this symbol's V3
+                # regime inputs + the PURE get_candidates pool (before any agent
+                # override) so the observe-only V4 child can compute the
+                # counterfactual pool with sentiment/iv_rank held fixed. Keyed by
+                # symbol → idempotent across multi-strategy retries. Fail-soft:
+                # capture must never affect the scan. When the sink is None (flag
+                # off) this block is skipped → byte-identical. Placed BEFORE the
+                # phase-exclusion loop so it does not widen any rej_stats→return
+                # instrumentation window.
+                if regime_capture_sink is not None:
+                    try:
+                        _rv4_earn = earnings_map.get(symbol)
+                        _rv4_earn_iso = (
+                            _rv4_earn.isoformat()
+                            if hasattr(_rv4_earn, "isoformat")
+                            else (str(_rv4_earn) if _rv4_earn else None)
+                        )
+                        regime_capture_sink.setdefault("per_symbol", {})[symbol] = {
+                            "symbol": symbol,
+                            "v3_symbol_state": symbol_snapshot.state.value,
+                            "v3_effective_regime": effective_regime_state.value,
+                            "sentiment": trend,
+                            "current_price": current_price,
+                            "iv_rank": iv_rank,
+                            "v3_selection": [
+                                c.get("strategy") for c in candidates
+                            ],
+                            "earnings_date": _rv4_earn_iso,
+                            "decision_event_id": None,
+                        }
+                    except Exception:
+                        pass  # capture must never affect the scan
                 for _excl in _phase_exclusions:
                     # Typed + attributed: the phase gate KNOWS which
                     # strategy it excluded, so the rejection row carries
@@ -4051,6 +4095,27 @@ def scan_for_opportunities(
                     strategy=st_type
                 )
                 total_ev = ev_obj.expected_value
+
+            # ⑤ score-on-scan capture (OBSERVE-ONLY, additive, fail-soft): the
+            # earliest seam a candidate has exact legs + everything both models
+            # need (delta on the leg, IV threaded from the source chain, spot,
+            # EV) — and it PRECEDES every EV/cost/spread/earnings/lifecycle/agent
+            # gate, so REJECTED credit spreads/condors are captured too. record()
+            # NEVER mutates legs/the candidate and makes NO DB call here (a single
+            # batched flush at the scan boundary), so the scanner's output is
+            # byte-identical whether capture is on or off. Default OFF.
+            td_scan_recorder.record(
+                symbol=symbol,
+                strategy=suggestion["strategy"],
+                strategy_key=strategy_key,
+                legs=legs,
+                chain=chain,
+                current_price=current_price,
+                total_ev=total_ev,
+                net_premium=abs(total_cost),
+                premium_direction=("debit" if total_cost > 0 else "credit"),
+                snapshot_item=snapshot_item,
+            )
 
             # Risk Primitives (New Helper)
             primitives = _compute_risk_primitives_usd(legs, total_cost, current_price)
@@ -4884,5 +4949,17 @@ def scan_for_opportunities(
             logger.info("rejection_persist final-flush: %s", _rej_flush)
     except Exception:
         logger.warning("rejection_persist final-flush failed", exc_info=True)
+
+    # ⑤ score-on-scan capture flush (OBSERVE-ONLY): resolve emitted vs the final
+    # candidates set and write the batched envelopes fail-soft (typed no-op while
+    # the migration is unapplied). Never breaks the scan return.
+    try:
+        _td_flush = td_scan_recorder.flush(candidates)
+        if _td_flush.get("write_failures") or _td_flush.get("status") == "write_failed":
+            logger.warning("td_scan_capture flush: %s", _td_flush)
+        elif td_scan_recorder.enabled:
+            logger.info("td_scan_capture flush: %s", _td_flush)
+    except Exception:
+        logger.warning("td_scan_capture flush failed", exc_info=True)
 
     return candidates, rejection_stats

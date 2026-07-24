@@ -64,19 +64,30 @@ def td_scan_observe_enabled() -> bool:
 SHARED_CAPTURE_FLAG = "SCAN_CANDIDATE_CAPTURE_ENABLED"
 
 
+def scan_candidate_capture_flag_enabled() -> bool:
+    """Effective value of the stable capture opt-in ``SCAN_CANDIDATE_CAPTURE_ENABLED``
+    IN ISOLATION (behavioral opt-in, lenient truthy 1/true/yes/on). This is the
+    flag's OWN parser — the value the ``[FLAG_ECHO]`` block reports for this env
+    var (anti-drift). The COMBINED capture gate ORs it with the legacy td-observe
+    flag (see ``scan_candidate_capture_enabled``)."""
+    raw = os.getenv(SHARED_CAPTURE_FLAG)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def scan_candidate_capture_enabled() -> bool:
-    """Effective value of the SHARED scan-candidate capture gate. Capture is ON if
-    the stable capture opt-in ``SCAN_CANDIDATE_CAPTURE_ENABLED`` OR the legacy
-    ``TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED`` is truthy (1/true/yes/on).
+    """Effective value of the SHARED (COMBINED) scan-candidate capture gate.
+    Capture is ON if the stable capture opt-in ``SCAN_CANDIDATE_CAPTURE_ENABLED``
+    OR the legacy ``TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED`` is truthy.
 
     This DECOUPLES the capture surface from the td SCORING flag: the fleet's
     universe-v2 readiness requires THIS gate, not the scoring flag. Backward-
     compatible — with only the td flag set (prod today) the result is byte-
-    identical to ``td_scan_observe_enabled()``."""
-    raw = os.getenv(SHARED_CAPTURE_FLAG)
-    if raw is not None and raw.strip().lower() in ("1", "true", "yes", "on"):
-        return True
-    return td_scan_observe_enabled()
+    identical to ``td_scan_observe_enabled()``. Both inputs are echoed at startup
+    (SCAN_CANDIDATE_CAPTURE_ENABLED + TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED),
+    so the combined gate is a trivial OR of two echoed booleans."""
+    return scan_candidate_capture_flag_enabled() or td_scan_observe_enabled()
 
 
 # PostgREST/Postgres "table absent" signatures (the designed state until the

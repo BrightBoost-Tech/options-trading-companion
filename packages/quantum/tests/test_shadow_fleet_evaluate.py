@@ -771,6 +771,54 @@ def test_writer_records_rejected_candidate_with_null_suggestion_id():
     assert p["disposition"] == "data_unavailable"
 
 
+def test_writer_skips_decision_with_no_identity():
+    # Defense in depth: a decision with an empty fingerprint AND no suggestion id
+    # is SKIPPED (typed counter), never inserted as an empty-string/identity-less
+    # row. The universe already filters falsy fingerprints — this is the writer's
+    # independent guard.
+    client = _DupClient()
+    writer = FleetPolicyEvidenceWriter(
+        client,
+        fleet_id=FLEET_ID,
+        fleet_epoch="small_tier_v1",
+        shadow_micro_account_id="m1",
+        policy_registration_id="pol_1",
+        source_decision_id=DECISION,
+        source_job_run_id=JOB_RUN,
+        user_id=USER,
+    )
+    writer.begin_run()
+    dec = PolicyDecision("", None, "data_unavailable", ["routing_score_unavailable"], 1, None, {})
+    assert writer.record_decision(dec) is False
+    c = writer.counters_dict()
+    assert c["skipped_no_identity"] == 1
+    assert c["decisions_written"] == 0
+    assert client.decision_inserts == 0
+
+
+def test_writer_blank_fingerprint_written_as_null_when_emitted():
+    # An emitted candidate keeps its suggestion identity even if the fingerprint
+    # arrives blank: the fingerprint is normalized to NULL (never ""), the
+    # suggestion UUID carries the row, and it is NOT skipped.
+    client = _DupClient()
+    writer = FleetPolicyEvidenceWriter(
+        client,
+        fleet_id=FLEET_ID,
+        fleet_epoch="small_tier_v1",
+        shadow_micro_account_id="m1",
+        policy_registration_id="pol_1",
+        source_decision_id=DECISION,
+        source_job_run_id=JOB_RUN,
+        user_id=USER,
+    )
+    writer.begin_run()
+    dec = PolicyDecision("  ", "sug-x", "selected", [], 1, 80.0, {})
+    assert writer.record_decision(dec) is True
+    p = client.last_decision_payload
+    assert p["candidate_fingerprint"] is None  # blank -> NULL, never ""
+    assert p["decision_event_id"] == "sug-x"
+
+
 def test_writer_table_missing_is_typed_noop():
     class _MissingTable:
         def __init__(self, name):
@@ -1034,6 +1082,30 @@ def test_v2_champion_resolve_failure_fails_closed():
             champion_resolver=boom_resolver,
             envelope_loader=lambda c, d: [_envrow("SPY", True)],
         )
+
+
+def test_v2_unsafe_champion_token_fails_closed():
+    # Controlled-vocab guard: a champion carrying a PostgREST-filter metacharacter
+    # (comma/dot/space) fails closed (UniverseUnavailable), never interpolated
+    # into the or_ cohort filter.
+    for bad in ("aggressive,neutral", "agg.regime", "drop me", "a)b"):
+        with pytest.raises(UniverseUnavailable):
+            build_candidate_universe(
+                object(), DECISION, USER,
+                champion_resolver=lambda c, u, _b=bad: _b,
+                envelope_loader=lambda c, d: [_envrow("SPY", True)],
+                enrichment_loader=lambda c, d, ch: {},
+            )
+
+
+def test_v2_normal_champion_tokens_pass_guard():
+    # The controlled vocabulary passes the guard unchanged.
+    for good in ("aggressive", "neutral", "conservative", "cohort_v2", "anchor-1"):
+        universe = build_candidate_universe(
+            _TwoTableClient([_envrow("SPY", True)], [_sugrow("SPY", 70.0, cohort=good)]),
+            DECISION, USER, champion_resolver=lambda c, u, _g=good: _g,
+        )
+        assert len(universe) == 1
 
 
 def test_v2_empty_envelope_set_is_honest_empty_not_error():

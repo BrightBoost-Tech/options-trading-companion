@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from packages.quantum.brokers.execution_router import SHADOW_ONLY_ROUTING
@@ -368,6 +369,22 @@ class UniverseUnavailable(RuntimeError):
     """A failed universe read — never an empty universe (E8-3 []-sentinel)."""
 
 
+# Champion cohort names are CONTROLLED VOCABULARY (policy_lab cohort names:
+# aggressive / neutral / conservative, or a registered cohort name). This token
+# is interpolated into the PostgREST ``or_`` cohort filter, so it is validated
+# against a safe character class before use — a token carrying a comma / dot /
+# space (PostgREST-filter metacharacters) fails closed rather than injecting the
+# filter. Defense in depth: controlled vocabulary never trips this in practice.
+_SAFE_COHORT_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+
+def _guard_champion_token(champion: str) -> None:
+    if champion and not _SAFE_COHORT_RE.match(champion):
+        raise UniverseUnavailable(
+            f"unsafe champion cohort token (not [A-Za-z0-9_-]): {champion!r}"
+        )
+
+
 def _default_champion_resolver(client: Any, user_id: str) -> str:
     from packages.quantum.policy_lab.champion import get_current_champion
 
@@ -426,7 +443,10 @@ def _load_emitted_enrichment(
     ENRICHMENT, not the universe: it supplies the real ``sizing_metadata.score``
     (0-100 routing quantity) and ``max_loss_total`` (canonical per-contract
     max-loss basis) that live ONLY on persisted suggestions and are genuinely
-    absent for pre-persistence rejects. Never fabricates either field."""
+    absent for pre-persistence rejects. Never fabricates either field.
+
+    ``champion`` is assumed already validated by ``_guard_champion_token`` at the
+    caller (controlled-vocabulary / PostgREST-filter-injection guard)."""
     query = (
         client.table(ENRICHMENT_TABLE)
         .select("id,decision_id,cohort_name,legs_fingerprint,sizing_metadata,order_json,ev,ev_raw")
@@ -494,8 +514,11 @@ def build_candidate_universe(
         raise UniverseUnavailable(
             f"champion resolve failed: {type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
+    _guard_champion_token(champion)  # controlled-vocab / filter-injection guard
     try:
         enrichment = enrich_loader(client, source_decision_id, champion)
+    except UniverseUnavailable:
+        raise
     except Exception as exc:
         raise UniverseUnavailable(
             f"enrichment read failed: {type(exc).__name__}: {str(exc)[:200]}"
@@ -601,6 +624,7 @@ def build_trade_suggestions_universe(
         raise UniverseUnavailable(
             f"champion resolve failed: {type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
+    _guard_champion_token(champion)  # controlled-vocab / filter-injection guard
 
     try:
         query = (
@@ -931,6 +955,7 @@ class FleetPolicyEvidenceWriter:
             "write_failures": 0,
             "table_missing_noops": 0,
             "duplicate_acks": 0,
+            "skipped_no_identity": 0,
         }
 
     def _execute(self, table: str, operation, *, allow_unique: bool = False) -> Optional[Any]:
@@ -1002,8 +1027,21 @@ class FleetPolicyEvidenceWriter:
         # emitted candidate matched to a persisted row — NULL for a pre-persistence
         # reject (never fabricated). decision_event_id == candidate_suggestion_id
         # (both the suggestion UUID or both NULL) to satisfy the table CHECK.
-        fingerprint = str(decision.candidate_fingerprint or "")
+        fingerprint = str(decision.candidate_fingerprint or "").strip() or None
         suggestion_id = decision.suggestion_id
+        # Defense in depth (the universe already filters falsy fingerprints): a
+        # candidate reaching the writer with NO durable identity — empty fingerprint
+        # AND no suggestion UUID — is SKIPPED with a typed counter, never written as
+        # an empty-string/identity-less row (the DB identity-present CHECK would
+        # reject it anyway). Fail-loud: the skip surfaces as this policy's error.
+        if not fingerprint and not suggestion_id:
+            self._counters["skipped_no_identity"] += 1
+            logger.error(
+                "fleet decision skipped: no candidate identity "
+                "(fingerprint+suggestion both empty) policy=%s",
+                self.policy_registration_id,
+            )
+            return False
         payload = {
             "run_id": self.run_id,
             "fleet_id": self.fleet_id,
@@ -1268,7 +1306,9 @@ def run_fleet_policy_eval(
                 )
 
         wc = writer.counters_dict()
-        writer_errors = int(wc.get("write_failures") or 0)
+        # A no-identity skip is a defensive anomaly — count it as an error so the
+        # run is partial and it surfaces (never a silent drop).
+        writer_errors = int(wc.get("write_failures") or 0) + int(wc.get("skipped_no_identity") or 0)
         table_missing = int(wc.get("table_missing_noops") or 0)
         status = "partial" if (writer_errors or table_missing) else "succeeded"
         writer.finish_run(

@@ -4,6 +4,50 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-24 — FOUR-GAP REMEDIATION (fable + opus; post-close serialized; C2 cadence lane EXCLUDED/OPEN) · status:shipped
+
+Full record: `docs/review/four-gap-remediation-results-2026-07-24.md`. Four merges
+B→D→C→A, final code main `91c70022` — #1370 `291275b7` **observer parent-status isolation**
+(td+fleet observer failures → `result.research_observers` {td_scan, shadow_fleet} +
+`counts.research_observer_failures`, NEVER `counts.errors`; flagless; deduped
+`research_observer_enqueue_failed` alert; new generic `scheme://user:pass@` masker pattern +
+redact-before-truncate; the import lock caught the observer key and it was renamed to `td_scan` —
+the guard works, cite don't re-find) · #1372 `b79c5e02` **alpaca sys.modules stub leak KILLED**
+(stubs were shadowing the real installed alpaca-py; `ensure_alpaca()` + ~70 AST-normalized shims +
+16-test subprocess order-matrix harness + AST tripwire; base-vs-head exactly +16/+16, zero skip
+delta; REMAINING: 3 supabase/dotenv MagicMock leakers — test_jobs_db_jsonable / test_new_features
+/ test_outcome_logic) · #1369 `3a96ba8b` **migration-version governance** (repo truth: exactly one
+duplicate prefix `20260723160000`×3, disjoint objects, all receipted; production tracking has NO
+collision; CLI verdict BLOCKED_TOOLING_COLLISION documented; CI linter + normalized-LF sha256
+allowlist + offline audit CLI; review FAIL→fix→PASS — the CRLF-pin-vs-LF-blob defect class is now
+regression-pinned; NO backfill advisable for the three) · #1371 `91c70022` **fleet
+candidate-universe v2** (envelope-primary incl. pre-persistence rejects; suggestions
+enrichment-only; typed `data_unavailable`; legacy builder ACTIVATION-BLOCKED unwired; shared
+capture gate `scan_candidate_capture_enabled()`; identity: complete-universe n =
+COUNT(DISTINCT candidate_fingerprint), suggestion UUID = emitted-subset provenance). **Migration
+applied by exact name (NEVER REAPPLY):** `20260724010000_fleet_decisions_candidate_fingerprint_
+identity` (tracked `20260724032321`, receipt `b3e9bc3f`, sha `01f05e1d…`). **v2 NO-WRITE replay =
+HONEST-EMPTY and that is the PASS** (50/50 hashes, 0 candidates on the pre-capture tape while
+champion suggestions existed — live proof of the anti-champion-fallback stop; fingerprint-join
+falsifier INCONCLUSIVE until Friday's first envelopes). Packets swept:
+`applied-untracked-operator-packet-2026-07-24.md` (149 files: 59 tracked / 87 applied-untracked /
+2 not-applied / 1 unknown; fingerprint `d39ef69f…`; 6-row name-only backfill NOT EXECUTED,
+operator-gated; surprise: `20260721011000_revoke_fleet_receipt_maintain` effectively applied per
+ACL) · `td-scan-v2-attribution-audit-2026-07-24.md` (Option A read-side join ≈0.5-1d, no schema;
+join on (cycle_date, fp); provenance leg_fingerprint is a DIFFERENT hash). PR triage: #1244
+closed → canonical #1213; all other pairs verified non-exact and kept. Zero env changes; zero
+broker writes; fleet untouched (pending_legacy_terminal / 50 inactive / 0 bound / 0 receipts).
+PENDING VERIFICATIONS (Friday 07-24 16:00Z + nightly):
+- parent `succeeded` + `research_observers` block present; observer failures (if any) isolated
+  from `counts.errors`; no observer-caused `job_succeeded_with_errors`.
+- first td_scan_envelopes rows → grade the fingerprint-join falsifier (envelope fp ==
+  legs_fingerprint on emitted subset).
+- fleet typed `fleet_inactive` no-op, 0 writes · rv4 rows · single-leg child first run ·
+  rejection-persistence counters clean · blocked-vs-error taxonomy · 05:00Z nightly.
+- Operator: fix the local `.env` Supabase host homoglyph (`etd1la…`→`etdlla…`) · FLAG_ECHO visual
+  confirm (2 observe flags + new `SCAN_CANDIDATE_CAPTURE_ENABLED` line) · APPLIED_UNTRACKED
+  backfill decision (packet in docs/review/).
+
 ## 2026-07-23/24 — COUNTERFACTUAL RESEARCH + FLEET EVALUATOR (fable + opus; post-close serialized) · status:shipped
 
 Full record: `docs/review/counterfactual-research-and-fleet-evaluator-results-2026-07-23.md`.

@@ -718,6 +718,39 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   view worker deployment `345ae118`. New known-liar for §8: PG-suite bootstraps
   MUST mirror production shape (a bootstrap-added `updated_at` masked a phantom
   column ref until the adversarial review caught it pre-apply).
+  **07-24 FOUR-GAP RUN** (`docs/review/four-gap-remediation-results-2026-07-24.md`;
+  C2 cadence lane EXCLUDED — still open): four merges B→D→C→A, final
+  `91c70022` — #1370 **observer parent-status isolation** (td+fleet observer
+  failures → `result.research_observers` {`td_scan`,`shadow_fleet`} +
+  `counts.research_observer_failures`, NEVER `counts.errors` — an observer
+  failure can no longer mark a clean live scan PARTIAL or trip A4; flagless;
+  generic `scheme://user:pass@` masker + redact-before-truncate) · #1372
+  **alpaca sys.modules stub-leak class CLOSED** (stubs were shadowing the
+  REAL installed alpaca-py; `ensure_alpaca()` + 70 shims normalized +
+  subprocess order-matrix harness; 3 supabase/dotenv leakers remain,
+  backlogged) · #1369 **migration-version governance** (CI linter rejects new
+  duplicate 14-digit prefixes; normalized-LF sha256 allowlist pins the one
+  legacy collision `20260723160000`×3; production tracking has NO collision —
+  identity = apply-version + exact name; local CLI = BLOCKED_TOOLING_COLLISION
+  documented; hash pins are CRLF→LF-normalized — the CRLF-pin defect class is
+  regression-pinned) · #1371 **fleet candidate-universe v2** (envelope-primary
+  from `td_scan_envelopes` incl. pre-persistence rejects; `trade_suggestions`
+  is enrichment-only; typed `data_unavailable`; legacy suggestion-universe
+  builder ACTIVATION-BLOCKED/unwired; shared gate
+  `scan_candidate_capture_enabled()` = `SCAN_CANDIDATE_CAPTURE_ENABLED` OR
+  td-observe, echoed; **complete-universe n = COUNT(DISTINCT
+  candidate_fingerprint)**, suggestion UUID = emitted-subset provenance —
+  supersedes the small-tier contract's suggestion-UUID identity for the
+  complete universe). Migration applied by exact name (NEVER REAPPLY):
+  `20260724010000_fleet_decisions_candidate_fingerprint_identity` (tracked
+  `20260724032321`, receipt `b3e9bc3f`). **v2 NO-WRITE replay = HONEST-EMPTY
+  and that is the PASS** — pre-capture tape, champion suggestions existed,
+  v2 returned typed empty (anti-champion-fallback proven live);
+  fingerprint-join falsifier INCONCLUSIVE until Friday's first envelopes.
+  Packets in docs/review/: applied-untracked (149 files; 87 applied-untracked;
+  backfill NOT EXECUTED) · td-scan-v2 attribution (Option A join, no schema).
+  ⚠ local `.env` Supabase host is a homoglyph typo (digit-1 vs letter-l).
+  Zero env changes; zero broker writes; fleet untouched.
   Draft-PR tracking lives
   in docs/backlog.md + audit/ledger.md — this registry lists merged/deployed
   facts.
@@ -1128,10 +1161,15 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
   rewrite, or pool their fills/P&L with the small-tier epoch. Activation
   requires zero legacy open positions, zero legacy working orders, and one
   explicit timezone-aware effective timestamp at the durable transaction.
-- Evaluate each natural candidate once. Every account evaluation carries the
-  source suggestion UUID as immutable `decision_event_id`. Statistical n is
-  `COUNT(DISTINCT decision_event_id)`, never evaluation/position/account-row
-  count; cross-policy analysis is paired on that identity.
+- Evaluate each natural candidate once. **Identity (v2, since #1371 07-24):**
+  the immutable `candidate_fingerprint` (compute_legs_fingerprint) is the
+  durable candidate identity across the COMPLETE universe (emitted AND
+  rejected-before-persistence); statistical n over the complete universe is
+  `COUNT(DISTINCT candidate_fingerprint)`. The source suggestion UUID
+  (`decision_event_id`) is retained as provenance for the EMITTED subset only
+  (`COUNT(DISTINCT decision_event_id)` = emitted-subset n; NULL for a
+  pre-persistence reject, never fabricated). Never evaluation/position/
+  account-row count; cross-policy analysis is paired on the fingerprint.
 - A schema migration, merged contract, or operator design approval is not fleet
   activation. Migration application, policy registration, clean-boundary
   runtime proof, row creation, and any runtime caller are separate gates.
@@ -1158,7 +1196,20 @@ Pointers: `docs/backlog.md` and `audit/ledger.md`.
 
 ---
 
-## Current overnight standing (2026-07-16; updated through the 07-23/24 counterfactual-research run)
+## Current overnight standing (2026-07-16; updated through the 07-24 four-gap run)
+
+- **07-24 (four-gap):** live at `91c70022` — research-observer failures are now
+  ISOLATED from parent scan truth (never `counts.errors`; durable
+  `research_observers` block, always present); the alpaca test-stub leak class
+  is closed; a migration-version linter guards new DDL (unique 14-digit prefix
+  required — the one legacy collision is allowlisted by normalized-LF hash);
+  the fleet evaluator consumes the COMPLETE immutable scan-candidate universe
+  (envelope-primary, rejects included, typed `data_unavailable`, champion
+  fallback structurally blocked + replay-proven HONEST-EMPTY). **The C2 fleet
+  cadence lane (intraday triggers + settle wiring) was EXCLUDED and remains
+  OPEN.** Friday 16:00Z grades: research_observers block, first envelopes +
+  fingerprint join, fleet inactive no-op, single-leg first child, rejection
+  counters, blocked-vs-error taxonomy.
 
 - **07-23/24 (counterfactual research):** six merges live at `8de051f0` — the
   **terminal-distribution score-on-scan observer** and the **Regime-V4 shadow

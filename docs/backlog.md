@@ -527,7 +527,50 @@ covers the exact behavior). **KEEP OPEN until #1238/#1239 merge+deploy.**
   fleet ACTIVATION gate (legacy-terminal attestation, 6 stale 04-09 rows) ·
   runtime falsifiers per ledger.
 
-## 2026-07-24 — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+## 2026-07-24 (post four-gap) — POST-MERGE STANDING (AUTHORITATIVE; supersedes all older standing blocks)
+
+Action surface after the four-gap remediation run (final code main `91c70022`; shipped items in
+the ledger 07-24 entry; full record `docs/review/four-gap-remediation-results-2026-07-24.md`).
+Ranked queue:
+
+**BUILD:**
+- **C2 lifecycle cadence lane — STILL OPEN (explicitly EXCLUDED from the four-gap run, not
+  completed):** fleet intraday stop/TP/DTE trigger management on corroborated UPL +
+  `settle_expired_fleet_positions` cadence wiring (expiry-only v1 shipped 07-23).
+- td-scan v2 per-gate attribution, Option A (read-side scorer join; ~0.5-1 day; no scanner or
+  schema change; audit in `docs/review/td-scan-v2-attribution-audit-2026-07-24.md`) — build
+  AFTER Friday's first natural envelopes; Option B (leg-exact within-scanner rejects) additive
+  after that.
+- Test-infra follow-up: the 3 remaining non-alpaca MagicMock module leakers
+  (test_jobs_db_jsonable / test_new_features / test_outcome_logic — supabase/dotenv stubs,
+  module-level, non-restoring). The ALPACA leak class is CLOSED (#1372).
+- Cosmetic: dead `import sys`/`import types` in ~62 normalized test files (sweep opportunistically).
+
+**OWNER DECISION:**
+- Fleet activation (universe v2 live; evaluator dormant; still receipt- + owner-token-gated).
+- APPLIED_UNTRACKED tracking backfill — packet now IN-REPO at
+  `docs/review/applied-untracked-operator-packet-2026-07-24.md` (6-row name-only INSERT, NOT
+  EXECUTED; fingerprint `d39ef69f…`).
+- Fix the local `.env` Supabase host homoglyph (`etd1la…` digit-1 → `etdlla…` letter-l; DNS-dead
+  as-is).
+- Quant Agents enable · OI floor · taper enforcement · TCM promotion · greek caps ·
+  risk-basis/bucket enforcement · E19 execution · F-REDATE correction · v4-ledger/nested-regime/
+  live_approval_queue 0-row surfaces.
+
+**NATURAL EVIDENCE (Friday 07-24 16:00Z + nightly):** parent scan `succeeded` +
+`research_observers` block ({td_scan, shadow_fleet}; failures isolated from counts.errors; no
+observer-caused job_succeeded_with_errors) · first td_scan_envelopes rows → grade the
+fingerprint-join falsifier · regime-V4 comparison rows · fleet `fleet_inactive` typed no-op ·
+single-leg child first run · rejection-persistence counters · blocked-vs-error taxonomy · the
+05:00Z nightly · operator FLAG_ECHO visual confirm (2 observe flags + the new
+`SCAN_CANDIDATE_CAPTURE_ENABLED` line, current worker deployment).
+
+**RETIRE/REMOVE CANDIDATE:** the dead `REGIME_V4_ENABLED` no-op flag (superseded by
+`REGIME_V4_OBSERVE_ENABLED`; V4 wiring-gate decision owner-gated) · struck-through: E1/E2/E3
+carry-forwards (confirmed shipped 07-20) · the alpaca sys.modules stub-leak item (CLOSED,
+#1372).
+
+## 2026-07-24 — POST-MERGE STANDING (superseded by the post-four-gap block above; retained as history)
 
 Action surface after the counterfactual-research/fleet-evaluator sprint (final code main
 `8de051f0`; shipped items in the ledger 07-23/24 entry). Ranked queue:
@@ -537,7 +580,7 @@ Action surface after the counterfactual-research/fleet-evaluator sprint (final c
   `settle_expired_fleet_positions` cadence wiring (expiry-only v1 shipped).
 - Test-infra: fix the order-sensitive alpaca `sys.modules` stub leak
   (`test_alpaca_authoritative_equity.py` + siblings — no teardown; any import-order change can
-  re-trigger; E4's red merge was this).
+  re-trigger; E4's red merge was this). [CLOSED 07-24 by #1372]
 - td-scan v2 (optional): per-gate reject attribution (v1 = `unattributed_post_ev`, honest).
 
 **OWNER DECISION:**

@@ -416,6 +416,61 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             "error": str(td_err)[:200],
                         }
                         notes.append(f"td-scan-observe enqueue error: {td_err}")
+
+                    # Recurring independent shadow-fleet policy evaluator (C1).
+                    # Sibling of the single-leg seam: a no-op while the fleet is
+                    # not `active` (returns fleet_inactive before any write).
+                    # Only a scheduler-origin parent with a complete, committed
+                    # decision tape may enqueue a child.
+                    try:
+                        from packages.quantum.services.shadow_fleet_evaluate import (
+                            maybe_enqueue_fleet_policy_eval,
+                        )
+
+                        origin_blob = payload.get("origin")
+                        parent_origin = (
+                            origin_blob.get("origin")
+                            if isinstance(origin_blob, dict)
+                            else None
+                        )
+                        _fleet_enq = maybe_enqueue_fleet_policy_eval(
+                            client,
+                            user_id=uid,
+                            source_job_run_id=payload.get("_job_run_id"),
+                            source_decision_id=source_decision_id,
+                            source_code_sha=source_code_sha,
+                            as_of=source_as_of,
+                            parent_origin=parent_origin,
+                        )
+                        cycle_result = cycle_result or {}
+                        cycle_result["fleet_policy_eval_enqueue"] = _fleet_enq
+                        _fleet_errors = int(_fleet_enq.get("errors") or 0)
+                        if _fleet_errors:
+                            _flc = cycle_result.setdefault("counts", {})
+                            _flc["errors"] = (
+                                int(_flc.get("errors") or 0) + _fleet_errors
+                            )
+                            notes.append(
+                                f"fleet policy-eval enqueue DEGRADED for "
+                                f"{uid[:8]}: {_fleet_enq.get('status')}"
+                            )
+                        elif _fleet_enq.get("enqueued"):
+                            notes.append(
+                                f"fleet policy-eval child enqueued for "
+                                f"{uid[:8]}: {_fleet_enq.get('job_run_id')}"
+                            )
+                    except Exception as fleet_err:
+                        cycle_result = cycle_result or {}
+                        _flc = cycle_result.setdefault("counts", {})
+                        _flc["errors"] = int(_flc.get("errors") or 0) + 1
+                        cycle_result["fleet_policy_eval_enqueue"] = {
+                            "status": "enqueue_seam_crashed",
+                            "enqueued": False,
+                            "errors": 1,
+                            "error_class": type(fleet_err).__name__,
+                            "error": str(fleet_err)[:200],
+                        }
+                        notes.append(f"fleet policy-eval enqueue error: {fleet_err}")
                     # Capture cycle result for observability
                     if cycle_result:
                         cycle_results.append({"user_id": uid[:8], **cycle_result})

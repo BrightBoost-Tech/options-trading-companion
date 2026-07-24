@@ -25,6 +25,12 @@ from packages.quantum.jobs.handlers.utils import (
 )
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.db import _to_jsonable
+from packages.quantum.services.research_observer_status import (
+    OBSERVER_TERMINAL_DISTRIBUTION,
+    OBSERVER_SHADOW_FLEET,
+    new_research_observers_block,
+    record_observer_seam,
+)
 
 JOB_NAME = "suggestions_open"
 
@@ -139,6 +145,10 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             synced = 0
             skipped = 0
             cycle_results = []  # Capture budget info per user
+            # Research-observer isolation (Lane B): the td + fleet enqueue seams'
+            # failures accumulate HERE, never into the live counts.errors channel.
+            research_observers = new_research_observers_block()
+            research_observer_failures = 0
 
             for uid in active_users:
                 try:
@@ -367,8 +377,16 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     # the frozen baseline vs the lognormal challenger. Gated on
                     # the flag + a complete scheduler-origin decision tape (whose
                     # decision_id == the cycle_id the capture stamped). A no-op
-                    # while the flag is off / no tape exists; never touches parent
-                    # counts unless it errors.
+                    # while the flag is off / no tape exists.
+                    #
+                    # RESEARCH-OBSERVER ISOLATION (Lane B, 2026-07-23): a readiness/
+                    # enqueue failure here is a RESEARCH failure, NOT a live-decision
+                    # failure — the scan already produced its live suggestions. It
+                    # stays durable (the enqueue dict + the research_observers block),
+                    # increments counts.research_observer_failures, and emits a typed
+                    # deduped research alert — but it NEVER touches counts.errors, so
+                    # the parent status/ok is unchanged and the A4 detector is not
+                    # tripped on research noise.
                     try:
                         from packages.quantum.services.td_scan_observe import (
                             maybe_enqueue_td_scan_observe,
@@ -389,26 +407,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             as_of=source_as_of,
                             parent_origin=parent_origin,
                         )
-                        cycle_result = cycle_result or {}
-                        cycle_result["td_scan_observe_enqueue"] = _td_enq
-                        _td_errors = int(_td_enq.get("errors") or 0)
-                        if _td_errors:
-                            _tdc = cycle_result.setdefault("counts", {})
-                            _tdc["errors"] = int(_tdc.get("errors") or 0) + _td_errors
-                            notes.append(
-                                f"td-scan-observe enqueue DEGRADED for "
-                                f"{uid[:8]}: {_td_enq.get('status')}"
-                            )
-                        elif _td_enq.get("enqueued"):
-                            notes.append(
-                                f"td-scan-observe child enqueued for "
-                                f"{uid[:8]}: {_td_enq.get('job_run_id')}"
-                            )
                     except Exception as td_err:
-                        cycle_result = cycle_result or {}
-                        _tdc = cycle_result.setdefault("counts", {})
-                        _tdc["errors"] = int(_tdc.get("errors") or 0) + 1
-                        cycle_result["td_scan_observe_enqueue"] = {
+                        _td_enq = {
                             "status": "enqueue_seam_crashed",
                             "enqueued": False,
                             "errors": 1,
@@ -416,12 +416,30 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             "error": str(td_err)[:200],
                         }
                         notes.append(f"td-scan-observe enqueue error: {td_err}")
+                    cycle_result = cycle_result or {}
+                    cycle_result["td_scan_observe_enqueue"] = _td_enq
+                    research_observer_failures += record_observer_seam(
+                        client=client,
+                        observer_name=OBSERVER_TERMINAL_DISTRIBUTION,
+                        enq_result=_td_enq,
+                        research_observers=research_observers,
+                        source_job_run_id=payload.get("_job_run_id"),
+                        source_code_sha=source_code_sha,
+                        user_id=uid,
+                        notes=notes,
+                    )
 
                     # Recurring independent shadow-fleet policy evaluator (C1).
                     # Sibling of the single-leg seam: a no-op while the fleet is
                     # not `active` (returns fleet_inactive before any write).
                     # Only a scheduler-origin parent with a complete, committed
                     # decision tape may enqueue a child.
+                    #
+                    # RESEARCH-OBSERVER ISOLATION (Lane B, 2026-07-23): same
+                    # contract as the td seam above — a fleet readiness/enqueue
+                    # failure is research truth (durable + counts.research_observer_
+                    # failures + typed deduped alert), NEVER a live counts.errors
+                    # increment, so the parent live scan status/ok is untouched.
                     try:
                         from packages.quantum.services.shadow_fleet_evaluate import (
                             maybe_enqueue_fleet_policy_eval,
@@ -442,28 +460,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             as_of=source_as_of,
                             parent_origin=parent_origin,
                         )
-                        cycle_result = cycle_result or {}
-                        cycle_result["fleet_policy_eval_enqueue"] = _fleet_enq
-                        _fleet_errors = int(_fleet_enq.get("errors") or 0)
-                        if _fleet_errors:
-                            _flc = cycle_result.setdefault("counts", {})
-                            _flc["errors"] = (
-                                int(_flc.get("errors") or 0) + _fleet_errors
-                            )
-                            notes.append(
-                                f"fleet policy-eval enqueue DEGRADED for "
-                                f"{uid[:8]}: {_fleet_enq.get('status')}"
-                            )
-                        elif _fleet_enq.get("enqueued"):
-                            notes.append(
-                                f"fleet policy-eval child enqueued for "
-                                f"{uid[:8]}: {_fleet_enq.get('job_run_id')}"
-                            )
                     except Exception as fleet_err:
-                        cycle_result = cycle_result or {}
-                        _flc = cycle_result.setdefault("counts", {})
-                        _flc["errors"] = int(_flc.get("errors") or 0) + 1
-                        cycle_result["fleet_policy_eval_enqueue"] = {
+                        _fleet_enq = {
                             "status": "enqueue_seam_crashed",
                             "enqueued": False,
                             "errors": 1,
@@ -471,6 +469,18 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             "error": str(fleet_err)[:200],
                         }
                         notes.append(f"fleet policy-eval enqueue error: {fleet_err}")
+                    cycle_result = cycle_result or {}
+                    cycle_result["fleet_policy_eval_enqueue"] = _fleet_enq
+                    research_observer_failures += record_observer_seam(
+                        client=client,
+                        observer_name=OBSERVER_SHADOW_FLEET,
+                        enq_result=_fleet_enq,
+                        research_observers=research_observers,
+                        source_job_run_id=payload.get("_job_run_id"),
+                        source_code_sha=source_code_sha,
+                        user_id=uid,
+                        notes=notes,
+                    )
                     # Capture cycle result for observability
                     if cycle_result:
                         cycle_results.append({"user_id": uid[:8], **cycle_result})
@@ -524,9 +534,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             f"failed (non-fatal): {alert_err}"
                         )
 
-            return processed, failed, synced, skipped, cycle_results
+            return (processed, failed, synced, skipped, cycle_results,
+                    research_observers, research_observer_failures)
 
-        processed, failed, synced, skipped, cycle_results = run_async(process_users())
+        (processed, failed, synced, skipped, cycle_results,
+         research_observers, research_observer_failures) = run_async(process_users())
         counts["processed"] = processed
         counts["failed"] = failed
         counts["synced"] = synced
@@ -544,6 +556,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         counts["errors"] = _persist_error_rollup(cycle_results)
         counts["errors"] += failed
 
+        # Research-observer isolation (Lane B, 2026-07-23): the td + fleet
+        # OBSERVER enqueue failures live in their OWN channel — never in
+        # counts.errors — so a research hiccup cannot mark the live scan PARTIAL
+        # nor trip the A4 detector (both read counts.errors). This counter is
+        # DELIBERATELY not consumed by the runner's _classify_handler_return.
+        counts["research_observer_failures"] = int(research_observer_failures or 0)
+
         timing_ms = (time.time() - start_time) * 1000
 
         # Ensure all values are JSON-serializable (datetime -> isoformat, etc.)
@@ -554,6 +573,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "strategy_name": strategy_name,
             "notes": notes[:20],  # Limit notes to avoid huge payloads
             "cycle_results": cycle_results[:10],  # Budget/reason info per user
+            # Durable per-observer research truth (status/errors/job_run_id),
+            # separate from the live-decision result.
+            "research_observers": research_observers,
         })
 
     except ValueError as e:

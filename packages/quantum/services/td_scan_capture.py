@@ -49,11 +49,45 @@ FLAG_NAME = "TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED"
 def td_scan_observe_enabled() -> bool:
     """Effective value of the observe-only flag. Behavioral opt-in: unset/empty
     → OFF; only an explicit truthy (1/true/yes/on) enables. This is the REAL
-    parser the FLAG_ECHO reads (anti-drift) and the capture/enqueue gate."""
+    parser the FLAG_ECHO reads (anti-drift) and the td-SCORING enqueue gate."""
     raw = os.getenv(FLAG_NAME)
     if raw is None:
         return False
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Shared candidate-CAPTURE gate name (behavioral opt-in, lenient truthy). Stable,
+# consumer-agnostic: it turns the scan-envelope capture surface ON independent of
+# the terminal-distribution SCORING flag, so a SECOND consumer (the shadow-fleet
+# candidate-universe v2) can require the capture surface without depending on
+# td-scoring staying enabled.
+SHARED_CAPTURE_FLAG = "SCAN_CANDIDATE_CAPTURE_ENABLED"
+
+
+def scan_candidate_capture_flag_enabled() -> bool:
+    """Effective value of the stable capture opt-in ``SCAN_CANDIDATE_CAPTURE_ENABLED``
+    IN ISOLATION (behavioral opt-in, lenient truthy 1/true/yes/on). This is the
+    flag's OWN parser — the value the ``[FLAG_ECHO]`` block reports for this env
+    var (anti-drift). The COMBINED capture gate ORs it with the legacy td-observe
+    flag (see ``scan_candidate_capture_enabled``)."""
+    raw = os.getenv(SHARED_CAPTURE_FLAG)
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def scan_candidate_capture_enabled() -> bool:
+    """Effective value of the SHARED (COMBINED) scan-candidate capture gate.
+    Capture is ON if the stable capture opt-in ``SCAN_CANDIDATE_CAPTURE_ENABLED``
+    OR the legacy ``TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED`` is truthy.
+
+    This DECOUPLES the capture surface from the td SCORING flag: the fleet's
+    universe-v2 readiness requires THIS gate, not the scoring flag. Backward-
+    compatible — with only the td flag set (prod today) the result is byte-
+    identical to ``td_scan_observe_enabled()``. Both inputs are echoed at startup
+    (SCAN_CANDIDATE_CAPTURE_ENABLED + TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED),
+    so the combined gate is a trivial OR of two echoed booleans."""
+    return scan_candidate_capture_flag_enabled() or td_scan_observe_enabled()
 
 
 # PostgREST/Postgres "table absent" signatures (the designed state until the
@@ -250,7 +284,11 @@ class ScanEnvelopeRecorder:
         self.cycle_date = cycle_date
         self.cycle_id = str(cycle_id) if cycle_id else str(uuid.uuid4())
         self.user_id = user_id
-        flag_on = td_scan_observe_enabled() if enabled is None else bool(enabled)
+        # Shared capture gate: capture is ON if the stable capture opt-in OR the
+        # legacy td-observe flag is truthy. Decouples capture (fleet universe v2)
+        # from td SCORING. Byte-identical to the old gate when only the td flag
+        # is set (prod today).
+        flag_on = scan_candidate_capture_enabled() if enabled is None else bool(enabled)
         self._disabled = (supabase is None) or (not flag_on)
         self._lock = threading.Lock()
         self._envelopes: List[Dict[str, Any]] = []

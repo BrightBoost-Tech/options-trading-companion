@@ -168,9 +168,10 @@ class TestParserHonesty(unittest.TestCase):
 
 
 class TestDarkControlEntries(unittest.TestCase):
-    """The 7 dark/observe/experimental env controls added 2026-07-23 (Lane D).
-    Each echo entry must reproduce its OWN production parser's polarity, both
-    ways, and the startup collect path must remain DB-free."""
+    """The dark/observe/experimental env controls (Lane D 2026-07-23 seven + the
+    Lane A universe-v2 capture gate). Each echo entry must reproduce its OWN
+    production parser's polarity, both ways, and the startup collect path must
+    remain DB-free."""
 
     # (flag_name, module, attr, production-call args) — the EXACT parser + call
     # site the echo entry reproduces (never a second/reimplemented parse).
@@ -189,11 +190,15 @@ class TestDarkControlEntries(unittest.TestCase):
          "is_bucket_enforce_enabled", ()),
         ("FLEET_RECEIPT_PRODUCER_ENABLED", "packages.quantum.jobs.handlers.alpaca_order_sync",
          "_fleet_receipt_producer_enabled", ()),
+        # Lane A: the shared scan-candidate CAPTURE gate's OWN-flag parser
+        # (the combined gate ORs this with td_scan_observe_enabled).
+        ("SCAN_CANDIDATE_CAPTURE_ENABLED", "packages.quantum.services.td_scan_capture",
+         "scan_candidate_capture_flag_enabled", ()),
     ]
 
     TRICKY = ["", "0", "false", "no", "off", "1", "true", "yes", "on", "1 ", "TRUE"]
 
-    def test_all_seven_registered(self):
+    def test_all_registered(self):
         names = set(registry_env_names())
         for flag_name, *_ in self.NEW:
             self.assertIn(flag_name, names, f"{flag_name} not registered")
@@ -222,7 +227,7 @@ class TestDarkControlEntries(unittest.TestCase):
         strict = ["RISK_BASIS_MAX_LOSS_ENABLED", "BUCKET_CONTROL_ENFORCE",
                   "FLEET_RECEIPT_PRODUCER_ENABLED"]
         lenient = ["OI_ENRICHMENT_ENABLED", "VOL_SIGNAL_OBSERVE_ENABLED",
-                   "REGIME_FILTER_OBSERVE_ENABLED"]
+                   "REGIME_FILTER_OBSERVE_ENABLED", "SCAN_CANDIDATE_CAPTURE_ENABLED"]
         cases = []
         for f in strict:  # strict ==1: only '1' enables
             cases += [(f, "1", True), (f, "true", False), (f, "yes", False),

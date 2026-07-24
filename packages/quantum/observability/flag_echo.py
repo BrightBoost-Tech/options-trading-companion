@@ -170,9 +170,19 @@ _REGISTRY: List[FlagSpec] = [
     FlagSpec("REGIME_V4_OBSERVE_ENABLED", "packages.quantum.analytics.regime_v4_shadow_capture",
              "is_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "Audit-B regime-v4 parallel observe"),
     # ⑤ terminal-distribution score-on-scan observer (observe-only, default OFF).
-    # Gates both the scan-time envelope capture and the background scoring child.
+    # Gates the td SCORING child (and, via the shared gate below, capture).
     FlagSpec("TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED", "packages.quantum.services.td_scan_capture",
              "td_scan_observe_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL, "⑤ score-on-scan observer"),
+    # Shared scan-candidate CAPTURE gate (Lane A fleet universe v2). The fleet's
+    # complete-universe surface. DECOUPLED from the td SCORING flag above:
+    # capture-on = THIS flag OR TERMINAL_DISTRIBUTION_SCAN_OBSERVE_ENABLED (both
+    # echoed here, so the COMBINED gate the fleet readiness reads is a trivial OR
+    # of two echoed booleans). This entry reports THIS flag's OWN effective value
+    # via its real parser (scan_candidate_capture_flag_enabled — the same function
+    # the combined gate calls, so it cannot drift from the decision path).
+    FlagSpec("SCAN_CANDIDATE_CAPTURE_ENABLED", "packages.quantum.services.td_scan_capture",
+             "scan_candidate_capture_flag_enabled", BEHAVIORAL_OPT_IN, TRUTHY_FULL,
+             "Lane A fleet universe v2 capture surface"),
     # ---- Behavioral / opt-in but STRICT ==1 (the §3 footgun class) -----------
     FlagSpec("RISK_UTILIZATION_GATE_ENABLED", "packages.quantum.risk.utilization_gate",
              "is_enabled", BEHAVIORAL_OPT_IN, STRICT_EQ_1, "§4 #1044"),

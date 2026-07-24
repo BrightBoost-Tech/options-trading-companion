@@ -38,6 +38,7 @@ _MIG_DIR = _HERE.parents[4] / "supabase" / "migrations"
 _MIGRATIONS = [
     _MIG_DIR / "20260723160000_fleet_policy_decision_foundation.sql",   # C1
     _MIG_DIR / "20260723170000_fleet_shadow_internal_lifecycle.sql",    # C2
+    _MIG_DIR / "20260724010000_fleet_decisions_candidate_fingerprint_identity.sql",  # universe v2
 ]
 
 

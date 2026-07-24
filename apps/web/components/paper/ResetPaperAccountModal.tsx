@@ -1,7 +1,7 @@
 "use client"
 
-import { Loader2 } from "lucide-react"
 import React from "react"
+import { Button } from "@/components/ui/button"
 
 interface ResetPaperAccountModalProps {
   open: boolean
@@ -36,36 +36,33 @@ export function ResetPaperAccountModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       onClick={handleBackdropClick}
     >
-      <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
-        <h2 className="text-lg font-semibold text-gray-900">
+      <div className="w-full max-w-md rounded-lg bg-card p-6 shadow-xl border border-border text-foreground">
+        <h2 className="text-lg font-semibold">
           Reset Paper Account?
         </h2>
-        <p className="mt-2 text-sm text-gray-600">
+        <p className="mt-2 text-sm text-muted-foreground">
           This will erase all paper trades, positions, and history and reset
           your paper account to the default starting balance of $100,000.
           This action cannot be undone.
         </p>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={onClose}
             disabled={isResetting}
-            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="destructive"
             onClick={handleConfirm}
-            disabled={isResetting}
-            className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+            loading={isResetting}
           >
-            {isResetting && (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            )}
             {isResetting ? "Resetting..." : "Reset Account"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

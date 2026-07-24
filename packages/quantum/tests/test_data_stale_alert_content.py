@@ -30,9 +30,9 @@ import unittest
 from pathlib import Path
 
 # Stub alpaca-py per convention.
-sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-sys.modules.setdefault("alpaca.trading.requests", types.ModuleType("alpaca.trading.requests"))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.jobs.handlers.ops_health_check import (  # noqa: E402
     build_data_stale_alert_content,

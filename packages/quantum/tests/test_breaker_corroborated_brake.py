@@ -39,21 +39,9 @@ from unittest.mock import MagicMock, patch
 
 # Stub alpaca-py per the repo convention (module import pulls equity_state,
 # whose Alpaca client is imported lazily; the stub keeps collection clean).
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
 
-
-class _StubPortfolioHistoryRequest:
-    def __init__(self, period=None, timeframe=None, **_):
-        self.period = period
-        self.timeframe = timeframe
-
-
-_alpaca_trading_requests.GetPortfolioHistoryRequest = _StubPortfolioHistoryRequest
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+_ensure_alpaca()
 
 from packages.quantum.services.paper_autopilot_service import PaperAutopilotService
 from packages.quantum.services import equity_state

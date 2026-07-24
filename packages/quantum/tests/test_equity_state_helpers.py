@@ -33,21 +33,9 @@ from unittest.mock import MagicMock, patch
 # Stub out `alpaca.trading.requests` so tests don't require alpaca-py to
 # be installed in the test venv. The production module imports
 # GetPortfolioHistoryRequest lazily inside the weekly P&L fetcher.
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
 
-
-class _StubPortfolioHistoryRequest:
-    def __init__(self, period=None, timeframe=None, **_):
-        self.period = period
-        self.timeframe = timeframe
-
-
-_alpaca_trading_requests.GetPortfolioHistoryRequest = _StubPortfolioHistoryRequest
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+_ensure_alpaca()
 
 from packages.quantum.services import equity_state  # noqa: E402
 

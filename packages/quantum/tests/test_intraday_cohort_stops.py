@@ -25,9 +25,9 @@ import unittest
 from unittest.mock import patch
 
 # Stub alpaca-py so imports resolve in the test venv (mirrors test_force_close_path).
-sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-sys.modules.setdefault("alpaca.trading.requests", types.ModuleType("alpaca.trading.requests"))
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.jobs.handlers import intraday_risk_monitor as irm  # noqa: E402
 from packages.quantum.policy_lab.config import PolicyConfig  # noqa: E402

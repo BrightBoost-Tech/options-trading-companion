@@ -37,12 +37,9 @@ import unittest
 from unittest.mock import MagicMock
 
 # Stub alpaca-py (matches existing test-file convention).
-_alpaca_pkg = types.ModuleType("alpaca")
-_alpaca_trading = types.ModuleType("alpaca.trading")
-_alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
-sys.modules.setdefault("alpaca", _alpaca_pkg)
-sys.modules.setdefault("alpaca.trading", _alpaca_trading)
-sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
+from packages.quantum.tests._alpaca_stub import ensure_alpaca as _ensure_alpaca
+
+_ensure_alpaca()
 
 from packages.quantum.services.paper_mark_to_market_service import (  # noqa: E402
     PaperMarkToMarketService,

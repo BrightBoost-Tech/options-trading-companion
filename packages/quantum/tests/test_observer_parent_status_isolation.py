@@ -250,6 +250,51 @@ class TestTdEnqueueFailureIsolated(_ObserverIsolationBase):
         self.assertEqual(calls[0].kwargs["severity"], "warning")
 
 
+class TestDurableErrorIsRedacted(_ObserverIsolationBase):
+    def test_crash_path_broker_url_credential_redacted_before_truncation(self):
+        """The suggestions_open parent-crash path builds the durable error via
+        redact-FIRST-then-truncate. Construct an ADVERSARIAL broker-URL error
+        whose credential token straddles char 200 so a NAIVE ``str(err)[:200]``
+        would leak a token fragment; assert the durable result carries none of it.
+
+        Driven through the REAL handler: the td seam is made to RAISE (the crash
+        path's trigger by design — the seam's own try normally returns, so this
+        is the only route into the `except Exception as td_err` code), then the
+        top-level durable result is asserted."""
+        # token 'AAABBBCCCDDD' placed so its prefix lands inside raw[:200] and
+        # the trailing '@' lands past it.
+        pad = "p" * 174
+        long_err = ConnectionError(
+            f"boom {pad} redis://u:AAABBBCCCDDD@host:6379"
+        )
+        raw = str(long_err)
+        # Setup sanity: a naive truncation WOULD leak a token fragment.
+        self.assertIn("AAABBBCCC", raw[:200],
+                      "test setup not adversarial: token must straddle char 200")
+
+        client = _FakeClient(rules={"shadow_fleets": [], "risk_alerts": []})
+        with patch("packages.quantum.services.td_scan_observe."
+                   "maybe_enqueue_td_scan_observe", side_effect=long_err):
+            result = self._run(client=client)
+
+        # Live truth intact.
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["counts"]["errors"], 0)
+        self.assertEqual(result["counts"]["research_observer_failures"], 1)
+
+        durable = None
+        for cyc in result["cycle_results"]:
+            if "td_scan_observe_enqueue" in cyc:
+                durable = cyc["td_scan_observe_enqueue"]
+        self.assertIsNotNone(durable)
+        err_text = str(durable.get("error"))
+        # No token fragment survives in the durable result (redact-first worked).
+        self.assertNotIn("AAABBBCCC", err_text)
+        self.assertIn("****", err_text)
+        # Neither does the notes surface.
+        self.assertNotIn("AAABBBCCC", " ".join(result["notes"]))
+
+
 class TestFleetReadinessFailureIsolated(_ObserverIsolationBase):
     def test_fleet_readiness_read_fails_parent_still_succeeded(self):
         # td flag OFF → td no-op; fleet readiness DB read raises at deepest callee.

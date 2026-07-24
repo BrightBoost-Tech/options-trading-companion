@@ -30,6 +30,7 @@ from packages.quantum.services.research_observer_status import (
     OBSERVER_SHADOW_FLEET,
     new_research_observers_block,
     record_observer_seam,
+    redact_and_truncate,
 )
 
 JOB_NAME = "suggestions_open"
@@ -408,15 +409,22 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             parent_origin=parent_origin,
                         )
                     except Exception as td_err:
+                        # Redact BEFORE truncating: a broker URL whose '@' falls
+                        # past char 200 must not leave a partial credential.
                         _td_enq = {
                             "status": "enqueue_seam_crashed",
                             "enqueued": False,
                             "errors": 1,
                             "error_class": type(td_err).__name__,
-                            "error": str(td_err)[:200],
+                            "error": redact_and_truncate(str(td_err)),
                         }
-                        notes.append(f"td-scan-observe enqueue error: {td_err}")
+                        notes.append("td-scan-observe enqueue error (redacted)")
                     cycle_result = cycle_result or {}
+                    # Redact any observer-returned error before it becomes durable
+                    # in job_runs.result (the enqueue_failed path carries the raw
+                    # rq/redis broker-URL error).
+                    if isinstance(_td_enq, dict) and _td_enq.get("error"):
+                        _td_enq["error"] = redact_and_truncate(_td_enq["error"], 300)
                     cycle_result["td_scan_observe_enqueue"] = _td_enq
                     research_observer_failures += record_observer_seam(
                         client=client,
@@ -461,15 +469,22 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             parent_origin=parent_origin,
                         )
                     except Exception as fleet_err:
+                        # Redact BEFORE truncating (broker-URL credential safety).
                         _fleet_enq = {
                             "status": "enqueue_seam_crashed",
                             "enqueued": False,
                             "errors": 1,
                             "error_class": type(fleet_err).__name__,
-                            "error": str(fleet_err)[:200],
+                            "error": redact_and_truncate(str(fleet_err)),
                         }
-                        notes.append(f"fleet policy-eval enqueue error: {fleet_err}")
+                        notes.append("fleet policy-eval enqueue error (redacted)")
                     cycle_result = cycle_result or {}
+                    # Redact any observer-returned error before durable storage
+                    # (the fleet readiness/enqueue error carries the raw broker URL).
+                    if isinstance(_fleet_enq, dict) and _fleet_enq.get("error"):
+                        _fleet_enq["error"] = redact_and_truncate(
+                            _fleet_enq["error"], 300
+                        )
                     cycle_result["fleet_policy_eval_enqueue"] = _fleet_enq
                     research_observer_failures += record_observer_seam(
                         client=client,

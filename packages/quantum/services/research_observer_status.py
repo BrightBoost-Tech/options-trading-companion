@@ -204,17 +204,25 @@ def find_prior_research_observer_alert(
     return None
 
 
-def _redact(text: Any) -> Optional[str]:
-    """Redact secrets from observer error text BEFORE truncation (doctrine:
-    'truncate only after redaction'), via the canonical secret-shape masker."""
+def redact_and_truncate(text: Any, limit: int = 200) -> Optional[str]:
+    """Redact secrets from error text BEFORE truncation (doctrine: 'truncate only
+    after redaction'), via the canonical secret-shape masker, then slice to
+    ``limit``. Redacting the FULL string first is what makes a credential whose
+    ``@`` falls past ``limit`` (e.g. a long ``redis://user:token@host`` broker
+    URL) still fully masked. Returns ``None`` for ``None``; never raises."""
     if text is None:
         return None
     try:
         from packages.quantum.security.masking import sanitize_message
 
-        return sanitize_message(str(text))[:300]
-    except Exception:  # noqa: BLE001 — redaction must never break the alert
-        return str(text)[:300]
+        return sanitize_message(str(text))[:limit]
+    except Exception:  # noqa: BLE001 — redaction must never break the caller
+        return str(text)[:limit]
+
+
+def _redact(text: Any) -> Optional[str]:
+    """Alert-metadata variant (300-char cap). Redact-then-truncate."""
+    return redact_and_truncate(text, limit=300)
 
 
 def emit_research_observer_failure_alert(
